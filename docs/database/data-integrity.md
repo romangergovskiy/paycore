@@ -66,7 +66,7 @@ ALTER TABLE transfers.transfers ADD CONSTRAINT fk_transfers_sender_currency
 | `journal_transactions UNIQUE (reference_type, reference_id, operation, operation_seq)` | Повторное проведение одного шага (двойной capture, двойной возврат одного refund) |
 | `journal_transactions UNIQUE (reverses_journal_id)` | Двойное сторно |
 | `ledger_entries UNIQUE (journal_transaction_id, ledger_account_id)` | Дубли проводок в журнале |
-| `ledger_entries UNIQUE (ledger_account_id, account_version)` | Потерянное обновление проекции |
+| `ledger_entries UNIQUE (ledger_account_id, account_version) WHERE account_version IS NOT NULL` | Потерянное обновление проекции. Частичный индекс: у системных проводок `account_version` IS NULL, несколько NULL на одном счёте допустимы |
 | `system_balance_buckets PK (ledger_account_id, bucket_no)` | Дубли бакетов |
 | `holds UNIQUE (reference_type, reference_id)` | Два резерва на платёж |
 | `payments UNIQUE (merchant_id, idempotency_key)` | Два платежа по одному запросу |
@@ -91,9 +91,9 @@ ALTER TABLE transfers.transfers ADD CONSTRAINT fk_transfers_sender_currency
 |---|---|
 | `ledger.open_ledger_accounts(account_id, owner_type, currency)` | Создаёт пару ledger-счетов (AVAILABLE/HOLD) и строку `account_balances` |
 | `ledger.lock_account_balances(account_ids uuid[])` | Сортирует id и выполняет `SELECT … FOR UPDATE` (L5). Возвращает остатки и версии. Блокировки принадлежат транзакции вызывающего и держатся до её конца |
-| `ledger.post_journal(journal_id, operation, reference_type, reference_id, operation_seq, reverses_journal_id, description, initiated_by, accounting_date, entries jsonb, hold_action jsonb)` | Валидирует, обновляет проекции и бакеты, вставляет журнал и **все** проводки, меняет резерв. Контракт — [ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer) |
+| `ledger.post_journal(journal_id, operation, reference_type, reference_id, operation_seq, reverses_journal_id, adjustment_id, description, initiated_by, accounting_date, entries jsonb, hold_action jsonb)` | Валидирует, обновляет проекции и бакеты, вставляет журнал и **все** проводки, меняет резерв. `adjustment_id` нужен для `REVERSAL` с участием `BLOCKED`-счёта. Контракт — [ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer) |
 
-Требования к функциям: `SET search_path = pg_catalog, ledger` (защита от подмены объектов); `REVOKE EXECUTE … FROM PUBLIC`; `GRANT EXECUTE … TO paycore_app`. Тело функций проходит ревью как критичный код и покрывается интеграционными тестами из Go.
+Требования к функциям: `SET search_path = pg_catalog, ledger` (защита от подмены объектов); объекты вне схемы `ledger` (в том числе `accounts.accounts`, `accounts.currencies`) указываются с именем схемы; `REVOKE EXECUTE … FROM PUBLIC`; `GRANT EXECUTE … TO paycore_app`. Тело функций проходит ревью как критичный код и покрывается интеграционными тестами из Go.
 
 Почему этот механизм надёжен:
 
@@ -159,8 +159,8 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 | Индекс | Запрос |
 |---|---|
 | `ledger_entries (journal_transaction_id)` (ТЗ §4.7) | проводки журнала, отложенный триггер, Ledger Explorer |
-| `ledger_entries (ledger_account_id, account_version)` UNIQUE | выписка, последний `balance_after`, I-09 |
-| `ledger_entries (ledger_account_id, posted_at, id)` | обороты и баланс системного счёта за период |
+| `ledger_entries (ledger_account_id, account_version) WHERE account_version IS NOT NULL` UNIQUE | выписка, последний `balance_after`, I-09 |
+| `ledger_entries (ledger_account_id, created_at, id)` | обороты системного счёта; `posted_at` живёт на журнале, JOIN `journal_transactions` |
 | `journal_transactions (reference_type, reference_id, operation, operation_seq)` UNIQUE | идемпотентность, журналы объекта |
 | BRIN `journal_transactions (posted_at)` | отчёты за период (append-only таблица) |
 | `journal_transactions (reverses_journal_id)` UNIQUE WHERE NOT NULL | поиск сторно |
@@ -224,6 +224,8 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 Так выполняется ТЗ §2.1: даже ADMIN приложения не может изменить баланс в обход ledger. Любое движение денег — журнал через шлюз, любая ручная корректировка — maker-checker и аудит ([D-31](../architecture/decisions.md#d-31)).
 
 На этапе 3.2 роли создаёт `migrate bootstrap` (суперпользователь, `CREATE ROLE`). Goose-миграции выполняет `paycore_owner`. Приложение и интеграционные тесты подключаются только как `paycore_app`. `paycore_ledger` — `NOLOGIN`. Финансовые таблицы в этой фазе не создаются.
+
+Миграция `00001_platform_schema.sql` выдаёт `paycore_app` права `INSERT, UPDATE` на `platform.schema_info` и ставит `ALTER DEFAULT PRIVILEGES … ON TABLES` в схеме `platform`. Это шире целевой модели: будущие гранты — **по таблице**, без blanket `GRANT` на все таблицы схемы. План — [ledger-schema-review.md §6](../architecture/ledger-schema-review.md#6-план-грантов-будущих-таблиц). Саму миграцию 3.2 этот документ не меняет.
 
 ## 7. Партиционирование (после MVP)
 

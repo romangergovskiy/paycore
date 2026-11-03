@@ -9,4 +9,6 @@
 | [data-integrity.md](data-integrity.md) | CHECK, FK (включая составные по валюте), уникальность, функции-шлюзы ledger, триггеры, индексы, роли и права |
 | [concurrency.md](concurrency.md) | Уровни изоляции, порядок блокировок L1…L8, идемпотентность (SQL и 12 случаев), шаблоны транзакций, retry, outbox с lease и inbox, каталог сценариев S-01…S-28, таймауты |
 
+Ревью готовности схемы к реализации — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
+
 Финансовая модель — [../architecture/ledger-model.md](../architecture/ledger-model.md). Решения — [../architecture/decisions.md](../architecture/decisions.md), открытые вопросы — [../architecture/open-questions.md](../architecture/open-questions.md).

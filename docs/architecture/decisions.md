@@ -102,7 +102,7 @@
 
 ### D-16
 **Running balance в проводках.**
-- Для счетов клиентов и магазинов проводка хранит `account_version` и `balance_after`; действует `UNIQUE (ledger_account_id, account_version)`.
+- Для счетов клиентов и магазинов проводка хранит `account_version` и `balance_after`; действует частичный `UNIQUE (ledger_account_id, account_version) WHERE account_version IS NOT NULL`.
 - У системных счетов (бакеты, [D-02](#d-02)) этих полей нет. Их проверяют CHECK на бакетах и инвариант I-03.
 
 ---

@@ -1,6 +1,6 @@
 # Схема базы данных PostgreSQL
 
-Статус: **принято для MVP** (этап 2). Это не миграции: SQL-фрагменты иллюстративны. Миграции пишутся на этапе реализации.
+Статус: **принято для MVP** (этап 2). Это не миграции: SQL-фрагменты иллюстративны. В коде есть техническая миграция `platform` (этап 3.2); финансовые таблицы ещё не созданы. Ревью схемы — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
 
 Связанные документы: [er-diagram.md](er-diagram.md), [data-integrity.md](data-integrity.md) (CHECK, FK, индексы, права), [concurrency.md](concurrency.md), [../architecture/ledger-model.md](../architecture/ledger-model.md), [../architecture/decisions.md](../architecture/decisions.md).
 
@@ -135,7 +135,7 @@
 | balance_after | BIGINT | только пользовательские счета |
 | created_at | TIMESTAMPTZ NN | |
 
-`UNIQUE (journal_transaction_id, ledger_account_id)`; `UNIQUE (ledger_account_id, account_version)`.
+`UNIQUE (journal_transaction_id, ledger_account_id)`; частичный `UNIQUE (ledger_account_id, account_version) WHERE account_version IS NOT NULL` (системные проводки с `NULL` не входят).
 
 ### `ledger_balance_snapshots`
 
