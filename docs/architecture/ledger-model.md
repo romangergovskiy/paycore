@@ -144,7 +144,7 @@ balance(a) = \begin{cases}
 ### 7.2. Проекция бизнес-счёта
 
 - Одна строка `account_balances` на бизнес-счёт: `CHECK (available_amount >= 0 AND reserved_amount >= 0)`. Это последний рубеж против овердрафта (овердрафта в MVP нет).
-- `version` растёт на 1 при каждом изменении. Новое значение записывается в `ledger_entries.account_version`. `UNIQUE (ledger_account_id, account_version)` делает потерянное обновление невозможным.
+- `version` растёт на 1 при каждом изменении. Новое значение записывается в `ledger_entries.account_version`. Частичный `UNIQUE (ledger_account_id, account_version) WHERE account_version IS NOT NULL` делает потерянное обновление невозможным.
 - Строку блокирует `ledger.lock_account_balances` (уровень L5, [concurrency.md §3](../database/concurrency.md#3-единый-порядок-захвата-блокировок)). Изменяет её только `ledger.post_journal`.
 
 ### 7.3. Проекция системных счетов (бакеты)
@@ -170,7 +170,7 @@ JOIN ledger.ledger_accounts a ON a.id = e.ledger_account_id
 GROUP BY e.ledger_account_id;
 ```
 
-Для бизнес-счёта результат сравнивается с `account_balances` (AVAILABLE → `available_amount`, HOLD → `reserved_amount`), для системного — с `SUM` бакетов (инвариант I-03). Остаток на дату берётся из последнего `balance_after` до даты (бизнес-счета) или тем же запросом с фильтром по `posted_at` (системные).
+Для бизнес-счёта результат сравнивается с `account_balances` (AVAILABLE → `available_amount`, HOLD → `reserved_amount`), для системного — с `SUM` бакетов (инвариант I-03). Остаток на дату берётся из последнего `balance_after` до даты (бизнес-счета) или тем же запросом с `JOIN journal_transactions` и фильтром по `journal_transactions.posted_at` (системные: у `ledger_entries` колонки `posted_at` нет, есть `created_at`).
 
 ## 8. Резервирование (hold)
 
@@ -225,7 +225,7 @@ HOLD_CAPTURE:  Дт A:2110              Кт MA:2200 (amount − fee) + Кт 420
 
 ### 11.1. Go: `Ledger.Post` (концептуально)
 
-1. Принимает `operation`, `reference_type/id`, проводки `(ledger_account, side, amount)`, опционально действие над резервом (`PLACE` / `CAPTURE` / `RELEASE` / `EXPIRE` + `hold_id`, сумма, срок), описание, инициатора.
+1. Принимает `operation`, `reference_type/id`, проводки `(ledger_account, side, amount)`, опционально `adjustment_id` (заявка `manual_adjustments` для `REVERSAL` на `BLOCKED`) и действие над резервом (`PLACE` / `CAPTURE` / `RELEASE` / `EXPIRE` + `hold_id`, сумма, срок), описание, инициатора.
 2. Валидирует в домене те же правила, что и функция. Это нужно для понятных ошибок и unit-тестов без БД.
 3. Вызывает `ledger.post_journal` внутри транзакции use case (Unit of Work). Транзакцией владеет вызывающий use case.
 4. Отображает SQLSTATE функции в доменные ошибки (§11.3).
@@ -241,7 +241,8 @@ HOLD_CAPTURE:  Дт A:2110              Кт MA:2200 (amount − fee) + Кт 420
 3. Проверка статусов счетов (§11.4):
    - системные ledger-счета — `ledger_accounts.status = 'ACTIVE'`;
    - для каждого бизнес-счёта участника читается `accounts.accounts.status` через `SELECT … FOR SHARE NOWAIT`. Вызывающий уже держит эту блокировку с уровня L3, поэтому повторный захват мгновенный. Если вызывающий её не взял и строку в этот момент блокирует смена статуса, `NOWAIT` даёт ошибку, а не ожидание: функция никогда не ждёт уровень ниже текущего, и порядок блокировок не нарушается (`PC460`, баг вызывающего);
-   - для `REVERSAL` и `ADJUSTMENT` с участием `BLOCKED`-счёта функция проверяет, что `reference_type = 'ADJUSTMENT'` и заявка `ledger.manual_adjustments` с этим `reference_id` в статусе `APPROVED` (строка уже заблокирована вызывающим на L2);
+   - для `ADJUSTMENT` с участием `BLOCKED`-счёта функция проверяет, что `reference_type = 'ADJUSTMENT'` и заявка `ledger.manual_adjustments` с `id = reference_id` в статусе `APPROVED` (строка уже заблокирована вызывающим на L2);
+   - для `REVERSAL` с участием `BLOCKED`-счёта `reference_type` остаётся типом исходной операции (§6), а не `ADJUSTMENT`. Функция проверяет параметр `adjustment_id`: заявка `ledger.manual_adjustments` с этим id в статусе `APPROVED` уже заблокирована вызывающим на L2. Без `adjustment_id` или если заявка не `APPROVED` → `PC403`;
    - каждая проводка сверяется с матрицей «операция × роль счёта × статус». Нарушение → `PC403`.
 4. Отсортировать затронутые проекции: сначала бизнес-счета по `account_id` (L5; строки уже заблокированы вызывающим через `lock_account_balances`), затем системные бакеты по `(ledger_account_id, bucket_no)` (L6) — [concurrency.md §3](../database/concurrency.md#3-единый-порядок-захвата-блокировок).
 5. Обновить `account_balances` (`version + 1`, вернуть новые версию и остатки). Обновить бакеты (§7.3). Нарушение CHECK → `PC402`.

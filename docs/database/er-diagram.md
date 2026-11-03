@@ -664,6 +664,7 @@ erDiagram
 |---|---|---|
 | `journal_transactions.reference_id` | holds / transfers / refunds / test_topups / payouts / manual_adjustments | Ledger не зависит от бизнес-модулей; целостность — `UNIQUE` и инвариант «у каждой бизнес-операции есть журнал» ([ledger-model.md §12](../architecture/ledger-model.md#12-финансовые-инварианты)) |
 | `holds.reference_id` | payments | то же |
+| `payments.hold_id` | `ledger.holds` | обратная ссылка на резерв; направление зависимости payments → ledger не фиксируем FK ([D-12](../architecture/decisions.md#d-12)) |
 | `outbox_events.aggregate_id` | любой агрегат | инфраструктурная таблица |
 | `webhook_deliveries.event_id` | outbox_events | события архивируются раньше доставок |
 | `idempotency_keys.resource_id` | созданный объект | ключи удаляются по TTL |
