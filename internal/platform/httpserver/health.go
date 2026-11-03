@@ -1,7 +1,9 @@
 package httpserver
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/romangergovskiy/paycore/internal/platform/apperror"
 )
@@ -21,6 +23,14 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if !s.ready.Load() {
 		WriteError(w, r, apperror.New(apperror.KindUnavailable, apperror.CodeUnavailable, "Service is shutting down."))
 		return
+	}
+	if s.readyCheck != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.readyCheck(ctx); err != nil {
+			WriteError(w, r, apperror.Wrap(err, apperror.KindUnavailable, apperror.CodeUnavailable, "Database is unavailable."))
+			return
+		}
 	}
 	WriteJSON(w, http.StatusOK, status{Status: "ok"})
 }

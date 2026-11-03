@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,7 +39,23 @@ type Config struct {
 	Env             Env
 	HTTP            HTTP
 	Log             Log
+	Postgres        Postgres
 	ShutdownTimeout time.Duration
+}
+
+// Postgres holds pool and DSN settings. The API uses DSN (paycore_app).
+// MigrateDSN, AdminDSN and ReadonlyDSN are for cmd/migrate and tests.
+type Postgres struct {
+	DSN              string
+	MigrateDSN       string
+	AdminDSN         string
+	ReadonlyDSN      string
+	MaxConns         int32
+	MinConns         int32
+	MaxConnLifetime  time.Duration
+	MaxConnIdleTime  time.Duration
+	LockTimeout      time.Duration
+	StatementTimeout time.Duration
 }
 
 type HTTP struct {
@@ -70,11 +87,24 @@ const (
 	varShutdownTimeout  = prefix + "SHUTDOWN_TIMEOUT"
 	varLogLevel         = prefix + "LOG_LEVEL"
 	varLogFormat        = prefix + "LOG_FORMAT"
+	varPostgresDSN      = prefix + "POSTGRES_DSN"
+	varPostgresMigrate  = prefix + "POSTGRES_MIGRATE_DSN"
+	varPostgresAdmin    = prefix + "POSTGRES_ADMIN_DSN"
+	varPostgresReadonly = prefix + "POSTGRES_READONLY_DSN"
+	varPostgresMaxConns = prefix + "POSTGRES_MAX_CONNS"
+	varPostgresMinConns = prefix + "POSTGRES_MIN_CONNS"
+	varPostgresLifetime = prefix + "POSTGRES_MAX_CONN_LIFETIME"
+	varPostgresIdle     = prefix + "POSTGRES_MAX_CONN_IDLE_TIME"
+	varPostgresLock     = prefix + "POSTGRES_LOCK_TIMEOUT"
+	varPostgresStmt     = prefix + "POSTGRES_STATEMENT_TIMEOUT"
 )
 
 var known = []string{
 	varEnv, varHTTPAddr, varHTTPReadHeader, varHTTPRead, varHTTPWrite, varHTTPIdle,
 	varHTTPRequest, varHTTPMaxBodyBytes, varShutdownTimeout, varLogLevel, varLogFormat,
+	varPostgresDSN, varPostgresMigrate, varPostgresAdmin, varPostgresReadonly,
+	varPostgresMaxConns, varPostgresMinConns, varPostgresLifetime, varPostgresIdle,
+	varPostgresLock, varPostgresStmt,
 }
 
 // Load builds a Config from environ, given in the os.Environ "KEY=value" form.
@@ -101,6 +131,18 @@ func Load(environ []string) (Config, error) {
 		Log: Log{
 			Level: p.level(varLogLevel, slog.LevelInfo),
 		},
+		Postgres: Postgres{
+			DSN:              p.dsn(varPostgresDSN),
+			MigrateDSN:       p.dsn(varPostgresMigrate),
+			AdminDSN:         p.dsn(varPostgresAdmin),
+			ReadonlyDSN:      p.dsn(varPostgresReadonly),
+			MaxConns:         int32(p.positiveInt(varPostgresMaxConns, 10)),
+			MinConns:         int32(p.nonNegativeInt(varPostgresMinConns, 1)),
+			MaxConnLifetime:  p.duration(varPostgresLifetime, 30*time.Minute),
+			MaxConnIdleTime:  p.duration(varPostgresIdle, 5*time.Minute),
+			LockTimeout:      p.duration(varPostgresLock, 3*time.Second),
+			StatementTimeout: p.duration(varPostgresStmt, 5*time.Second),
+		},
 	}
 
 	switch cfg.Env {
@@ -125,6 +167,9 @@ func Load(environ []string) (Config, error) {
 	// request deadline fires.
 	if cfg.HTTP.WriteTimeout > 0 && cfg.HTTP.RequestTimeout > 0 && cfg.HTTP.WriteTimeout <= cfg.HTTP.RequestTimeout {
 		p.fail(varHTTPWrite, "must be greater than "+varHTTPRequest)
+	}
+	if cfg.Postgres.MinConns > cfg.Postgres.MaxConns {
+		p.fail(varPostgresMinConns, "must be less than or equal to "+varPostgresMaxConns)
 	}
 
 	var unknown []string
@@ -171,6 +216,32 @@ func (p *parser) duration(name string, def time.Duration) time.Duration {
 		return 0
 	}
 	return d
+}
+
+func (p *parser) dsn(name string) string {
+	v := p.str(name, "")
+	if v == "" {
+		return ""
+	}
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Host == "" {
+		p.fail(name, "must be a postgres:// URL with host, e.g. postgres://paycore_app:pass@127.0.0.1:5432/paycore")
+		return v
+	}
+	return v
+}
+
+func (p *parser) nonNegativeInt(name string, def int64) int64 {
+	v, ok := p.vars[name]
+	if !ok || v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		p.fail(name, fmt.Sprintf("must be a non-negative integer, got %q", v))
+		return 0
+	}
+	return n
 }
 
 func (p *parser) positiveInt(name string, def int64) int64 {
