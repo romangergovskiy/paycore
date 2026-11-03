@@ -223,6 +223,8 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 
 Так выполняется ТЗ §2.1: даже ADMIN приложения не может изменить баланс в обход ledger. Любое движение денег — журнал через шлюз, любая ручная корректировка — maker-checker и аудит ([D-31](../architecture/decisions.md#d-31)).
 
+На этапе 3.2 роли создаёт `migrate bootstrap` (суперпользователь, `CREATE ROLE`). Goose-миграции выполняет `paycore_owner`. Приложение и интеграционные тесты подключаются только как `paycore_app`. `paycore_ledger` — `NOLOGIN`. Финансовые таблицы в этой фазе не создаются.
+
 ## 7. Партиционирование (после MVP)
 
 Кандидаты — `ledger_entries`, `journal_transactions`, `audit_logs`, `outbox_events` по месяцам. В партиционированной таблице PK/UNIQUE должны включать ключ партиции, поэтому глобальные `UNIQUE (ledger_account_id, account_version)` и `UNIQUE (reference_type, …)` потеряют силу. Партиционирование ledger требует отдельного ADR. В MVP — индексы, BRIN и снапшоты ([D-34](../architecture/decisions.md#d-34)).

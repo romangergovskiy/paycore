@@ -24,7 +24,15 @@ func TestLoadDefaults(t *testing.T) {
 			RequestTimeout:    5 * time.Second,
 			MaxBodyBytes:      1 << 20,
 		},
-		Log:             Log{Level: slog.LevelInfo, Format: LogFormatText},
+		Log: Log{Level: slog.LevelInfo, Format: LogFormatText},
+		Postgres: Postgres{
+			MaxConns:         10,
+			MinConns:         1,
+			MaxConnLifetime:  30 * time.Minute,
+			MaxConnIdleTime:  5 * time.Minute,
+			LockTimeout:      3 * time.Second,
+			StatementTimeout: 5 * time.Second,
+		},
 		ShutdownTimeout: 20 * time.Second,
 	}
 	if cfg != want {
@@ -78,6 +86,25 @@ func TestLoadReportsAllErrors(t *testing.T) {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error does not mention %s:\n%v", name, err)
 		}
+	}
+}
+
+func TestLoadPostgresDSN(t *testing.T) {
+	cfg, err := Load([]string{
+		"PAYCORE_POSTGRES_DSN=postgres://paycore_app:secret@127.0.0.1:5432/paycore?sslmode=disable",
+		"PAYCORE_POSTGRES_MAX_CONNS=4",
+		"PAYCORE_POSTGRES_MIN_CONNS=0",
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Postgres.DSN == "" || cfg.Postgres.MaxConns != 4 || cfg.Postgres.MinConns != 0 {
+		t.Errorf("postgres: %+v", cfg.Postgres)
+	}
+
+	_, err = Load([]string{"PAYCORE_POSTGRES_DSN=localhost:5432"})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "PAYCORE_POSTGRES_DSN") {
+		t.Fatalf("err = %v, want invalid DSN", err)
 	}
 }
 

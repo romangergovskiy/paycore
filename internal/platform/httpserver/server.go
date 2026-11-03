@@ -15,9 +15,10 @@ import (
 )
 
 type Server struct {
-	srv   *http.Server
-	mux   *http.ServeMux
-	ready atomic.Bool
+	srv        *http.Server
+	mux        *http.ServeMux
+	ready      atomic.Bool
+	readyCheck func(context.Context) error
 }
 
 func New(cfg config.HTTP, log *slog.Logger) *Server {
@@ -63,6 +64,10 @@ func (s *Server) Serve(ln net.Listener) error {
 // SetReady controls /readyz; it is switched off at the start of shutdown so
 // that a load balancer stops routing new traffic.
 func (s *Server) SetReady(ready bool) { s.ready.Store(ready) }
+
+// SetReadyCheck, if set, is called from /readyz after the process-level ready
+// flag. Use it for a database ping. It must be set before Serve.
+func (s *Server) SetReadyCheck(fn func(context.Context) error) { s.readyCheck = fn }
 
 // Shutdown stops accepting connections and waits for active requests until
 // ctx is done.

@@ -95,6 +95,16 @@ func TestHealth(t *testing.T) {
 	if rec := serve(s, http.MethodGet, "/livez", nil, nil); rec.Code != http.StatusOK {
 		t.Errorf("/livez while draining = %d", rec.Code)
 	}
+
+	s.SetReady(true)
+	s.SetReadyCheck(func(context.Context) error { return context.DeadlineExceeded })
+	rec = serve(s, http.MethodGet, "/readyz", nil, nil)
+	if rec.Code != http.StatusServiceUnavailable || decodeError(t, rec).Code != apperror.CodeUnavailable {
+		t.Errorf("/readyz with failed check = %d %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "deadline") {
+		t.Error("ping error leaked to the client")
+	}
 }
 
 func TestNotFoundAndMethodNotAllowedAreJSON(t *testing.T) {

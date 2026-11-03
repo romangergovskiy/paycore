@@ -1,6 +1,6 @@
 # PayCore — модель данных PostgreSQL
 
-Статус: **принято для MVP**. Миграций пока нет (появятся на этапе 3.2, Goose — [D-38](../architecture/decisions.md#d-38)). SQL-фрагменты в этих документах иллюстративны.
+Статус: **принято для MVP**. SQL-фрагменты в этих документах иллюстративны. В коде есть техническая миграция `migrations/00001_platform_schema.sql` (схема `platform`, без финансовых таблиц). Роли создаёт `cmd/migrate bootstrap` под суперпользователем; Goose идёт от `paycore_owner` ([D-33](../architecture/decisions.md#d-33), [D-38](../architecture/decisions.md#d-38)).
 
 | Документ | Содержание |
 |---|---|

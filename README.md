@@ -2,7 +2,7 @@
 
 Демонстрационная платёжная инфраструктура с double-entry ledger: Go, PostgreSQL, модульный монолит. Деньги виртуальные, соответствие PCI DSS и банковским требованиям не заявляется.
 
-Статус: **этап 3.1 — каркас сервиса** (конфигурация, логи, HTTP-сервер, graceful shutdown, формат ошибок). Бизнес-модулей, БД и Ledger в коде ещё нет.
+Статус: **этап 3.2 — PostgreSQL, Goose, роли БД**. Бизнес-модулей и финансовых таблиц Ledger в коде ещё нет.
 
 ## Документация
 
@@ -12,7 +12,7 @@
 
 ## Запуск
 
-Нужен Go 1.24+.
+Нужен Go 1.24+. Для интеграционных тестов — Docker (PostgreSQL 16 в testcontainers).
 
 ```sh
 cp .env.example .env   # необязательно: все переменные имеют значения по умолчанию
@@ -20,23 +20,36 @@ make run               # http://localhost:8080/livez
 make check             # gofmt, go vet, staticcheck (если установлен), тесты с -race
 ```
 
+Первый запуск с БД (роли, затем миграции):
+
+```sh
+make migrate-bootstrap
+make migrate-up
+make migrate-status
+```
+
+Откат одной миграции: `make migrate-down`. Для финансовых таблиц down-миграций не будет.
+
 | Путь | Назначение |
 |---|---|
 | `GET /livez` | Процесс жив; зависимости не проверяет |
-| `GET /readyz` | Готов принимать трафик; `503` после начала остановки |
+| `GET /readyz` | Готов принимать трафик; `503` при остановке или если БД недоступна |
 
 Коды выхода: `0` — штатная остановка (SIGINT/SIGTERM), `1` — ошибка работы, `2` — неверная конфигурация.
 
 ## Структура
 
 ```text
-cmd/api/                  точка входа
+cmd/api/                  HTTP API
+cmd/migrate/              bootstrap ролей и Goose
 internal/app/             сборка зависимостей и жизненный цикл
 internal/platform/
   config/                 PAYCORE_* из окружения
   logging/                log/slog
   apperror/               ошибки приложения и JSON-формат ошибок API
   httpserver/             HTTP-сервер, middleware, health
+  postgres/               пул pgx, bootstrap, миграции
+migrations/               SQL Goose (пока только техническая схема platform)
 docs/                     проектная документация
 ```
 
