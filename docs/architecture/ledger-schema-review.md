@@ -20,9 +20,9 @@
 | `REVERSAL` на `BLOCKED` требовал `reference_type = 'ADJUSTMENT'` | **Исправлено:** `reference_type` остаётся исходным; связь с заявкой — параметр `adjustment_id` |
 | Гранты `paycore_app` на `platform.schema_info` и `DEFAULT PRIVILEGES` | **Расхождение с 3.2.** План — §6. Саму миграцию `00001` здесь не меняем |
 | `search_path` у `SECURITY DEFINER` | `pg_catalog, ledger, pg_temp` (`pg_temp` последним). Вне `ledger` — только полностью квалифицированные имена |
-| Владение ledger-функциями | Goose от `paycore_owner` → `ALTER FUNCTION … OWNER TO paycore_ledger` (§6.4). Пробел прав PostgreSQL для этой передачи — §6.5, модель D-33 не меняется |
+| Владение ledger-функциями | **Решено в [D-40](decisions.md#d-40):** Goose от `paycore_owner` → `REVOKE`/`GRANT EXECUTE` → `ALTER FUNCTION … OWNER TO paycore_ledger`. Bootstrap: `GRANT paycore_ledger TO paycore_owner WITH INHERIT FALSE`. Миграция функций: `GRANT CREATE ON SCHEMA ledger TO paycore_ledger`. D-33 не меняется |
 | Q-12, Q-13(а), Q-16, Q-20, Q-30 | Не блокируют DDL таблиц Ledger; Q-13(а) — формат номера можно добавить CHECK позже |
-| Функция `post_journal`, бизнес-модули | Следующий этап, не этот PR. Передачу владельца функции решить до миграции функций, не до таблиц |
+| Функция `post_journal`, бизнес-модули | Шлюз — этап 3.4 (`00004`, [D-40](decisions.md#d-40)). Go-сервис Ledger, HTTP, Payments, Transfers — следующие этапы |
 
 ---
 
@@ -142,22 +142,21 @@ Goose идёт от `paycore_owner` ([D-33](decisions.md#d-33), [D-38](decisions
 4. `ALTER FUNCTION … OWNER TO paycore_ledger`.
 5. После передачи проверить: владелец функции — `paycore_ledger`; у `PUBLIC` нет `EXECUTE`; `EXECUTE` есть у `paycore_app`; у `paycore_ledger` на таблицах — гранты §6.2 (ими работает тело `SECURITY DEFINER`); схемы и таблицы по-прежнему принадлежат `paycore_owner`; `paycore_ledger` остаётся `NOLOGIN`.
 
-ACL функции сохраняются при смене владельца, поэтому `REVOKE`/`GRANT EXECUTE` делают **до** `ALTER FUNCTION … OWNER TO`. Неподтверждённый SQL, который менял бы членство ролей или выдавал `CREATE` на схему, в этот план не входит — см. §6.5.
+ACL функции сохраняются при смене владельца, поэтому `REVOKE`/`GRANT EXECUTE` делают **до** `ALTER FUNCTION … OWNER TO`. Членство ролей и `CREATE` на схеме — [D-40](decisions.md#d-40) и §6.5.
 
-### 6.5. Проблема передачи владельца функции
+### 6.5. Передача владельца функции — решено ([D-40](decisions.md#d-40))
 
 `ALTER FUNCTION … OWNER TO paycore_ledger` от имени `paycore_owner` в PostgreSQL проходит, только если выполнены оба условия:
 
 - текущая роль — член новой роли-владельца;
 - новая роль имеет привилегию `CREATE` на схеме, где лежит функция.
 
-Bootstrap 3.2 и [D-33](decisions.md#d-33) этого не делают: `paycore_owner` не член `paycore_ledger`, у `paycore_ledger` на схемах только будущий `USAGE`, не `CREATE`. Это не ломает модель четырёх ролей и не мешает DDL таблиц. Это пробел **процедуры миграции функций**. Варианты закрытия (ни один здесь не принимается и в SQL не фиксируется):
+Принято, без смены четырёх ролей [D-33](decisions.md#d-33) и без правки `00002`/`00003`:
 
-- выдать `paycore_ledger` `CREATE` на схему `ledger` — тогда `ALTER OWNER` проходит, но роль сможет создавать объекты в схеме (прямой вход по-прежнему закрыт `NOLOGIN`);
-- `GRANT paycore_ledger TO paycore_owner`, чтобы owner мог `ALTER OWNER` / `SET ROLE`;
-- создавать или передавать функции не из Goose, а суперпользовательским bootstrap.
+1. Bootstrap (суперпользователь): `GRANT paycore_ledger TO paycore_owner WITH INHERIT FALSE`.
+2. Миграция функций: `GRANT CREATE ON SCHEMA ledger TO paycore_ledger`; `CREATE FUNCTION` от `paycore_owner`; `REVOKE EXECUTE FROM PUBLIC`; `GRANT EXECUTE TO paycore_app`; `ALTER FUNCTION … OWNER TO paycore_ledger`.
 
-Решение нужно до миграции `post_journal` и соседних функций, не до создания таблиц. Модель ролей D-33 не меняется.
+`CREATE` на схеме — известный компромисс: `paycore_ledger` теоретически может создавать объекты в `ledger`, но остаётся `NOLOGIN`, а тела шлюзовых функций не выполняют DDL. `INHERIT FALSE` не даёт `paycore_owner` автоматически права DML роли `paycore_ledger` (как владелец таблиц owner и так может писать в них напрямую; финансовый путь приложения по-прежнему только `EXECUTE`).
 
 ---
 

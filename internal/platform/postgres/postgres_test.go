@@ -89,7 +89,7 @@ func TestMigrationsAndRoles(t *testing.T) {
 		t.Fatalf("up: %v", err)
 	}
 	v, err := CurrentVersion(ctx, c.owner)
-	if err != nil || v != 3 {
+	if err != nil || v != 4 {
 		t.Fatalf("version after up = %d, %v", v, err)
 	}
 	assertSchemaInfo(t, ctx, c.app, true)
@@ -104,7 +104,7 @@ func TestMigrationsAndRoles(t *testing.T) {
 			t.Fatalf("up: %v", err)
 		}
 		v2, err := CurrentVersion(ctx, c2.owner)
-		if err != nil || v2 != 3 {
+		if err != nil || v2 != 4 {
 			t.Fatalf("version after up = %d, %v", v2, err)
 		}
 		assertSchemaInfo(t, ctx, c2.app, true)
@@ -153,6 +153,30 @@ func TestMigrationsAndRoles(t *testing.T) {
 		}
 		if _, err := conn.Exec(ctx, `INSERT INTO platform.schema_info(key, value) VALUES ('x','y')`); err == nil {
 			t.Error("readonly inserted")
+		}
+	})
+
+	t.Run("d40 owner membership without inherit", func(t *testing.T) {
+		conn := mustConnect(t, ctx, c.owner)
+		defer conn.Close(ctx)
+		var inherit bool
+		if err := conn.QueryRow(ctx, `
+			SELECT m.inherit_option
+			  FROM pg_auth_members m
+			  JOIN pg_roles r ON r.oid = m.roleid
+			  JOIN pg_roles u ON u.oid = m.member
+			 WHERE r.rolname = 'paycore_ledger' AND u.rolname = 'paycore_owner'`).Scan(&inherit); err != nil {
+			t.Fatalf("membership: %v", err)
+		}
+		if inherit {
+			t.Fatal("paycore_owner inherits paycore_ledger")
+		}
+		var canCreate bool
+		if err := conn.QueryRow(ctx, `SELECT has_schema_privilege('paycore_ledger', 'ledger', 'CREATE')`).Scan(&canCreate); err != nil {
+			t.Fatal(err)
+		}
+		if !canCreate {
+			t.Fatal("paycore_ledger lacks CREATE on ledger")
 		}
 	})
 

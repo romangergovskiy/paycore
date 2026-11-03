@@ -1,6 +1,6 @@
 # Схема базы данных PostgreSQL
 
-Статус: **принято для MVP** (этап 2). SQL-фрагменты иллюстративны. В коде миграции `00002_accounts.sql` и `00003_ledger.sql` создают таблицы `accounts` и `ledger` (этап 3.3); функций `post_journal` нет. У финансовых миграций нет Goose Down ([D-38](../architecture/decisions.md#d-38)). Ревью схемы — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
+Статус: **принято для MVP** (этап 2). SQL-фрагменты иллюстративны. В коде миграции `00002_accounts.sql` и `00003_ledger.sql` создают таблицы `accounts` и `ledger` (этап 3.3); `00004_ledger_functions.sql` создаёт шлюзовые функции (этап 3.4, [D-40](../architecture/decisions.md#d-40)). У финансовых миграций нет Goose Down ([D-38](../architecture/decisions.md#d-38)). Ревью схемы — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
 
 Связанные документы: [er-diagram.md](er-diagram.md), [data-integrity.md](data-integrity.md) (CHECK, FK, индексы, права), [concurrency.md](concurrency.md), [../architecture/ledger-model.md](../architecture/ledger-model.md), [../architecture/decisions.md](../architecture/decisions.md).
 
@@ -121,6 +121,8 @@
 | posted_at | TIMESTAMPTZ NN | |
 
 `UNIQUE (reference_type, reference_id, operation, operation_seq)`.
+
+`adjustment_id` — аргумент `ledger.post_journal`, **не** колонка этой таблицы (миграция `00003` не расширяется). Сравнение на повторе `REVERSAL` и план колонки — [ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer).
 
 ### `ledger_entries` — append-only
 

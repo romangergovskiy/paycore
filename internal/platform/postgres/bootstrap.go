@@ -92,6 +92,11 @@ func Bootstrap(ctx context.Context, adminDSN, migrateDSN, appDSN, readonlyDSN st
 		END $do$`); err != nil {
 		return fmt.Errorf("ensure %s: %w", RoleLedger, err)
 	}
+	// D-40: membership lets paycore_owner ALTER FUNCTION OWNER TO paycore_ledger.
+	// INHERIT FALSE keeps owner from silently receiving ledger table DML grants.
+	if _, err := conn.Exec(ctx, `GRANT paycore_ledger TO paycore_owner WITH INHERIT FALSE`); err != nil {
+		return fmt.Errorf("grant %s to %s: %w", RoleLedger, RoleOwner, err)
+	}
 
 	if _, err := conn.Exec(ctx, `ALTER ROLE paycore_app SET idle_in_transaction_session_timeout = '30s'`); err != nil {
 		return fmt.Errorf("set idle_in_transaction_session_timeout: %w", err)
