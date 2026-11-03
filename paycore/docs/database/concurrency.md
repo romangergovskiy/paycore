@@ -1,138 +1,206 @@
 # Транзакции, конкурентный доступ и защита от двойного списания
 
-Статус: **проект**. SQL — иллюстративный псевдокод шагов, а не реализация. Связанные документы: [data-integrity.md](data-integrity.md), [../architecture/money-flows.md](../architecture/money-flows.md), [../architecture/financial-invariants-testing.md](../architecture/financial-invariants-testing.md).
+Статус: **принято для MVP** (этап 2). SQL здесь — иллюстративный псевдокод шагов, не миграции. Связанные документы: [data-integrity.md](data-integrity.md), [../architecture/money-flows.md](../architecture/money-flows.md), [../architecture/decisions.md](../architecture/decisions.md), [../architecture/financial-invariants-testing.md](../architecture/financial-invariants-testing.md).
 
 ## 1. Цели
 
-1. Ни при какой интерлинии (interleaving) запросов доступный остаток не уходит ниже нуля (ТЗ §2.5: два перевода по 8 000 ₽ при 10 000 ₽).
-2. Один бизнес-шаг даёт ровно один финансовый эффект при любых повторах: клиента, сервера, Kafka или воркера.
-3. Отсутствие deadlock по построению (единый порядок блокировок), а при их случайном появлении — безопасный повтор.
-4. Короткие транзакции: внутри транзакции нет сетевых вызовов во внешние системы.
+1. Доступный остаток не уходит ниже нуля ни при каком чередовании запросов (ТЗ §2.5: два перевода по 8 000 ₽ при 10 000 ₽). То же для системных счетов.
+2. Один бизнес-шаг даёт ровно один финансовый эффект при любых повторах (клиент, сервер, worker, scheduler).
+3. Deadlock исключён по построению единым порядком блокировок. Если deadlock всё же возник, повтор безопасен.
+4. Транзакции короткие. Внутри них нет сетевых вызовов (Kafka, webhook, внешние системы).
 
-## 2. Уровни изоляции ([D-04](../architecture/open-questions.md#d-04))
+## 2. Уровни изоляции ([D-04](../architecture/decisions.md#d-04))
 
 | Операция | Уровень | Механизм |
 |---|---|---|
-| Денежные операции (перевод, авторизация, capture, void, возврат, пополнение, выплата, корректировка) | **READ COMMITTED** | Явные `SELECT … FOR UPDATE / FOR SHARE` в фиксированном порядке и условные `UPDATE … WHERE status = …`. CHECK `>= 0` — последний рубеж |
-| Изменение статуса счёта | READ COMMITTED | `UPDATE accounts` берёт блокировку строки, конфликтующую с `FOR SHARE` из денежных операций |
-| Проверка инвариантов, пробный баланс, отчёты за период | **REPEATABLE READ, READ ONLY** | Один согласованный снимок на все запросы отчёта |
-| Сверка проекции с ledger (I-03) | REPEATABLE READ, READ ONLY | Снимок; ложные расхождения на «живых» счетах исключаются сравнением по `account_version` |
-| Лимиты на пользователя по нескольким счетам ([Q-12](../architecture/open-questions.md#q-12)) | READ COMMITTED + блокировка строки-счётчика лимита **или** SERIALIZABLE для этого use case | См. сценарий S-20 |
+| Денежные операции: пополнение, перевод, подтверждение checkout, capture, void, истечение, возврат, выплата, корректировка | **READ COMMITTED** | Явные блокировки в порядке §3, условные `UPDATE … WHERE status = …`, CHECK. Проекции меняются только в `ledger.post_journal` |
+| Изменение статуса счёта | READ COMMITTED | `UPDATE accounts` конфликтует с `FOR SHARE` денежных операций |
+| Отчёты, пробный баланс, проверка инвариантов | **REPEATABLE READ READ ONLY** | Один согласованный снимок |
+| Захват пачек outbox, webhook и задач истечения | READ COMMITTED | `FOR UPDATE SKIP LOCKED` + lease |
 
-Почему не SERIALIZABLE везде. Он корректен «из коробки», но при конкуренции за один счёт даёт много откатов `40001`. Кроме того, поведение зависит от планов запросов (SIRead-блокировки на индексах), и под нагрузкой его трудно предсказать. Явные блокировки в READ COMMITTED дают ожидание вместо отката и прозрачны для разбора на собеседовании. Retry на `40001` всё равно реализуется (§6): он нужен для REPEATABLE READ-участков и для перехода на SERIALIZABLE, если его выберут.
+Почему не SERIALIZABLE везде. Он корректен без явных блокировок, но на горячих счетах даёт много откатов `40001`, а поведение зависит от планов запросов. Явные блокировки дают ожидание вместо отката и легко объясняются.
 
-Почему FOR UPDATE, а не только optimistic `version`. Оптимистичная блокировка при конкуренции на одном счёте превращается в шторм повторов. `version` сохраняется: она нужна для `account_version` в проводках ([D-16](../architecture/open-questions.md#d-16)) и для ETag в API.
+Почему не только optimistic `version`. Это шторм повторов при конкуренции на одном счёте. `version` остаётся для `account_version` в проводках и для ETag.
 
-Чтения для принятия решений (достаточность средств, статус) выполняются **только на primary и только под блокировкой**. Реплика годится для выписок и отчётов ([R-15](../architecture/spec-analysis.md#3-архитектурные-риски)).
+Проверки достаточности средств и статуса выполняются **только на primary и только под блокировкой**. Реплика годится для выписок и отчётов.
 
 ## 3. Единый порядок захвата блокировок
 
-Все use case берут блокировки строго в этом порядке. Внутри уровня — по возрастанию `id`.
+Все use case берут блокировки строго в этом порядке. Внутри уровня — по возрастанию ключа. Уровень можно пропустить, но нельзя вернуться на предыдущий.
 
-| Уровень | Объект | Режим |
-|---|---|---|
-| L1 | `idempotency_keys` (вставка) | неявная блокировка уникального индекса |
-| L2 | Бизнес-агрегат: `payments` / `transfers` / `manual_adjustments` / `payouts` | `FOR UPDATE` |
-| L3 | `holds` | `FOR UPDATE` |
-| L4 | `accounts` (все участники) | `FOR SHARE`, по возрастанию `id` |
-| L5 | `account_balances` (все участники) | `FOR UPDATE`, по возрастанию `account_id` |
-| L6 | Вставки: журнал, проводки, история, outbox, аудит; `UPDATE idempotency_keys` | — |
+| Уровень | Объект | Режим | Кто берёт |
+|---|---|---|---|
+| **L1** | `platform.idempotency_keys` (вставка ключа) | ожидание на уникальном индексе | use case API |
+| **L2** | Бизнес-агрегат: `payments` (вместе с его `checkout_sessions`), `manual_adjustments` | `FOR UPDATE` | use case |
+| **L3** | `accounts.accounts` — все участники | `FOR SHARE`, по `id` | use case |
+| **L4** | `limits.limit_counters` — счётчики лимитов | `INSERT … ON CONFLICT DO NOTHING` + `FOR UPDATE`, по `(user_id, currency, limit_type, period_start)` | use case |
+| **L5** | `ledger.account_balances` — все участники | `FOR UPDATE`, по `account_id` | `ledger.lock_account_balances` (повторно в `post_journal`, блокировка уже наша) |
+| **L6** | `ledger.system_balance_buckets` | увеличение — один бакет; уменьшение — все бакеты счёта; по `(ledger_account_id, bucket_no)` | `ledger.post_journal` |
+| **L7** | `ledger.holds` | условный `UPDATE … WHERE status = 'ACTIVE'` | `ledger.post_journal` |
+| **L8** | Вставки: журнал, проводки, бизнес-объекты, история, outbox, аудит; `UPDATE idempotency_keys → COMPLETED` | новые строки / уже захваченная строка | use case + функция |
 
-Системные ledger-счета не блокируются: у них нет проекции ([D-02](../architecture/open-questions.md#d-02)).
+На этапе 2 добавлены два уровня: **L4** (лимиты, [D-24](../architecture/decisions.md#d-24)) и **L6** (бакеты системных счетов, [D-02](../architecture/decisions.md#d-02)). Уровень `holds` перенесён в L7: резерв меняется только внутри `post_journal`, и все его переходы уже сериализованы блокировкой платежа на L2.
 
-Следствия:
+### 3.1. Матрица «сценарий × уровни»
 
-- Встречные переводы A→B и B→A блокируют `account_balances` в одинаковом порядке (min(id), затем max(id)), поэтому deadlock невозможен (S-07).
-- Фоновые задачи (истечение резервов) **не** начинают с блокировки `holds`. Сначала они выбирают кандидатов без блокировки, затем в отдельной транзакции блокируют L2 (платёж), потом L3 (hold) и перепроверяют статус (S-05).
-- Порядок проверяется code review и конкурентными тестами. В Go все блокировки берёт один компонент — Unit of Work сервиса проведения: он получает набор `account_id` и сам их сортирует.
+| Сценарий | L1 | L2 | L3 | L4 | L5 | L6 | L7 |
+|---|---|---|---|---|---|---|---|
+| Тестовое пополнение | ✓ | | клиент | лимит пополнения | клиент | 1100: один бакет | |
+| Перевод другому клиенту | ✓ | | отправитель, получатель | суточный лимит отправителя | оба | 4100: один бакет | |
+| Перевод между своими счетами | ✓ | | оба | — | оба | — | |
+| Создание платежа | ✓ | | (счёт магазина) | | | | |
+| Подтверждение checkout | ✓ | платёж + checkout | покупатель, магазин | суточный лимит покупателя | покупатель | | вставка резерва |
+| Capture | ✓ | платёж | покупатель, магазин | | покупатель, магазин | 4200: один бакет | резерв |
+| Void | ✓ | платёж | покупатель | возврат лимита (тот же период) | покупатель | | резерв |
+| Истечение резерва (scheduler) | | платёж | покупатель | возврат лимита | покупатель | | резерв |
+| Истечение checkout (scheduler) | | платёж + checkout | | | | | |
+| Возврат | ✓ | платёж | покупатель, магазин | | покупатель, магазин | | |
+| Выплата | ✓ | | магазин | | магазин | 1100: **все** бакеты | |
+| Корректировка / сторно | ✓ | заявка | участники | | участники | затронутые счета | |
+| Блокировка счёта | ✓ | | `UPDATE` (эксклюзивно) | | | | |
 
-## 4. Идемпотентность
+Доказательство отсутствия deadlock. Каждая транзакция берёт блокировки в одном глобальном порядке:
 
-Решение — [D-07](../architecture/open-questions.md#d-07). Два уровня:
+\[
+(L1) < (L2,\ id) < (L3,\ id) < (L4,\ key) < (L5,\ account\_id) < (L6,\ account,\ bucket) < (L7,\ id)
+\]
 
-1. **HTTP-уровень** — `platform.idempotency_keys`, заголовок `Idempotency-Key` (ТЗ §5). Обязателен для всех `POST`, которые двигают деньги или создают денежные объекты.
-2. **Бизнес-уровень** — уникальные ограничения в доменных таблицах и в ledger ([data-integrity.md §3](data-integrity.md#3-уникальность-защита-от-повторов)). Работает даже при ошибке в HTTP-слое и для внутренних вызовов (воркеры, scheduler, Kafka).
+Ожидание возможно только «вверх» по этому порядку, поэтому цикл ожиданий невозможен. Отдельно:
 
-### 4.1. Протокол HTTP-идемпотентности для однотранзакционных операций
+- увеличение системного счёта держит один бакет и после него ждёт только L7/L8;
+- уменьшение берёт все бакеты по возрастанию;
+- блокировка счёта держит только L3;
+- фоновые задачи не начинают с блокировки `holds`: кандидатов выбирают без блокировок, затем идут L2 → ….
 
-Ключ записывается **в той же транзакции**, что и бизнес-эффект:
+В Go блокировки L3–L5 берёт один компонент (Unit of Work сервиса проведения), он сам сортирует ключи. L6–L7 берёт только SQL-функция.
+
+## 4. Идемпотентность HTTP
+
+Решение [D-07](../architecture/decisions.md#d-07). Второй уровень защиты — бизнес-`UNIQUE` ([data-integrity.md §3](data-integrity.md#3-уникальность-защита-от-повторов)).
+
+### 4.1. Правила
+
+- `Idempotency-Key` **обязателен** для всех `POST`, создающих денежный объект или двигающих деньги: `/transfers`, `/payments`, `/payments/{id}/capture`, `/payments/{id}/cancel`, `/payments/{id}/refunds`, `/checkout/{token}/confirm`, `/payouts`, `/simulator/topups`. Ключ — 1…255 печатных ASCII-символов. Без ключа — `400 IDEMPOTENCY_KEY_REQUIRED`.
+- **Область ключа (scope):** `user:<id>` для клиента, `merchant:<id>` для магазина. Ключи API ротируются, поэтому scope — сам магазин. Уникальность — `(scope, endpoint, key)`, где `endpoint` — метод + шаблон маршрута (`POST /api/v1/payments/{id}/refunds`).
+- **`request_hash`** = SHA-256 от канонического представления: `endpoint` + значения параметров пути + тело в каноническом JSON (ключи отсортированы, без пробелов). Заголовки не входят.
+- **Статусы строки:** `IN_PROGRESS` (вставлена, операция выполняется) и `COMPLETED` (сохранён итоговый ответ). В MVP оба статуса пишутся **в одной транзакции** с бизнес-эффектом, поэтому другие сессии никогда не видят закоммиченный `IN_PROGRESS` (§4.4).
+- **Срок хранения:** `expires_at = created_at + 24 ч` — гарантированный срок повтора исходного ответа. Очистка удаляет строки с `expires_at < now()`. После удаления ключа повтор с ним наталкивается на бизнес-`UNIQUE` и получает `409 IDEMPOTENCY_KEY_REUSED`, но не вторую операцию.
+- Сохраняются ответы `2xx` и бизнес-отказы `4xx` (например, `422 INSUFFICIENT_FUNDS`, вместе с объектом `FAILED`). Ответы `5xx` и технические откаты не сохраняются: ключ откатывается вместе с транзакцией.
+
+### 4.2. Последовательность SQL
 
 ```text
-BEGIN;
-  INSERT INTO platform.idempotency_keys (id, scope, endpoint, key, request_hash, status, expires_at)
-  VALUES (…, 'IN_PROGRESS', now() + TTL)
-  ON CONFLICT (scope, endpoint, key) DO NOTHING
-  RETURNING id;
-  -- (a) строка вставлена → выполняем бизнес-операцию (§5)
-  --     … UPDATE idempotency_keys SET status='COMPLETED', response_code, response_body, resource_id
-  -- (b) конфликт → SELECT … FROM idempotency_keys WHERE (scope, endpoint, key) = (…):
-  --     request_hash ≠ текущему → ROLLBACK; 422 IDEMPOTENCY_KEY_MISMATCH (ТЗ §5: «конфликт», [Q-10])
-  --     status = COMPLETED     → ROLLBACK; вернуть сохранённый ответ (тот же код и тело)
-  --     status = IN_PROGRESS   → ROLLBACK; 409 REQUEST_IN_PROGRESS + Retry-After
-COMMIT;
+-- до транзакции: scope, endpoint, key, request_hash; id ключа = UUIDv7
+BEGIN ISOLATION LEVEL READ COMMITTED;
+SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '5s';
+
+-- (1) захват ключа
+INSERT INTO platform.idempotency_keys
+       (id, scope, endpoint, key, request_hash, status, created_at, expires_at)
+VALUES ($id, $scope, $endpoint, $key, $hash, 'IN_PROGRESS', now(), now() + interval '24 hours')
+ON CONFLICT (scope, endpoint, key) DO NOTHING
+RETURNING id;
+
+-- (2а) строка вставлена → мы владельцы ключа:
+--      бизнес-операция (§5) — L2…L8 в этой же транзакции
+--      UPDATE platform.idempotency_keys
+--         SET status = 'COMPLETED', response_code = $code, response_body = $body,
+--             resource_type = $rt, resource_id = $rid, completed_at = now()
+--       WHERE id = $id;
+--      COMMIT;  → вернуть ответ клиенту
+
+-- (2б) 0 строк → ключ уже есть и ЗАКОММИЧЕН (см. §4.3):
+SELECT request_hash, status, response_code, response_body
+  FROM platform.idempotency_keys
+ WHERE scope = $scope AND endpoint = $endpoint AND key = $key;
+ROLLBACK;
+--      request_hash ≠ $hash          → 409 IDEMPOTENCY_KEY_REUSED (операция не выполняется)
+--      status = 'COMPLETED'          → вернуть сохранённые response_code и response_body,
+--                                      заголовок Idempotent-Replayed: true
+--      status = 'IN_PROGRESS'        → 409 REQUEST_IN_PROGRESS, Retry-After: 1
+--                                      (в MVP недостижимо, защитная ветка)
 ```
 
-Свойства:
+### 4.3. Поведение второго запроса
 
-- Два параллельных запроса с одним ключом: второй `INSERT` **ждёт** на уникальном индексе, пока первая транзакция не завершится. Если первая закоммитилась, второй получает конфликт и видит `COMPLETED` → повтор ответа. Если откатилась, второй вставляет ключ и выполняет операцию сам. Двойной эффект невозможен (S-02).
-- Статус `IN_PROGRESS` виден снаружи только в **многотранзакционных** сценариях (внешний провайдер, §7.3). Там ключ коммитится первым шагом, а `locked_until` позволяет перехватить зависший запрос после таймаута.
-- Сохраняются и бизнес-отказы (`FAILED`, `422 INSUFFICIENT_FUNDS`): повтор с тем же ключом вернёт тот же отказ, даже если средства уже появились. Технические ошибки (`5xx`, откат транзакции) не сохраняются: ключ откатывается вместе с транзакцией, и повтор выполнит операцию заново.
-- `request_hash` — SHA-256 канонического JSON тела плюс значимые параметры пути. Заголовки в хеш не входят.
-- `scope`: для клиента — `user:<id>`, для мерчанта — `merchant:<id>` (или `api_key:<id>`, [Q-10](../architecture/open-questions.md#q-10)).
+Ключевое свойство PostgreSQL: `INSERT … ON CONFLICT` при **незакоммиченной** конфликтующей вставке другой транзакции **ждёт её завершения**. Затем:
 
-### 4.2. Бизнес-идемпотентность внутренних шагов
+- если та закоммитилась — выполняется ветка `DO NOTHING` (0 строк) → (2б);
+- если откатилась — вставка проходит → (2а).
 
-- `Ledger.Post` при конфликте `UNIQUE (reference_type, reference_id, operation, operation_seq)` возвращает существующий журнал. Повторный вызов capture из воркера или саги безопасен.
-- Переходы статуса — условные: `UPDATE payments SET status = 'CAPTURED', version = version + 1 WHERE id = $1 AND status = 'AUTHORIZED'`. 0 строк означает, что переход уже сделан или запрещён; решение принимается по текущему статусу.
+| # | Ситуация | Что происходит | Итог |
+|---|---|---|---|
+| 1 | Два одновременных запроса, один ключ, одно тело | B ждёт на шаге (1), пока A не завершится. A коммитит операцию и `COMPLETED`. B получает 0 строк → читает `COMPLETED` → повторяет ответ A | **Одна** операция, два одинаковых ответа |
+| 2 | То же, но A откатилась (ошибка, `40001` после исчерпания повторов, падение) | Вставка B проходит, B выполняет операцию сама | Одна операция (от B) |
+| 3 | B ждёт дольше `lock_timeout` (A долгая) | `55P03` → B откатывается → `409 REQUEST_IN_PROGRESS`, `Retry-After` | Клиент повторит позже и получит результат A |
+| 4 | Тот же ключ, другое тело, одновременно | B ждёт A → 0 строк → `request_hash` ≠ → `409 IDEMPOTENCY_KEY_REUSED` | Операция только от A |
+| 5 | Тот же ключ, другое тело, позже | Сразу 0 строк → `409 IDEMPOTENCY_KEY_REUSED` | — |
+| 6 | Повтор после успешного `COMMIT`: клиент не получил ответ (таймаут, обрыв, падение приложения после коммита) | 0 строк → `COMPLETED` → сохранённый ответ | Второй операции нет |
+| 7 | Обрыв соединения во время `COMMIT` (исход неизвестен серверу) | Сервер возвращает `5xx` и **не** повторяет сам. Клиент повторяет с тем же ключом: если коммит прошёл — случай 6, если нет — случай 2 | Ровно одна операция |
+| 8 | Приложение упало **до** `COMMIT` | Соединение закрыто → PostgreSQL откатывает транзакцию, ключ исчезает. Повтор клиента выполняет операцию | Ровно одна операция |
+| 9 | Сетевой разрыв без закрытия TCP (зависшая сессия) | `idle_in_transaction_session_timeout` (30 с) и TCP keepalive завершают сессию → откат. Повторы в это время ждут до `lock_timeout` и получают `409 REQUEST_IN_PROGRESS` | После отката — случай 2 |
+| 10 | Бизнес-отказ (нет средств) | Объект `FAILED` + `COMPLETED` с `422` коммитятся. Повтор возвращает тот же `422`, даже если деньги уже появились | Нужен новый ключ, чтобы попробовать снова |
+| 11 | Внутренний retry сервера на `40001` / `40P01` | Повторяется **вся** транзакция, включая шаг (1). Откат удалил ключ, поэтому повтор начинается с чистого листа | Одна операция |
+| 12 | Повтор после очистки ключа (> 24 ч) | Шаг (1) вставляет новый ключ, но бизнес-`UNIQUE` (`transfers (initiated_by, idempotency_key)`, `payments (merchant_id, idempotency_key)`, `refunds (payment_id, idempotency_key)` …) отклоняет вставку объекта → откат → `409 IDEMPOTENCY_KEY_REUSED` | Второй операции нет |
+
+### 4.4. Почему двух финансовых операций быть не может
+
+1. Ключ и бизнес-эффект коммитятся **атомарно**: нет состояния «операция есть, ключа нет» и наоборот.
+2. Уникальный индекс `(scope, endpoint, key)` пропускает к шагу (2а) ровно одну транзакцию. Остальные ждут её исхода.
+3. Бизнес-`UNIQUE` в доменных таблицах и в ledger (`reference_type, reference_id, operation, operation_seq`) — независимый второй барьер. Он работает и для внутренних вызовов, и после очистки ключей.
+4. Переходы статусов условные (`WHERE status = 'AUTHORIZED'`): повтор шага над тем же объектом с другим ключом получает `409 INVALID_STATE`.
+
+Двухфазный протокол (коммит `IN_PROGRESS` + lease `locked_until` + отдельная транзакция результата) зарезервирован для будущих операций с внешними вызовами ([money-flows.md §12](../architecture/money-flows.md#12-после-mvp-внешний-провайдер-review-асинхронные-выплаты)). В MVP он не нужен.
+
+### 4.5. Очистка
+
+Фоновая задача раз в час: `DELETE FROM platform.idempotency_keys WHERE id IN (SELECT id FROM … WHERE expires_at < now() LIMIT 1000)` в цикле небольшими пачками. `response_body` ограничен по размеру: в нём только тело ответа API, без больших вложений.
 
 ## 5. Шаблоны транзакций
 
-Каждая транзакция задаёт `SET LOCAL lock_timeout`, `SET LOCAL statement_timeout` (§10). Для всех шаблонов действует общая обёртка повторов (§6).
+Каждая денежная транзакция начинается с `SET LOCAL lock_timeout` и `SET LOCAL statement_timeout` (§10) и выполняется в обёртке повторов (§6). «idempotency» — шаги §4.2.
 
 ### 5.1. Перевод
 
 ```text
-BEGIN ISOLATION LEVEL READ COMMITTED;
- L1  idempotency (§4.1)
- L4  SELECT id, status, currency, user_id FROM accounts
+BEGIN RC;
+ L1  idempotency (1)
+ L3  SELECT id, status, currency, user_id FROM accounts.accounts
        WHERE id IN ($sender, $receiver) ORDER BY id FOR SHARE;
-     проверки: владелец sender = инициатор; статусы/ограничения; валюты = currency
-     лимиты (Q-12); фрод-решение (вычислено до транзакции, сохраняется здесь); комиссия по тарифу
- L5  SELECT account_id, available_amount, reserved_amount, version FROM account_balances
-       WHERE account_id IN ($sender, $receiver) ORDER BY account_id FOR UPDATE;
-     IF available(sender) < amount + fee → INSERT transfers(FAILED, INSUFFICIENT_FUNDS); goto finish
-     ALLOW:
-       UPDATE account_balances SET available_amount = available_amount - (amount+fee), version = version+1 … sender RETURNING version, available_amount;
-       UPDATE account_balances SET available_amount = available_amount + amount, version = version+1 … receiver RETURNING …;
-       INSERT transfers(COMPLETED), journal(TRANSFER, reference=transfer.id), 3 entries (+ account_version, balance_after)
-     REVIEW:
-       UPDATE sender: available -= amount+fee, reserved += amount+fee, version+1
-       INSERT holds(ACTIVE), transfers(ON_HOLD, hold_id), journal(HOLD_PLACE), 2 entries, fraud_cases
- L6  INSERT transfer_status_history, outbox_events('transfer.completed' | 'transfer.on_hold' | 'transfer.failed'), audit (если требуется)
+     проверки: владелец sender = инициатор; оба ACTIVE; валюта; sender ≠ receiver; лимит на операцию
+     комиссия по тарифу (0 для своих счетов)
+ L4  (только перевод другому клиенту) счётчик суточного лимита отправителя:
+       INSERT … ON CONFLICT DO NOTHING; SELECT … FOR UPDATE;
+       used + amount > limit → transfers(FAILED, LIMIT_EXCEEDED) → finish
+ L5  SELECT * FROM ledger.lock_account_balances(ARRAY[$sender, $receiver]);   -- сортирует, FOR UPDATE
+     available(sender) < amount + fee → transfers(FAILED, INSUFFICIENT_FUNDS) → finish
+ L6–L8  ledger.post_journal(TRANSFER, …): Дт sender:2100 amount+fee / Кт receiver:2100 amount / Кт 4100 fee
+     UPDATE limit_counters SET used = used + amount;
+     INSERT transfers(COMPLETED), transfer_status_history, outbox('transfer.completed')
 finish:
-     UPDATE idempotency_keys SET status='COMPLETED', response…
+     UPDATE idempotency_keys → COMPLETED (ответ 201 или 422)
 COMMIT;
 ```
 
-Почему защита работает (S-01): второй перевод ждёт на `FOR UPDATE` строки `account_balances` отправителя. После коммита первого он читает **актуальный** `available_amount = 196 000` (10 000 ₽ − 8 000 ₽ − комиссия 40 ₽) (в READ COMMITTED `FOR UPDATE` возвращает последнюю закоммиченную версию строки) и получает отказ. Даже если проверка в коде ошибочна, `CHECK (available_amount >= 0)` отклонит `UPDATE`.
+Почему S-01 безопасен. Второй перевод ждёт на L5 строки отправителя. После коммита первого `FOR UPDATE` в READ COMMITTED возвращает **последнюю закоммиченную** версию строки: `available = 196 000` (10 000 ₽ − 8 000 ₽ − комиссия 40 ₽). Проверка даёт отказ. Даже при ошибке проверки в коде `post_journal` упрётся в `CHECK (available_amount >= 0)` (`PC402`).
 
-Фрод-проверка выполняется **до** транзакции: она читает счётчики скорости и историю и не должна удерживать блокировки. Её решение — вход для транзакции. Небольшая неточность velocity-правил при гонке допустима. Если недопустима — [Q-16](../architecture/open-questions.md#q-16).
-
-### 5.2. Авторизация платежа (внутренний счёт)
+### 5.2. Подтверждение checkout (авторизация)
 
 ```text
 BEGIN RC;
- L1  idempotency
- L2  SELECT … FROM payments WHERE id = $p FOR UPDATE;  status = CREATED, не истёк, валюта
- L4  SELECT … FROM accounts WHERE id IN ($customer_acc, $merchant_acc) ORDER BY id FOR SHARE; владелец, статусы
-     фрод-решение, комиссия (фиксируется в платеже)
- L5  SELECT … FROM account_balances WHERE account_id = $customer_acc FOR UPDATE;
-     IF available < amount → payments: CREATED→PENDING→FAILED (INSUFFICIENT_FUNDS), attempt FAILED
-     ELSE UPDATE balance: available -= amount, reserved += amount;
-          INSERT holds(ACTIVE, expires_at), journal(HOLD_PLACE), entries;
-          UPDATE payments SET status='AUTHORIZED', customer_account_id, hold_id, fee_amount, fee_tariff_id, version+1
- L6  history (две смены статуса), payment_attempts, outbox('payment.authorized' | 'payment.failed')
-     idempotency COMPLETED
+ L1  idempotency (scope = покупатель)
+ L2  SELECT … FROM payments.payments WHERE id = $p FOR UPDATE;
+     SELECT … FROM payments.checkout_sessions WHERE payment_id = $p FOR UPDATE;
+     status = CREATED, checkout ACTIVE и не истёк, токен совпадает
+ L3  accounts (покупатель, магазин) FOR SHARE по id; счёт покупателя принадлежит ему, ACTIVE, валюта
+ L4  суточный лимит покупателя
+ L5  lock_account_balances([customer])
+     нет средств / лимит → payments CREATED→FAILED, checkout FAILED, payment_attempts(FAILED) → finish
+ L6–L8  post_journal(HOLD_PLACE, hold: PLACE, expires_at = now()+7d): Дт A:2100 / Кт A:2110
+     UPDATE payments SET status='AUTHORIZED', customer_account_id, hold_id, version+1 WHERE id=$p AND status='CREATED'
+     checkout → CONFIRMED; limit used += amount; history; payment_attempts(SUCCEEDED); outbox('payment.authorized')
+finish: idempotency → COMPLETED
 COMMIT;
 ```
 
@@ -140,170 +208,223 @@ COMMIT;
 
 ```text
 BEGIN RC;
- L1 idempotency
- L2 SELECT … FROM payments WHERE id=$p FOR UPDATE;   status = AUTHORIZED, иначе 409 / идемпотентный ответ
- L3 SELECT … FROM holds WHERE id = payment.hold_id FOR UPDATE;  status = ACTIVE и expires_at > now(), иначе 409 AUTH_EXPIRED
- L4 accounts FOR SHARE (customer, merchant) по id; мерчант может принимать зачисления
- L5 account_balances FOR UPDATE (customer, merchant) по account_id
-    customer: reserved -= amount; merchant: available += amount - fee
-    journal(HOLD_CAPTURE, reference=hold.id), 3 entries (Дт A:2110, Кт MA:2200, Кт 4200)
-    holds → CAPTURED; payments → CAPTURED, captured_amount = amount
- L6 history, outbox('payment.captured'), idempotency
+ L1  idempotency (scope = магазин)
+ L2  SELECT … FROM payments WHERE id=$p FOR UPDATE;   status = AUTHORIZED, иначе 409 INVALID_STATE
+     резерв (чтение): status ACTIVE и expires_at > now(), иначе 409 AUTH_EXPIRED
+     комиссия по тарифу на now(): fee = min(fee, amount)
+ L3  accounts (покупатель, магазин) FOR SHARE; магазин ACTIVE; счёт покупателя не BLOCKED (D-26)
+ L5  lock_account_balances([customer, merchant])
+ L6–L8  post_journal(HOLD_CAPTURE, hold: CAPTURE): Дт A:2110 amount / Кт MA:2200 amount−fee / Кт 4200 fee
+        (внутри: UPDATE holds SET status='CAPTURED' WHERE id=$h AND status='ACTIVE' — 0 строк → PC409)
+     UPDATE payments SET status='CAPTURED', captured_amount, fee_amount, fee_tariff_id, version+1 WHERE id=$p AND status='AUTHORIZED'
+     history; outbox('payment.captured'); idempotency → COMPLETED
 COMMIT;
 ```
 
-### 5.4. Void и истечение авторизации
+### 5.4. Void, истечение резерва, истечение checkout
 
-Void — как capture до L3, затем L5 только для счёта клиента: `reserved -= amount, available += amount`; журнал `HOLD_RELEASE`; hold → `RELEASED`; платёж → `CANCELLED`.
-
-Истечение (scheduler):
+- **Void**: как capture до L3; L3 — только покупатель; L4 — возврат лимита, если период тот же; L5 — покупатель; `post_journal(HOLD_RELEASE, hold: RELEASE)`; платёж → `CANCELLED (VOIDED)`. Void разрешён и при `BLOCKED`-счёте покупателя ([D-26](../architecture/decisions.md#d-26)).
+- **Истечение резерва** (scheduler, несколько экземпляров):
 
 ```text
--- без транзакции/блокировок: кандидаты
-SELECT id, reference_type, reference_id FROM holds WHERE status='ACTIVE' AND expires_at < now() LIMIT 100;
--- для каждого — отдельная транзакция в порядке L2 → L3:
+-- (a) кандидаты без блокировок
+SELECT reference_id FROM ledger.holds WHERE status='ACTIVE' AND expires_at < now() ORDER BY expires_at LIMIT 100;
+-- (b) для каждого — своя транзакция, строго L2 → …
 BEGIN RC;
-  SELECT … FROM payments WHERE id = $ref FOR UPDATE;          -- L2
-  SELECT … FROM holds WHERE id = $hold FOR UPDATE;            -- L3
-  IF hold.status <> 'ACTIVE' OR hold.expires_at >= now() → COMMIT (ничего не делать)
-  … как void, hold → EXPIRED, payment → CANCELLED(AUTH_EXPIRED)
+  SELECT … FROM payments WHERE id=$p FOR UPDATE;                         -- L2
+  IF status <> 'AUTHORIZED' OR hold.expires_at >= now() → COMMIT;        -- уже обработан другим
+  L3 покупатель FOR SHARE; L4 возврат лимита; L5 покупатель
+  post_journal(HOLD_RELEASE, hold: EXPIRE); payments → CANCELLED (AUTH_EXPIRED); history; outbox
 COMMIT;
 ```
 
-Несколько экземпляров scheduler безопасны: второй экземпляр ждёт на L2, затем видит `status <> 'ACTIVE'` и выходит. Если важна производительность, кандидатов можно выбирать с `FOR UPDATE SKIP LOCKED` в **отдельной короткой** транзакции, которая только «бронирует» пачку (колонка `processing_until`), а не держит блокировку.
+  Второй экземпляр ждёт на L2, затем видит `status <> 'AUTHORIZED'` и выходит без эффекта.
+- **Истечение checkout**: L2 (платёж + checkout); если `CREATED` и истёк, то → `CANCELLED (CHECKOUT_EXPIRED)`. Проводок нет.
 
-### 5.5. Возврат (частичный и полный)
+### 5.5. Возврат
 
 ```text
 BEGIN RC;
- L1 idempotency (scope мерчанта)
- L2 SELECT … FROM payments WHERE id=$p FOR UPDATE;     -- сериализует ВСЕ возвраты одного платежа
-    status ∈ {CAPTURED, PARTIALLY_REFUNDED}; refunded_amount + $amount ≤ captured_amount
-    иначе INSERT refunds(FAILED, REFUND_EXCEEDS_CAPTURED | INVALID_STATE)
- L4 accounts FOR SHARE (customer, merchant)
- L5 account_balances FOR UPDATE (customer, merchant) по account_id
-    merchant.available < amount → refunds(FAILED, MERCHANT_INSUFFICIENT_FUNDS)  (D-10 A)
-    иначе merchant.available -= amount; customer.available += amount;
-          INSERT refunds(SUCCEEDED), journal(REFUND, reference=refund.id), entries
-          UPDATE payments SET refunded_amount += amount, status = (= captured ? REFUNDED : PARTIALLY_REFUNDED), version+1
- L6 history, outbox('refund.succeeded'), idempotency
+ L1  idempotency (scope = магазин)
+ L2  SELECT … FROM payments WHERE id=$p FOR UPDATE;      -- сериализует все возвраты платежа
+     status ∈ {CAPTURED, PARTIALLY_REFUNDED}; refunded_amount + $amount ≤ captured_amount
+     иначе refunds(FAILED, REFUND_EXCEEDS_CAPTURED | INVALID_STATE) → finish
+ L3  accounts (покупатель, магазин) FOR SHARE; магазин ACTIVE; покупатель ACTIVE или BLOCKED (не CLOSED)
+ L5  lock_account_balances([customer, merchant])
+     merchant.available < amount → refunds(FAILED, MERCHANT_INSUFFICIENT_FUNDS) → finish
+ L8  INSERT refunds(SUCCEEDED); post_journal(REFUND): Дт MA:2200 / Кт A:2100 amount
+     UPDATE payments SET refunded_amount = refunded_amount + $amount,
+            status = CASE WHEN refunded_amount + $amount = captured_amount THEN 'REFUNDED' ELSE 'PARTIALLY_REFUNDED' END,
+            version = version + 1
+      WHERE id = $p;                                       -- CHECK refunded_amount ≤ captured_amount
+     history; outbox('refund.succeeded')
+finish: idempotency → COMPLETED (201 или 422)
 COMMIT;
 ```
 
-`CHECK (refunded_amount <= captured_amount)` — страховка на случай, если проверку в коде обойдут (S-06).
+### 5.6. Тестовое пополнение и выплата
 
-### 5.6. Блокировка счёта
+- **Пополнение**: L1; L3 счёт клиента (`ACTIVE`, не мерчантский); L4 суточный лимит пополнений; L5 клиент; `post_journal(SIM_TOPUP)`: Дт 1100 (один бакет) / Кт A:2100; `test_topups(COMPLETED)`; outbox.
+- **Выплата**: L1; L3 счёт магазина; L5 магазин; проверка `available ≥ amount`; `post_journal(PAYOUT)`: Дт MA:2200 / Кт 1100. Здесь L6 блокирует **все** бакеты 1100 по порядку, проверяет сумму и распределяет списание. `payouts(COMPLETED)`; outbox.
 
-`UPDATE accounts SET status='BLOCKED' WHERE id=$a AND status='ACTIVE'` + `account_status_history` + audit + outbox. Этот `UPDATE` ждёт завершения всех транзакций, которые держат `FOR SHARE` на этом счёте, а новые денежные транзакции после него увидят `BLOCKED` (S-08). Что делать с активными резервами заблокированного счёта (capture разрешён?) — [Q-14](../architecture/open-questions.md#q-14).
+### 5.7. Блокировка счёта
+
+`UPDATE accounts SET status='BLOCKED', version = version + 1 WHERE id=$a AND status='ACTIVE'` + `account_status_history` + audit + outbox. Этот `UPDATE` ждёт все транзакции, держащие `FOR SHARE` (L3) на счёте. Новые денежные транзакции после него видят `BLOCKED`.
 
 ## 6. Повторы (retry)
 
 | SQLSTATE | Причина | Действие |
 |---|---|---|
-| `40001` serialization_failure | REPEATABLE READ / SERIALIZABLE | Повтор **всей** транзакции |
-| `40P01` deadlock_detected | Нарушение порядка блокировок (баг) или внешняя причина | Повтор + метрика + алерт (deadlock — сигнал бага в порядке) |
-| `55P03` lock_not_available | Сработал `lock_timeout` | Ограниченный повтор, затем `503` с `Retry-After` |
+| `40001` serialization_failure | REPEATABLE READ-участки | Повтор **всей** транзакции |
+| `40P01` deadlock_detected | Нарушение порядка §3 — баг | Повтор + метрика + алерт |
+| `55P03` lock_not_available | `lock_timeout` | До 2 повторов, затем `409 REQUEST_IN_PROGRESS` (на L1) или `503` + `Retry-After` |
 | `57014` query_canceled | `statement_timeout` | Без повтора, `503` |
-| `23505` unique_violation | Идемпотентность / бизнес-дубль | **Не** повтор: прочитать существующий объект, вернуть идемпотентный ответ или `409` |
-| `23514` check_violation | Например `available >= 0` | Не повтор: доменная ошибка по имени ограничения |
-| `P0001`, `P0002` | Триггеры ledger | Не повтор: это баг. `500` + алерт |
-| Обрыв соединения на `COMMIT` | Исход неизвестен | Сервер не повторяет. Клиент повторяет с тем же `Idempotency-Key` (S-10) |
+| `23505` unique_violation | Бизнес-дубль | Не повторять: прочитать существующий объект → идемпотентный ответ или `409` |
+| `23514` check_violation, `PC402` | Нет средств (обход проверки) | Не повторять: доменная ошибка |
+| `PC400`, `PC409`, `P0001` | Нарушение контракта ledger или триггера | Не повторять: `500` + алерт (баг) |
+| Обрыв на `COMMIT` | Исход неизвестен | Сервер не повторяет. Клиент повторяет с тем же ключом (§4.3, случай 7) |
 
 Правила обёртки:
 
-- Повторяется **функция-транзакция целиком** (closure над `pgx.Tx`), а не отдельный запрос.
-- До 3–5 попыток, экспоненциальная задержка (например, 10 → 20 → 40 мс) с jitter, в пределах дедлайна `context`.
-- Внутри функции нет побочных эффектов вне БД: ни HTTP, ни Kafka, ни отправки email. Всё внешнее — только через outbox.
-- Повтор безопасен, потому что откат транзакции откатывает и ключ идемпотентности, и все эффекты.
-- Метрики: число повторов по SQLSTATE и use case, время ожидания блокировок.
+- повторяется функция-транзакция целиком (closure над `pgx.Tx`);
+- 3–5 попыток, экспоненциальная задержка 10 → 20 → 40 мс с jitter, в пределах дедлайна `context`;
+- внутри функции нет побочных эффектов вне БД — всё внешнее идёт через outbox;
+- метрики: число повторов по SQLSTATE и use case, время ожидания блокировок.
 
-## 7. Внешние вызовы и transactional outbox
+## 7. Transactional outbox и inbox
 
-### 7.1. Outbox (ТЗ §4.7, §8)
+Решение [D-23](../architecture/decisions.md#d-23). В MVP Kafka не обязательна: outbox в PostgreSQL + фоновый worker-диспетчер.
 
-- Событие вставляется в `outbox_events` **в той же транзакции**, что и бизнес-изменение. Нет коммита — нет события, есть коммит — событие точно будет опубликовано (at-least-once).
-- Relay (воркер):
+### 7.1. Запись события
+
+`INSERT INTO platform.outbox_events (…, status = 'PENDING', next_attempt_at = now())` — в **той же** транзакции, что и бизнес-изменение. `seq BIGINT GENERATED ALWAYS AS IDENTITY` задаёт порядок. Внутри одного агрегата порядок `seq` совпадает с порядком коммитов, потому что все изменения агрегата сериализованы его блокировкой (L2) или созданием.
+
+### 7.2. Relay: захват, публикация, подтверждение
+
+```text
+-- (1) ЗАХВАТ — короткая транзакция, никаких сетевых вызовов
+BEGIN;
+WITH batch AS (
+  SELECT o.id FROM platform.outbox_events o
+   WHERE o.status = 'PENDING'
+     AND o.next_attempt_at <= now()
+     AND (o.processing_until IS NULL OR o.processing_until < now())
+     AND NOT EXISTS (                               -- порядок внутри агрегата
+           SELECT 1 FROM platform.outbox_events p
+            WHERE p.aggregate_id = o.aggregate_id AND p.status = 'PENDING' AND p.seq < o.seq)
+   ORDER BY o.seq
+   LIMIT 100
+   FOR UPDATE SKIP LOCKED)
+UPDATE platform.outbox_events o
+   SET processing_until = now() + interval '30 seconds',
+       lease_owner = $worker_id,
+       attempts = attempts + 1
+  FROM batch WHERE o.id = batch.id
+RETURNING o.*;
+COMMIT;                                              -- блокировки строк сняты
+
+-- (2) ПУБЛИКАЦИЯ — вне транзакции, с таймаутом < lease (например, 10 с)
+--     для каждого события по возрастанию seq; при ошибке события агрегата X
+--     остальные события X из этой пачки не публикуются
+
+-- (3) ПОДТВЕРЖДЕНИЕ — отдельная короткая транзакция
+UPDATE platform.outbox_events
+   SET status = 'PUBLISHED', published_at = now(), processing_until = NULL
+ WHERE id = ANY($published_ids) AND lease_owner = $worker_id AND status = 'PENDING';
+
+-- (4) ОШИБКА — отдельная короткая транзакция
+UPDATE platform.outbox_events
+   SET processing_until = NULL, lease_owner = NULL, last_error = $err,
+       next_attempt_at = now() + backoff(attempts),          -- 1 с, 5 с, 30 с, 5 мин …
+       status = CASE WHEN attempts >= $max_attempts THEN 'DEAD' ELSE 'PENDING' END
+ WHERE id = $id AND lease_owner = $worker_id;
+```
+
+Свойства:
+
+- Между (1) и (3) **нет открытой транзакции и нет блокировок**. Lease — это данные (`processing_until`, `lease_owner`), а не блокировка.
+- **Падение relay** после (1): lease истекает через 30 с, другой экземпляр захватывает события повторно (`processing_until < now()`).
+- **Падение после публикации, до (3):** событие будет опубликовано повторно (at-least-once). Дубли устраняет inbox потребителя.
+- **Lease истёк во время медленной публикации:** событие может захватить другой экземпляр. Подтверждение первого (`lease_owner = $worker_id`) затронет 0 строк. Возможен дубль — это допустимо.
+- `DEAD` — аналог dead letter: событие не публикуется до ручного разбора (OPERATOR, Admin Dashboard), алерт. Последующие события того же агрегата продолжают публиковаться: условие `NOT EXISTS` учитывает только `PENDING`. Это осознанный компромисс, который фиксируется в алерте.
+- Отсутствие publisher (Kafka недоступна или выключена) — события копятся со статусом `PENDING`. Метрика — возраст старейшего `PENDING`.
+- Очистка: `PUBLISHED` старше 7 дней удаляются пачками.
+
+### 7.3. Publisher в MVP и с Kafka
+
+- **MVP:** publisher — это внутренний диспетчер. Для каждого события он вызывает подписанные обработчики модулей: уведомления (in-app/email-заглушка), создание `webhook_deliveries`, обновление read-моделей отчётов. Каждый обработчик выполняет свою короткую транзакцию с inbox (§7.4). Событие подтверждается, когда все обработчики завершились успешно. Повтор после частичного успеха безопасен благодаря inbox.
+- **С Kafka:** publisher — idempotent producer (`acks=all`), ключ партиции `aggregate_id`, заголовок `event_id`. Остальная схема не меняется.
+
+### 7.4. Inbox и идемпотентность потребителя
 
 ```text
 BEGIN;
-  SELECT … FROM outbox_events WHERE published_at IS NULL
-   ORDER BY created_at LIMIT 100 FOR UPDATE SKIP LOCKED;
-  -- публикация в Kafka: idempotent producer, acks=all, key = aggregate_id
-  UPDATE outbox_events SET published_at = now() WHERE id = ANY($ids);
-COMMIT;
+  INSERT INTO platform.inbox_messages (consumer, message_id, received_at)
+  VALUES ($consumer, $event_id, now()) ON CONFLICT DO NOTHING RETURNING 1;
+  -- 0 строк → уже обработано → COMMIT, считать успехом (ack)
+  -- 1 строка → эффект обработчика в этой же транзакции
+  UPDATE platform.inbox_messages SET processed_at = now() WHERE consumer = $consumer AND message_id = $event_id;
+COMMIT;   -- с Kafka: затем commit offset
 ```
 
-- Kafka недоступна: публикация падает, транзакция откатывается, события остаются в outbox (ТЗ §10, S-12). Растёт метрика «возраст старейшего неопубликованного события».
-- Воркер упал после публикации, но до коммита: событие будет опубликовано повторно. Дубли устраняет inbox на стороне потребителя (ТЗ §10 «Перезапуск Worker»).
-- Порядок. `SKIP LOCKED` с несколькими relay может переставить события одного агрегата. Варианты: один relay; шардирование relay по `hash(aggregate_id) % N`; потребители, устойчивые к перестановке (версия агрегата в событии). Рекомендация — один relay в MVP, `aggregate_version` в payload ([Q-26](../architecture/open-questions.md#q-26)).
-- До подключения Kafka (по roadmap — месяц 6) outbox всё равно пишется. Временный relay может вызывать обработчики (уведомления, webhook) напрямую из БД.
+Эффект ровно один, потому что запись inbox и эффект коммитятся атомарно. Потребитель также сравнивает `aggregate_version` из события с последней применённой версией и игнорирует устаревшие события.
 
-### 7.2. Inbox
+### 7.5. Webhook магазинам
 
-```text
-BEGIN;
-  INSERT INTO inbox_messages (consumer, message_id) VALUES ($c, $event_id) ON CONFLICT DO NOTHING;
-  -- 0 строк → уже обработано → COMMIT, ack
-  -- 1 строка → обработка (свои таблицы) в этой же транзакции
-COMMIT;  -- затем commit offset в Kafka
-```
-
-### 7.3. Вызов внешнего провайдера (если подтвердится [Q-03](../architecture/open-questions.md#q-03))
-
-Шаблон «намерение → вызов → применение»:
-
-1. **ТХ1:** idempotency (`IN_PROGRESS`), `payment_attempts(STARTED)`, платёж → `PENDING`. COMMIT.
-2. Вызов провайдера **вне транзакции**, с idempotency key = `payment_attempts.id` и таймаутом.
-3. **ТХ2:** L2 платёж `FOR UPDATE`; попытка всё ещё `STARTED`; применить результат (проводки, статусы), idempotency → `COMPLETED`. COMMIT.
-4. Таймаут или обрыв на шаге 2: попытка → `UNKNOWN`. Задача восстановления запрашивает у провайдера статус по `attempts.id` и выполняет ТХ2. Повторный вызов провайдера с **новым** ключом запрещён.
-5. Расхождения, оставшиеся после восстановления, ловит Reconciliation.
+Отдельный worker по тому же шаблону lease: захват `webhook_deliveries` (`status = 'PENDING' AND next_attempt_at <= now()`, `FOR UPDATE SKIP LOCKED`, `processing_until`) → HTTP-вызов вне транзакции (таймаут, подпись HMAC, заголовок `PayCore-Event-Id`) → отдельная транзакция результата (`DELIVERED` / повтор с backoff / `DEAD`). Магазины дедуплицируют события по `PayCore-Event-Id`. Это требование публикуется в документации API.
 
 ## 8. Горячие точки и масштабирование
 
-| Точка | Решение в MVP | Развитие |
+| Точка | MVP | Развитие |
 |---|---|---|
-| Системные счета (доход, банк) | Без синхронной проекции — без блокировок ([D-02](../architecture/open-questions.md#d-02)) | Снапшоты по дням |
-| Баланс крупного мерчанта | Блокировка строки на время транзакции (миллисекунды). Порядок L5 сохраняется | Субсчета-шарды мерчанта (N строк, зачисление в случайный шард, сумма — при чтении) или асинхронное зачисление через внутреннюю очередь |
-| `account_version` на мерчанте | Требует строгой сериализации зачислений — следствие D-16 | При шардировании версия — на каждый шард |
-| Пул соединений | `pgxpool`; размер ≈ (ядра БД × 2–4); транзакции короткие | PgBouncer в transaction mode (без session-фич, без `SET` вне `SET LOCAL`) |
+| Доход 4100/4200, источник 1100 | 16 бакетов; увеличение блокирует один бакет ([D-02](../architecture/decisions.md#d-02)) | Больше бакетов (`bucket_count` в данных) |
+| Уменьшение системного счёта (выплаты, корректировки) | Блокирует все бакеты счёта; операции редкие | Выплаты пачками |
+| Баланс крупного магазина | Одна строка `account_balances`; блокировка на миллисекунды | Бакеты и для счетов магазинов (тогда без `account_version`) или асинхронное зачисление |
+| Пул соединений | `pgxpool`, размер ≈ (ядра БД × 2–4) | PgBouncer в transaction mode (только `SET LOCAL`) |
 
 ## 9. Каталог конкурентных сценариев
 
 Каждый сценарий — обязательный конкурентный тест ([financial-invariants-testing.md §5](../architecture/financial-invariants-testing.md#5-конкурентные-тесты)).
 
-| ID | Сценарий | Защита | Ожидаемый результат |
-|---|---|---|---|
-| S-01 | Баланс 10 000 ₽, два параллельных перевода по 8 000 ₽ (ТЗ) | L5 `FOR UPDATE` + проверка + `CHECK >= 0` | Ровно один `COMPLETED`, один `FAILED (INSUFFICIENT_FUNDS)`; остаток 196 000 коп. (комиссия 0,5 % = 4 000) |
-| S-02 | Два одинаковых запроса с одним `Idempotency-Key` одновременно | Уникальный индекс `idempotency_keys` + ключ в той же ТХ | Один перевод; оба ответа идентичны |
-| S-03 | Тот же ключ, другое тело | `request_hash` | `422`/`409`, второго эффекта нет |
-| S-04 | Два параллельных capture одного платежа (разные ключи) | L2 `FOR UPDATE` + условный переход + `UNIQUE` журнала | Один `HOLD_CAPTURE`; второй — `409 INVALID_STATE` |
-| S-05 | Capture одновременно с void или с истечением | L2 → L3, перепроверка статуса hold | Выигрывает первый, второй — `409`; ровно один журнал capture или release |
-| S-06 | Два параллельных частичных возврата 3 000 + 3 000 по платежу 5 000 | L2 `FOR UPDATE` + `CHECK refunded ≤ captured` | Один `SUCCEEDED`, один `FAILED`; `refunded_amount = 300 000` |
-| S-07 | Встречные переводы A→B и B→A | Сортировка L5 | Нет deadlock; оба выполнены (если средств хватает) |
-| S-08 | Блокировка счёта во время перевода | `FOR SHARE` (L4) против `UPDATE accounts` | Перевод либо завершён до блокировки, либо отклонён `ACCOUNT_BLOCKED` |
-| S-09 | Перевод и авторизация платежа одновременно с одного счёта | Одна строка L5 | Сумма списаний и резервов ≤ остатку |
-| S-10 | Ответ на `COMMIT` потерян, клиент повторяет | HTTP-идемпотентность | Повтор возвращает исходный результат, второго списания нет |
-| S-11 | Падение процесса между ТХ1 и ТХ2 (провайдер) | `attempts(STARTED/UNKNOWN)` + recovery | Платёж доведён до финального статуса один раз |
-| S-12 | Kafka недоступна | Outbox | События копятся, после восстановления публикуются |
-| S-13 | Два relay одновременно | `FOR UPDATE SKIP LOCKED` | Каждое событие опубликовано (≥ 1 раз), без взаимной блокировки |
-| S-14 | Повторная доставка события потребителю | Inbox PK | Эффект ровно один |
-| S-15 | Смена тарифа во время операции | Снимок `fee_tariff_id`; тариф неизменяем | Используется тариф, действовавший на момент фиксации |
-| S-16 | Решение на устаревшем балансе (реплика) | Проверки только на primary под L5 | Невозможно по построению |
-| S-17 | Два `POST /payments` мерчанта с одним ключом | `UNIQUE (merchant_id, idempotency_key)` + HTTP-слой | Один платёж |
-| S-18 | Отмена перевода `ON_HOLD` клиентом одновременно с одобрением аналитиком | L2 `FOR UPDATE` transfers + L3 hold | Ровно один из `HOLD_CAPTURE` / `HOLD_RELEASE` |
-| S-19 | Закрытие счёта при активном резерве или ненулевом остатке | L4/L5 + проверка в use case закрытия | Отказ ([Q-13](../architecture/open-questions.md#q-13)) |
-| S-20 | Суточный лимит 100 000 ₽, два параллельных перевода по 60 000 ₽ с разных счетов одного пользователя | Блокировка строки счётчика лимита пользователя (до L4) или SERIALIZABLE | Один проходит, второй — `LIMIT_EXCEEDED` |
+| ID | Сценарий | Уровни | Механизм защиты | Ожидаемый результат |
+|---|---|---|---|---|
+| S-01 | **Параллельные переводы**: 10 000 ₽, два перевода по 8 000 ₽ | L3, L4, L5, L6 | `FOR UPDATE` строки отправителя (L5) → проверка `available ≥ amount + fee` → `CHECK ≥ 0` в `post_journal` | Один `COMPLETED`, один `FAILED (INSUFFICIENT_FUNDS)`; остаток 196 000 коп. |
+| S-02 | **Встречные переводы** A→B и B→A (и цикл A→B→C→A) | L3, L5 | Сортировка по `id` / `account_id` | Нет deadlock; оба проходят при достаточных средствах |
+| S-03 | **Два capture** одного платежа (разные ключи) | L2 | `FOR UPDATE` платежа + условный переход + переход резерва `ACTIVE → CAPTURED` в функции + `UNIQUE` журнала | Один `HOLD_CAPTURE`; второй — `409 INVALID_STATE` |
+| S-04 | **Capture одновременно с void** | L2 | Обе операции начинают с L2 платежа; вторая видит новый статус | Ровно один из `HOLD_CAPTURE` / `HOLD_RELEASE`; вторая — `409` |
+| S-05 | **Capture одновременно с истечением резерва** | L2 | Scheduler берёт L2 и перепроверяет `status` и `expires_at`; capture проверяет `expires_at > now()` под L2 | Ровно один финальный журнал |
+| S-06 | **Два частичных возврата**: 3 000 + 3 000 ₽ по платежу 5 000 ₽ | L2, L5 | L2 сериализует возвраты; проверка `refunded + amount ≤ captured`; `CHECK refunded_amount ≤ captured_amount` | Один `SUCCEEDED`, один `FAILED (REFUND_EXCEEDS_CAPTURED)`; `refunded_amount = 300 000` |
+| S-07 | **Возвраты двух разных платежей** одного магазина при остатке на один | L2 (разные), L5 (общий магазин) | L5 строки магазина + `CHECK available ≥ 0` | Один `SUCCEEDED`, второй — `FAILED (MERCHANT_INSUFFICIENT_FUNDS)` |
+| S-08 | **Перевод и платёж с одного счёта** одновременно | L5 | Одна строка `account_balances` покупателя для обоих | \(\sum\) списаний и резервов ≤ остатка; второй — `INSUFFICIENT_FUNDS` |
+| S-09 | **Блокировка счёта во время перевода или платежа** | L3 | `FOR SHARE` (L3) против эксклюзивного `UPDATE accounts` | Операция закоммичена до блокировки **или** отклонена `ACCOUNT_NOT_ACTIVE`; после коммита блокировки — ни одной новой операции |
+| S-10 | **Суточный лимит**: 100 000 ₽, два параллельных перевода по 60 000 ₽ с **разных** счетов одного пользователя | L4 | Общий счётчик `(user, currency, DAILY_OUTGOING, day)` под `FOR UPDATE` | Один проходит, второй — `LIMIT_EXCEEDED` |
+| S-11 | **Суточный лимит при первом запросе дня** (строки счётчика ещё нет) | L4 | `INSERT … ON CONFLICT DO NOTHING` — второй ждёт вставку первого; затем `FOR UPDATE` | Как S-10 |
+| S-12 | **Повтор запроса с тем же ключом** (одновременно и последовательно) | L1 | §4.3, случаи 1, 6 | Одна операция, ответы идентичны |
+| S-13 | **Тот же ключ, другое тело** | L1 | `request_hash` | `409 IDEMPOTENCY_KEY_REUSED`, второго эффекта нет |
+| S-14 | **Ответ на COMMIT потерян** | L1 | §4.3, случаи 6–7 | Повтор возвращает исходный результат |
+| S-15 | **Падение процесса до COMMIT** | — | Откат транзакции; ключ исчезает | Повтор выполняет операцию ровно один раз |
+| S-16 | **Падение relay** между захватом и подтверждением | outbox | Lease истекает, другой экземпляр перехватывает | Событие опубликовано ≥ 1 раза; эффект у потребителя ровно один (inbox) |
+| S-17 | **Два экземпляра relay** | outbox | `FOR UPDATE SKIP LOCKED` при захвате + `lease_owner` | Пачки не пересекаются; порядок внутри агрегата сохранён |
+| S-18 | **Повторная доставка события** потребителю | inbox | PK `(consumer, message_id)` | Эффект ровно один |
+| S-19 | **Падение scheduler** во время истечения резервов | L2 | Каждый резерв — своя транзакция; кандидаты выбираются заново | Каждый резерв освобождён ровно один раз |
+| S-20 | **Повышенная нагрузка на доход 4200**: много одновременных capture разных магазинов | L6 | Увеличение — в один бакет по `hash(journal_id)` | Нет сериализации на одной строке; `SUM` бакетов = пересчёт по проводкам |
+| S-21 | **Выплата одновременно с пополнениями** (1100 уменьшается и растёт) | L5, L6 | Пополнение держит один бакет 1100; выплата берёт все бакеты по возрастанию `bucket_no` и ждёт; цикла нет, потому что пополнение после бакета ничего не ждёт | Нет deadlock; каждый бакет ≥ 0; сумма 1100 = пересчёт |
+| S-22 | **Смена тарифа во время capture** | — | Тариф неизменяем; выбирается по `now()` в транзакции capture; `fee_tariff_id` фиксирует версию | Комиссия по одной конкретной версии |
+| S-23 | **Решение на устаревшем остатке** (реплика) | — | Проверки только на primary под L5 | Невозможно по построению |
+| S-24 | **Закрытие счёта при активном резерве или остатке** | L3, L5 | Закрытие: `UPDATE accounts` (L3) + чтение проекции под L5 | `409 ACCOUNT_NOT_EMPTY` ([D-28](../architecture/decisions.md#d-28)) |
 
-Если блокировка счётчика лимита (S-20) принята, это уровень **L1.5** — между idempotency и бизнес-агрегатом. Тогда порядок в §3 нужно дополнить.
+После MVP: «отмена перевода `ON_HOLD` одновременно с одобрением» (L2 — перевод), падение между вызовами внешнего провайдера ([money-flows.md §12](../architecture/money-flows.md#12-после-mvp-внешний-провайдер-review-асинхронные-выплаты)).
 
 ## 10. Таймауты и настройки сессии
 
-| Параметр | Предложение | Зачем |
+| Параметр | Значение по умолчанию | Зачем |
 |---|---|---|
-| `lock_timeout` (SET LOCAL) | 2–3 с для API, 10 с для фоновых задач | Не висеть бесконечно за чужой блокировкой |
+| `lock_timeout` (SET LOCAL) | 3 с для API, 10 с для фоновых задач | Не висеть за чужой блокировкой; основа ответа `REQUEST_IN_PROGRESS` |
 | `statement_timeout` (SET LOCAL) | 5 с для API | Защита от плохого плана |
-| `idle_in_transaction_session_timeout` (роль) | 10–30 с | Утечка транзакции в коде |
-| `default_transaction_isolation` (роль) | `read committed` (явно) | Не зависеть от настроек сервера |
-| Дедлайн запроса (Go `context`) | ≈ p99-бюджет (например, 2 с) | Согласован с `lock_timeout` |
+| `idle_in_transaction_session_timeout` (роль `paycore_app`) | 30 с | Завершение зависших транзакций (§4.3, случай 9) |
+| TCP keepalive (pgx) | 15 с | Обнаружение разрыва |
+| `default_transaction_isolation` (роль) | `read committed` | Независимость от настроек сервера |
+| Дедлайн запроса (`context`) | 5 с | Согласован с таймаутами выше |
+| Lease outbox / webhook | 30 с; таймаут публикации 10 с | Таймаут меньше lease |
 
-Значения нужно уточнить нагрузочными тестами (k6, ТЗ §7) с учётом цели p95 ≤ 200 мс (ТЗ §8).
+Значения уточняются нагрузочными тестами (k6, ТЗ §7) с учётом цели p95 ≤ 200 мс (ТЗ §8).

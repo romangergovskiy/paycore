@@ -1,161 +1,155 @@
-# Целостность данных: ограничения, FK, индексы, триггеры, права
+# Целостность данных: ограничения, FK, индексы, неизменяемость, права
 
-Статус: **проект**. SQL-фрагменты иллюстративны. Поля таблиц — в [database-schema.md](database-schema.md), транзакции и блокировки — в [concurrency.md](concurrency.md).
+Статус: **принято для MVP** (этап 2). SQL-фрагменты иллюстративны и не являются миграциями. Поля — [database-schema.md](database-schema.md), транзакции и блокировки — [concurrency.md](concurrency.md), решения — [../architecture/decisions.md](../architecture/decisions.md).
 
-Принцип «защиты в глубину» для финансовых инвариантов:
+Принцип «защиты в глубину»:
 
 | Уровень | Что гарантирует | Пример |
 |---|---|---|
-| 1. Домен (Go) | Бизнес-правила, машина состояний, расчёт сумм | `Payment.Capture()` запрещает переход из `CREATED` |
-| 2. Сервис проведения | Бухгалтерские правила до записи | \(\sum D = \sum C\), валюта, ≥ 2 проводок |
-| 3. Ограничения БД (строка) | Невозможные значения | `amount > 0`, `available_amount >= 0` |
-| 4. Ограничения БД (связи и уникальность) | Согласованность между таблицами, однократность | составные FK по валюте, `UNIQUE (reference_type, reference_id, operation, operation_seq)` |
-| 5. Триггеры БД | Многострочные инварианты, неизменяемость | deferred-проверка баланса журнала, запрет UPDATE/DELETE |
-| 6. Права БД | Обход приложения | у роли приложения нет `UPDATE/DELETE` на ledger |
-| 7. Задача сверки | То, что дорого проверять синхронно | I-03, I-05, I-09, I-10 (см. [ledger-model.md §12](../architecture/ledger-model.md#12-финансовые-инварианты)) |
+| 1. Домен (Go) | Бизнес-правила, машины состояний, расчёт сумм, понятные ошибки | `Payment.Capture()` запрещает переход из `CREATED` |
+| 2. Шлюз ledger (`SECURITY DEFINER`) | Бухгалтерские правила, атомарное создание журнала, проекции, резервы | `ledger.post_journal` |
+| 3. Права ролей БД | Запись в ledger только через шлюз | у `paycore_app` нет `INSERT/UPDATE/DELETE` на ledger-таблицах |
+| 4. CHECK (строка) | Невозможные значения | `amount > 0`, `available_amount >= 0`, бакет `>= 0` |
+| 5. FK и UNIQUE | Согласованность между таблицами, однократность | составные FK по валюте, `UNIQUE` журнала по ссылке |
+| 6. Триггеры | Запрет мутаций для всех ролей, страховка баланса | `BEFORE UPDATE/DELETE/TRUNCATE`, отложенная проверка баланса |
+| 7. Задача контроля инвариантов | Ошибки в самих механизмах | I-03, I-09, I-10, I-12 ([ledger-model.md §12](../architecture/ledger-model.md#12-финансовые-инварианты)) |
 
-## 1. CHECK-ограничения (сводка по финансовым таблицам)
+Запрещённый отрицательный остаток не допускается уже на уровнях 2 и 4 в момент записи. Уровень 7 — контроль, а не основной механизм.
+
+## 1. CHECK-ограничения (финансовые таблицы)
 
 | Таблица | CHECK |
 |---|---|
-| `ledger_entries` | `amount > 0 AND amount <= MAX`; `entry_type IN ('DEBIT','CREDIT')`; `(account_version IS NULL) = (balance_after IS NULL)` |
+| `ledger_entries` | `amount > 0 AND amount <= 10^14`; `entry_type IN ('DEBIT','CREDIT')`; `(account_version IS NULL) = (balance_after IS NULL)` |
 | `journal_transactions` | `status = 'POSTED'`; `operation IN (…)`; `reference_type IN (…)`; `(operation = 'REVERSAL') = (reverses_journal_id IS NOT NULL)` |
-| `ledger_accounts` | взаимоисключения SYSTEM/пользовательский (см. [schema §3](database-schema.md#3-схема-ledger)); класс ⇔ нормальное сальдо |
-| `account_balances` | `available_amount >= 0`; `reserved_amount >= 0` |
-| `accounts` | `num_nonnulls(user_id, merchant_id) = 1`; статус; `closed_at` ⇔ CLOSED |
-| `holds` | `amount > 0`; статус; `finalized_at` ⇔ не ACTIVE |
-| `payments` | `amount > 0`; `0 <= fee_amount <= amount`; `0 <= captured_amount <= amount`; `0 <= refunded_amount <= captured_amount`; статус ⇔ суммы |
-| `refunds` | `amount > 0`; FAILED ⇔ failure_code |
-| `transfers` | `amount > 0`; `fee_amount >= 0`; `sender <> receiver`; ON_HOLD ⇒ hold_id |
+| `ledger_accounts` | SYSTEM ⇔ `account_id IS NULL` ⇔ `system_code IS NOT NULL` ⇔ `kind IS NULL`; класс ⇔ нормальное сальдо; `bucket_count BETWEEN 1 AND 256`; `bucket_count = 1` для пользовательских счетов |
+| `account_balances` | `available_amount >= 0`; `reserved_amount >= 0`; `version >= 0` |
+| `system_balance_buckets` | `bucket_no >= 0`; `CHECK (allow_negative OR balance >= 0)`. Колонка `allow_negative` копируется из `ledger_accounts` при создании бакетов, пишет её только `paycore_ledger`. Для всех системных счетов MVP значение `false` |
+| `holds` | `amount > 0`; статус; `finalized_at` ⇔ не `ACTIVE` |
+| `accounts` | `num_nonnulls(user_id, merchant_id) = 1`; статус; `closed_at` ⇔ `CLOSED` |
+| `payments` | `amount > 0`; `0 <= fee_amount <= amount`; `0 <= captured_amount <= amount`; `0 <= refunded_amount <= captured_amount`; статус ⇔ суммы; `status NOT IN ('AUTHORIZED','CAPTURED','PARTIALLY_REFUNDED','REFUNDED') OR customer_account_id IS NOT NULL`; `status IN ('CREATED','AUTHORIZED','CAPTURED','PARTIALLY_REFUNDED','REFUNDED','FAILED','CANCELLED')` (без `PENDING`, [D-21](../architecture/decisions.md#d-21)) |
+| `checkout_sessions` | статус; `expires_at > created_at`; `CONFIRMED` ⇔ `confirmed_at IS NOT NULL` |
+| `refunds` | `amount > 0`; `status IN ('SUCCEEDED','FAILED')`; `FAILED` ⇔ `failure_code` |
+| `transfers` | `amount > 0`; `fee_amount >= 0`; `sender <> receiver`; `status IN ('COMPLETED','FAILED')`; `FAILED` ⇔ `failure_code` |
+| `payouts`, `test_topups` | `amount > 0`; статус; `FAILED` ⇔ `failure_code` |
+| `limit_counters` | `used_amount >= 0` |
 | `commission_tariffs` | `rate_bp BETWEEN 0 AND 10000`; `min <= max`; `valid_to > valid_from`; EXCLUDE на пересечение периодов |
-| `manual_adjustments` | `approved_by <> created_by`; POSTED ⇔ journal_transaction_id |
-| `currencies` | `code ~ '^[A-Z]{3}$'`; `minor_units BETWEEN 0 AND 4` |
+| `manual_adjustments` | `approved_by <> created_by`; `POSTED` ⇔ `journal_transaction_id` |
+| `idempotency_keys` | `status IN ('IN_PROGRESS','COMPLETED')`; `COMPLETED` ⇔ `response_code IS NOT NULL` |
+| `outbox_events` | `status IN ('PENDING','PUBLISHED','DEAD')`; `PUBLISHED` ⇔ `published_at IS NOT NULL`; `(processing_until IS NULL) = (lease_owner IS NULL)` |
 
-Все CHECK объявляются с именами (`ck_<table>_<rule>`), чтобы Go-код однозначно отображал нарушение в доменную ошибку (например, `ck_account_balances_available_nonneg` → `INSUFFICIENT_FUNDS`).
+Все ограничения именованные (`ck_<таблица>_<правило>`). Go отображает их в доменные ошибки по имени.
 
 ## 2. Внешние ключи
 
-- **Политика удаления:** `ON DELETE RESTRICT` (или `NO ACTION`) для всех FK. Каскадов на финансовых данных нет. Сущности не удаляются, а получают статус `CLOSED` / `DISABLED`.
-- **Составные FK для валюты.** Валюта проводки, счёта, платежа и перевода не может разойтись:
+- **Удаление:** `ON DELETE RESTRICT` / `NO ACTION` везде, каскадов на финансовых данных нет. Сущности не удаляются, а получают статус `CLOSED`/`DISABLED`.
+- **Составные FK для валюты** — валюты счёта, проводки, платежа, перевода и резерва не могут разойтись:
 
 ```sql
--- в целевых таблицах
-ALTER TABLE accounts.accounts         ADD CONSTRAINT uq_accounts_id_currency        UNIQUE (id, currency);
-ALTER TABLE ledger.ledger_accounts    ADD CONSTRAINT uq_ledger_accounts_id_currency UNIQUE (id, currency);
--- в ссылающихся
-ALTER TABLE ledger.ledger_entries
-  ADD CONSTRAINT fk_entries_account_currency
+ALTER TABLE accounts.accounts      ADD CONSTRAINT uq_accounts_id_currency        UNIQUE (id, currency);
+ALTER TABLE ledger.ledger_accounts ADD CONSTRAINT uq_ledger_accounts_id_currency UNIQUE (id, currency);
+
+ALTER TABLE ledger.ledger_entries ADD CONSTRAINT fk_entries_account_currency
   FOREIGN KEY (ledger_account_id, currency) REFERENCES ledger.ledger_accounts (id, currency);
-ALTER TABLE transfers.transfers
-  ADD CONSTRAINT fk_transfers_sender_currency
+ALTER TABLE transfers.transfers ADD CONSTRAINT fk_transfers_sender_currency
   FOREIGN KEY (sender_account_id, currency) REFERENCES accounts.accounts (id, currency);
 -- аналогично: receiver, payments.customer/merchant, holds, account_balances, ledger_accounts.account_id
 ```
 
-- **FK между модулями** разрешены только по списку в [er-diagram.md §6](er-diagram.md#6-межмодульные-связи) ([D-12](../architecture/open-questions.md#d-12)).
-- **Индексы под FK.** PostgreSQL не создаёт их автоматически. Для каждой ссылающейся колонки, по которой идут JOIN или проверки при изменении родителя, индекс создаётся явно (см. §5).
+- **FK между модулями** — только по списку [er-diagram.md §7](er-diagram.md#7-межмодульные-связи) ([D-12](../architecture/decisions.md#d-12)).
+- **Индексы под FK** создаются явно (§5).
 
 ## 3. Уникальность (защита от повторов)
 
 | Ограничение | От чего защищает |
 |---|---|
-| `journal_transactions UNIQUE (reference_type, reference_id, operation, operation_seq)` | Повторное проведение одного бизнес-шага (двойной capture, двойной возврат одного refund) |
+| `journal_transactions UNIQUE (reference_type, reference_id, operation, operation_seq)` | Повторное проведение одного шага (двойной capture, двойной возврат одного refund) |
 | `journal_transactions UNIQUE (reverses_journal_id)` | Двойное сторно |
 | `ledger_entries UNIQUE (journal_transaction_id, ledger_account_id)` | Дубли проводок в журнале |
 | `ledger_entries UNIQUE (ledger_account_id, account_version)` | Потерянное обновление проекции |
-| `holds UNIQUE (reference_type, reference_id)` | Два резерва на один платёж |
-| `payments UNIQUE (merchant_id, idempotency_key)` | Два платежа по одному заказу |
-| `transfers UNIQUE (initiated_by, idempotency_key)` | Двойной перевод при повторе запроса |
-| `refunds UNIQUE (payment_id, idempotency_key)` | Двойной возврат при повторе запроса |
+| `system_balance_buckets PK (ledger_account_id, bucket_no)` | Дубли бакетов |
+| `holds UNIQUE (reference_type, reference_id)` | Два резерва на платёж |
+| `payments UNIQUE (merchant_id, idempotency_key)` | Два платежа по одному запросу |
+| `checkout_sessions UNIQUE (payment_id)`, `UNIQUE (token_hash)` | Две сессии на платёж, коллизия токена |
+| `transfers UNIQUE (initiated_by, idempotency_key)` | Двойной перевод |
+| `refunds UNIQUE (payment_id, idempotency_key)` | Двойной возврат |
+| `payouts UNIQUE (merchant_id, idempotency_key)`, `test_topups UNIQUE (user_id, idempotency_key)` | Двойная выплата или пополнение |
 | `idempotency_keys UNIQUE (scope, endpoint, key)` | Повтор HTTP-запроса |
-| `inbox_messages PK (consumer, message_id)` | Повторная обработка события из Kafka |
-| `payment_attempts UNIQUE (payment_id, attempt_number)` | Гонка нумерации попыток |
-| `fraud_cases UNIQUE (check_id)` | Двойной инцидент |
-| `ledger_accounts UNIQUE (account_id, kind)` / `(system_code, currency)` | Дубли ledger-счетов |
+| `limit_counters PK (user_id, currency, limit_type, period_start)` | Два счётчика на период |
+| `inbox_messages PK (consumer, message_id)` | Повторная обработка события |
+| `ledger_accounts UNIQUE (account_id, kind)`, `UNIQUE (system_code, currency)` | Дубли ledger-счетов |
 
-## 4. Триггеры и защита неизменяемости
+## 4. Неизменяемость ledger
 
-### 4.1. Запрет изменения проведённых записей (ТЗ §4.4 п.3)
+Решение [D-03](../architecture/decisions.md#d-03), пересмотрено на этапе 2. Защита через `xmin` **не используется**.
+
+### 4.1. Механизм: функция-шлюз + права
+
+**Единственный путь записи в ledger** — функции PostgreSQL с `SECURITY DEFINER`, которыми владеет отдельная роль `paycore_ledger` (NOLOGIN):
+
+| Функция | Назначение |
+|---|---|
+| `ledger.open_ledger_accounts(account_id, owner_type, currency)` | Создаёт пару ledger-счетов (AVAILABLE/HOLD) и строку `account_balances` |
+| `ledger.lock_account_balances(account_ids uuid[])` | Сортирует id и выполняет `SELECT … FOR UPDATE` (L5). Возвращает остатки и версии. Блокировки принадлежат транзакции вызывающего и держатся до её конца |
+| `ledger.post_journal(journal_id, operation, reference_type, reference_id, operation_seq, reverses_journal_id, description, initiated_by, accounting_date, entries jsonb, hold_action jsonb)` | Валидирует, обновляет проекции и бакеты, вставляет журнал и **все** проводки, меняет резерв. Контракт — [ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer) |
+
+Требования к функциям: `SET search_path = pg_catalog, ledger` (защита от подмены объектов); `REVOKE EXECUTE … FROM PUBLIC`; `GRANT EXECUTE … TO paycore_app`. Тело функций проходит ревью как критичный код и покрывается интеграционными тестами из Go.
+
+Почему этот механизм надёжен:
+
+| Требование этапа 2 | Как обеспечено |
+|---|---|
+| Права ролей | У `paycore_app` только `SELECT` на ledger-таблицах и `EXECUTE` на функциях. `INSERT/UPDATE/DELETE/TRUNCATE` на `journal_transactions`, `ledger_entries`, `account_balances`, `system_balance_buckets`, `holds` не выданы (§6) |
+| Запрет UPDATE/DELETE/TRUNCATE проведённых проводок | Прав нет ни у `paycore_app`, ни у `paycore_ledger` (у неё только `INSERT` на журналы и проводки). Дополнительно триггеры §4.4 срабатывают для **любой** роли, включая владельца схемы |
+| Запрет добавления проводок в проведённый журнал | Вставить проводку можно только через `post_journal`. Функция всегда **создаёт новый** журнал с переданным `journal_id` и вставляет проводки только для него в том же вызове. Если журнал с тем же бизнес-ключом уже есть, функция ничего не вставляет: при идентичных проводках возвращает существующий журнал (`already_posted`), иначе — `PC409` ([ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer)). API «добавить проводку в журнал X» не существует |
+| Проверка сбалансированности | В функции до любой записи: \(\sum D = \sum C\) по каждой валюте, ≥ 2 проводок, суммы в диапазоне. Страховка — отложенный триггер §4.4 |
+| Запрет `POSTED` для пустого или несбалансированного журнала | Журнал вставляется **после** успешной валидации и в одном вызове с проводками. Отложенный триггер на `journal_transactions` проверяет ≥ 2 проводок и баланс на `COMMIT` |
+| Журнал и проводки в одной транзакции | Один вызов функции = одна транзакция вызывающего. Ошибка внутри функции откатывает всё, включая бизнес-изменения use case |
+
+### 4.2. Почему не другие механизмы
+
+| Вариант | Причина отказа |
+|---|---|
+| Только Go-сервис | Ручной SQL, миграция или баг обходят проверки |
+| Отложенные триггеры + `xmin` как защита от «дописывания» | Хрупко: `xmin` — системная деталь; ложные срабатывания внутри `SAVEPOINT`; не объяснимо как гарантия |
+| `journal.sealed`-флаг + триггер на вставку проводок | Требует `UPDATE` журнала (нарушает append-only) и гонки «запечатывания» |
+| Логическая репликация / внешний WORM-лог | Избыточно для MVP |
+
+### 4.3. Роль Go
+
+Go-сервис `Ledger.Post` строит журнал, валидирует его в домене (быстрые и понятные ошибки, unit-тесты без БД) и вызывает функцию. Бизнес-правила (статусы платежей, лимиты, комиссии) остаются в Go. Функция проверяет только бухгалтерские инварианты.
+
+### 4.4. Вторая линия: триггеры
 
 ```sql
+-- запрет мутаций для любой роли
 CREATE FUNCTION ledger.forbid_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   RAISE EXCEPTION 'ledger is append-only: % on % is forbidden', TG_OP, TG_TABLE_NAME
     USING ERRCODE = 'P0001';
 END $$;
-
-CREATE TRIGGER trg_entries_immutable
-  BEFORE UPDATE OR DELETE ON ledger.ledger_entries
+CREATE TRIGGER trg_entries_immutable  BEFORE UPDATE OR DELETE ON ledger.ledger_entries
   FOR EACH ROW EXECUTE FUNCTION ledger.forbid_mutation();
-CREATE TRIGGER trg_entries_no_truncate
-  BEFORE TRUNCATE ON ledger.ledger_entries
+CREATE TRIGGER trg_entries_no_truncate BEFORE TRUNCATE ON ledger.ledger_entries
   FOR EACH STATEMENT EXECUTE FUNCTION ledger.forbid_mutation();
--- то же для journal_transactions, *_status_history, audit_logs
-```
+-- то же для journal_transactions, *_status_history, audit.audit_logs
 
-Триггер — вторая линия обороны. Первая — права (§6). Владелец схемы может отключить триггер, поэтому миграции под ролью владельца проходят ревью.
-
-### 4.2. Сбалансированность журнала (ТЗ §4.4 п.2, [D-03](../architecture/open-questions.md#d-03))
-
-Обычный CHECK видит одну строку, поэтому используется **отложенный constraint trigger**. Он срабатывает на `COMMIT`, когда все проводки уже вставлены:
-
-```sql
-CREATE FUNCTION ledger.check_journal_balanced() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE bad record;
-BEGIN
-  SELECT currency,
-         SUM(CASE WHEN entry_type = 'DEBIT'  THEN amount ELSE 0 END) AS d,
-         SUM(CASE WHEN entry_type = 'CREDIT' THEN amount ELSE 0 END) AS c,
-         COUNT(*) AS n
-    INTO bad
-    FROM ledger.ledger_entries
-   WHERE journal_transaction_id = NEW.journal_transaction_id
-   GROUP BY currency
-  HAVING SUM(CASE WHEN entry_type = 'DEBIT' THEN amount ELSE -amount END) <> 0
-   LIMIT 1;
-  IF FOUND THEN
-    RAISE EXCEPTION 'unbalanced journal % in %: D=% C=%',
-      NEW.journal_transaction_id, bad.currency, bad.d, bad.c USING ERRCODE = 'P0002';
-  END IF;
-  IF (SELECT COUNT(*) FROM ledger.ledger_entries
-       WHERE journal_transaction_id = NEW.journal_transaction_id) < 2 THEN
-    RAISE EXCEPTION 'journal % has < 2 entries', NEW.journal_transaction_id USING ERRCODE = 'P0002';
-  END IF;
-  RETURN NULL;
-END $$;
-
+-- страховка баланса на COMMIT (ловит вставки в обход функции: сиды, миграции)
 CREATE CONSTRAINT TRIGGER trg_journal_balanced
-  AFTER INSERT ON ledger.ledger_entries
+  AFTER INSERT ON ledger.journal_transactions
   DEFERRABLE INITIALLY DEFERRED
-  FOR EACH ROW EXECUTE FUNCTION ledger.check_journal_balanced();
+  FOR EACH ROW EXECUTE FUNCTION ledger.check_journal_balanced();   -- ≥ 2 проводок и Σ D = Σ C по валютам
 ```
 
-Замечания:
+Отложенный триггер повешен на **журнал** (по одной проверке на журнал), а не на каждую проводку. Он видит все проводки, вставленные до `COMMIT`, и ловит и пустой, и несбалансированный журнал.
 
-- Срабатывает по строке, поэтому для журнала из N проводок проверка выполняется N раз. Для 2–4 проводок это дёшево (индекс по `journal_transaction_id`). Оптимизация — statement-level trigger с transition table (`REFERENCING NEW TABLE`), но такие триггеры не бывают `DEFERRABLE`. Альтернатива — проверка в функции проведения ([D-03](../architecture/open-questions.md#d-03), вариант B).
-- Журнал без проводок триггер не поймает: он срабатывает на вставку проводок. Поэтому нужен второй отложенный constraint trigger — `AFTER INSERT ON journal_transactions`, проверяющий ≥ 2 проводок.
+Владелец схемы (`paycore_owner`) может отключить триггеры. Это осознанная граница доверия: миграции проходят ревью, а production-доступ под `paycore_owner` выдаётся только на время миграций.
 
-### 4.3. Проводки только в транзакции создания журнала
+### 4.5. Прочие триггеры
 
-Запрет «дописать» проводки в уже закоммиченный журнал (это изменило бы историю, даже если журнал остаётся сбалансированным):
-
-```sql
--- в BEFORE INSERT ON ledger_entries
-IF (SELECT xmin FROM ledger.journal_transactions WHERE id = NEW.journal_transaction_id)
-   <> pg_current_xact_id()::xid THEN
-  RAISE EXCEPTION 'entries may be added only in the journal''s creating transaction';
-END IF;
-```
-
-Оговорки: приём опирается на системную колонку `xmin` и приведение `xid8 → xid`, поэтому его нужно проверить на целевой версии PostgreSQL. Внутри `SAVEPOINT` (вложенные транзакции pgx) `xmin` — это id подтранзакции, и сравнение даст ложный отказ, поэтому сервис проведения не использует savepoint между вставкой журнала и проводок.
-
-Альтернатива — вставлять журнал и проводки только через функцию `ledger.post_journal(...)` с `SECURITY DEFINER` и отозвать прямой `INSERT` у роли приложения ([D-03](../architecture/open-questions.md#d-03), вариант B).
-
-### 4.4. Прочие триггеры
-
-- `account_balances`: только `UPDATE` колонок сумм, `version` и `updated_at`; `version` строго растёт (`NEW.version = OLD.version + 1`). Можно оформить триггером или оставить проверкой в коде — рекомендация: триггер (дёшево).
-- `payments`, `transfers`, `holds`: триггер проверки допустимости перехода статуса (таблица разрешённых переходов) — опциональная третья линия после домена и условного `UPDATE ... WHERE status = ...`. Рекомендация: в MVP достаточно домена и условного UPDATE. Триггер — по желанию, для демонстрации.
-- `updated_at` — триггером или явно в SQL. Рекомендация: явно в SQL (прозрачнее, ТЗ §4).
+- `account_balances` и бакеты: прямой записи нет, поэтому триггер на `version` не нужен: версию увеличивает только функция.
+- Допустимость переходов статусов `payments`/`transfers`: домен + условный `UPDATE … WHERE status = …`. Триггер не используется (MVP).
+- `updated_at` — явно в SQL (прозрачнее, ТЗ §4).
 
 ## 5. Индексы
 
@@ -163,71 +157,69 @@ END IF;
 
 | Индекс | Запрос |
 |---|---|
-| `ledger_entries (journal_transaction_id)` (ТЗ §4.7) | проводки журнала, триггер баланса, Ledger Explorer |
-| `ledger_entries (ledger_account_id, account_version)` UNIQUE | выписка по счёту в порядке версий, последний `balance_after`, проверка I-09 |
-| `ledger_entries (ledger_account_id, created_at)` | баланс и обороты системного счёта за период |
-| `journal_transactions (reference_type, reference_id, operation, operation_seq)` UNIQUE | идемпотентность, «все журналы платежа» |
-| `journal_transactions (posted_at)` или BRIN `(posted_at)` | отчёты за период; BRIN выгоден на append-only таблице |
+| `ledger_entries (journal_transaction_id)` (ТЗ §4.7) | проводки журнала, отложенный триггер, Ledger Explorer |
+| `ledger_entries (ledger_account_id, account_version)` UNIQUE | выписка, последний `balance_after`, I-09 |
+| `ledger_entries (ledger_account_id, posted_at, id)` | обороты и баланс системного счёта за период |
+| `journal_transactions (reference_type, reference_id, operation, operation_seq)` UNIQUE | идемпотентность, журналы объекта |
+| BRIN `journal_transactions (posted_at)` | отчёты за период (append-only таблица) |
 | `journal_transactions (reverses_journal_id)` UNIQUE WHERE NOT NULL | поиск сторно |
 | `ledger_accounts (account_id, kind)` UNIQUE WHERE account_id IS NOT NULL | ledger-счета бизнес-счёта |
 | `ledger_accounts (system_code, currency)` UNIQUE WHERE owner_type = 'SYSTEM' | поиск системного счёта |
+| `system_balance_buckets` PK `(ledger_account_id, bucket_no)` | баланс = `SUM`, блокировка бакетов по порядку |
 
-### 5.2. Счета и резервы
+### 5.2. Счета, резервы, лимиты
 
 | Индекс | Запрос |
 |---|---|
-| `accounts (user_id)` WHERE user_id IS NOT NULL | счета клиента |
-| `accounts (merchant_id)` WHERE merchant_id IS NOT NULL | счета мерчанта |
-| `accounts (account_number)` UNIQUE | поиск получателя по номеру |
-| `holds (account_id) WHERE status = 'ACTIVE'` | проверка I-05, список резервов |
+| `accounts (user_id)` WHERE NOT NULL; `accounts (merchant_id)` WHERE NOT NULL | счета владельца |
+| `accounts (account_number)` UNIQUE | поиск получателя |
+| `holds (account_id) WHERE status = 'ACTIVE'` | резервы счёта, I-05 |
 | `holds (expires_at) WHERE status = 'ACTIVE'` | scheduler истечения |
+| `limit_counters` PK | счётчик лимита |
 | `account_status_history (account_id, changed_at DESC)` | история статусов |
 
-### 5.3. Платежи, переводы, возвраты (из ТЗ §4.7 + дополнения)
+### 5.3. Платежи, переводы, возвраты, выплаты
 
 | Индекс | Запрос |
 |---|---|
-| `payments (merchant_id, created_at DESC)` (ТЗ) | платежи мерчанта |
-| `payments (status, created_at DESC)` (ТЗ) | админка; лучше частичные индексы по «живым» статусам, см. ниже |
+| `payments (merchant_id, created_at DESC)` (ТЗ) | платежи магазина |
 | `payments (merchant_id, idempotency_key)` UNIQUE | идемпотентность |
-| `payments (customer_account_id, created_at DESC)` | история клиента |
-| `payments (expires_at) WHERE status = 'CREATED'` | истечение неоплаченных платежей |
+| `payments (customer_account_id, created_at DESC)` | история покупателя |
+| `payments (created_at DESC) WHERE status IN ('CREATED','AUTHORIZED')` | операционные очереди; заменяет низкоселективный `(status, created_at)` из ТЗ, если `EXPLAIN ANALYZE` подтвердит |
+| `checkout_sessions (expires_at) WHERE status = 'ACTIVE'` | истечение checkout |
+| `checkout_sessions (token_hash)` UNIQUE | открытие checkout |
 | `payment_attempts (payment_id, attempt_number)` UNIQUE | история попыток |
-| `payment_attempts (provider_reference)` UNIQUE WHERE NOT NULL | сверка |
-| `payment_attempts (started_at) WHERE status IN ('STARTED','UNKNOWN')` | восстановление зависших попыток |
-| `refunds (payment_id)` | возвраты платежа |
-| `transfers (sender_account_id, created_at DESC)` (ТЗ) | история отправителя |
-| `transfers (receiver_account_id, created_at DESC)` | история получателя (входящие) |
+| `refunds (payment_id, created_at)` | возвраты платежа |
+| `transfers (sender_account_id, created_at DESC)` (ТЗ), `(receiver_account_id, created_at DESC)` | история |
 | `transfers (initiated_by, idempotency_key)` UNIQUE | идемпотентность |
-| `transfers (created_at) WHERE status = 'ON_HOLD'` | очередь проверки |
-
-`payments (status, created_at DESC)` из ТЗ низкоселективен по статусу. Рекомендуется частичный индекс `(created_at DESC) WHERE status IN ('PENDING','AUTHORIZED')` для операционных очередей, а общий оставить, если подтвердится в `EXPLAIN ANALYZE`.
+| `payouts (merchant_id, created_at DESC)` | выплаты |
 
 ### 5.4. Инфраструктура
 
 | Индекс | Запрос |
 |---|---|
-| `outbox_events (created_at) WHERE published_at IS NULL` | relay |
-| `idempotency_keys (scope, endpoint, key)` UNIQUE | протокол идемпотентности |
-| `idempotency_keys (expires_at)` | очистка |
+| `outbox_events (seq) WHERE status = 'PENDING'` | захват пачки relay |
+| `outbox_events (aggregate_id, seq) WHERE status = 'PENDING'` | условие порядка `NOT EXISTS` |
+| `outbox_events (published_at) WHERE status = 'PUBLISHED'` | очистка |
+| `idempotency_keys (scope, endpoint, key)` UNIQUE; `(expires_at)` | протокол и очистка |
+| `webhook_deliveries (next_attempt_at) WHERE status = 'PENDING'` | worker доставки |
 | `audit_logs (resource_type, resource_id, occurred_at DESC)`, `(actor_id, occurred_at DESC)`, BRIN `(occurred_at)` | поиск в аудите |
-| `webhook_deliveries (next_attempt_at) WHERE status = 'PENDING'` | воркер доставки |
-| `commission_tariffs` GiST (EXCLUDE) | поиск действующего тарифа `@> now()` |
-| `login_attempts (email, attempted_at DESC)`, `(ip, attempted_at DESC)` | rate limiting авторизации |
+| `commission_tariffs` GiST (EXCLUDE) | действующий тариф |
+| `login_attempts (email, attempted_at DESC)`, `(ip, attempted_at DESC)` | rate limiting |
 
 ## 6. Роли и права БД
 
-| Роль | Права |
-|---|---|
-| `paycore_owner` | Владелец схем, применяет миграции. Приложение под ней не работает |
-| `paycore_app` | `SELECT, INSERT` на `ledger.*`, `*_status_history`, `audit.audit_logs`; `SELECT, INSERT, UPDATE` на изменяемых таблицах; **нет** `UPDATE/DELETE/TRUNCATE` на append-only таблицах; `DELETE` только на `platform.outbox_events`, `platform.idempotency_keys` (очистка) |
-| `paycore_readonly` | `SELECT` для отчётов и Ledger Explorer; при наличии — на реплике |
-| `paycore_audit_writer` | Опционально: единственная роль с `INSERT` в `audit_logs` ([Q-20](../architecture/open-questions.md#q-20)) |
+| Роль | LOGIN | Права |
+|---|---|---|
+| `paycore_owner` | да (только для миграций) | Владелец схем и таблиц; DDL |
+| `paycore_ledger` | **нет** | Владелец ledger-функций. `SELECT, INSERT` на `journal_transactions`, `ledger_entries`; `SELECT, INSERT, UPDATE` на `account_balances`, `system_balance_buckets`, `holds`; `SELECT` на `ledger_accounts`, `accounts.accounts`, `currencies`. **Нет** `UPDATE/DELETE/TRUNCATE` на журналах и проводках |
+| `paycore_app` | да | `EXECUTE` на `ledger.*`-функциях; `SELECT` на ledger-таблицах; `SELECT, INSERT, UPDATE` на изменяемых бизнес-таблицах (`payments`, `transfers`, `refunds`, `payouts`, `accounts`, `limit_counters`, …); `SELECT, INSERT` на `*_status_history`, `audit.audit_logs`; `DELETE` только на `platform.outbox_events`, `platform.idempotency_keys`, `platform.inbox_messages` (очистка). `idle_in_transaction_session_timeout = 30s` |
+| `paycore_readonly` | да | `SELECT` для отчётов и Ledger Explorer |
 
-Это реализует требование ТЗ §2.1: даже ADMIN приложения не может «тихо» изменить баланс. Любое движение денег — журнал, любая ручная корректировка — maker-checker и аудит.
+`SELECT … FOR UPDATE` требует права `UPDATE`. Поэтому `paycore_app` не может сама заблокировать `account_balances` и делает это через `ledger.lock_account_balances`. Это ещё и гарантирует сортировку L5.
 
-## 7. Партиционирование и рост (на будущее)
+Так выполняется ТЗ §2.1: даже ADMIN приложения не может изменить баланс в обход ledger. Любое движение денег — журнал через шлюз, любая ручная корректировка — maker-checker и аудит ([D-31](../architecture/decisions.md#d-31)).
 
-- Кандидаты: `ledger_entries`, `journal_transactions`, `audit_logs`, `outbox_events` — по диапазону времени (месяц).
-- Ограничение: в партиционированной таблице PK и UNIQUE должны включать ключ партиционирования. `UNIQUE (ledger_account_id, account_version)` и `UNIQUE (reference_type, reference_id, operation, operation_seq)` в этом случае не работают глобально. Поэтому партиционирование ledger откладывается до появления реальной потребности и требует отдельного ADR ([Q-25](../architecture/open-questions.md#q-25)).
-- До тех пор достаточно индексов, BRIN по времени и снапшотов балансов.
+## 7. Партиционирование (после MVP)
+
+Кандидаты — `ledger_entries`, `journal_transactions`, `audit_logs`, `outbox_events` по месяцам. В партиционированной таблице PK/UNIQUE должны включать ключ партиции, поэтому глобальные `UNIQUE (ledger_account_id, account_version)` и `UNIQUE (reference_type, …)` потеряют силу. Партиционирование ledger требует отдельного ADR. В MVP — индексы, BRIN и снапшоты ([D-34](../architecture/decisions.md#d-34)).

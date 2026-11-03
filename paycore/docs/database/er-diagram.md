@@ -1,10 +1,10 @@
 # ER-диаграмма PostgreSQL
 
-Статус: **проект**. Описание полей и типов — в [database-schema.md](database-schema.md), ограничения и индексы — в [data-integrity.md](data-integrity.md).
+Статус: **принято для MVP** (этап 2). Описание полей и типов — в [database-schema.md](database-schema.md), ограничения и индексы — в [data-integrity.md](data-integrity.md), решения — в [../architecture/decisions.md](../architecture/decisions.md).
 
-Диаграмма разбита на пять частей по модулям. Таблицы, которые встречаются в нескольких частях, на последующих диаграммах показаны только ключевыми полями. Обозначения: `PK` — первичный ключ, `FK` — внешний ключ, `UK` — уникальный. Типы упрощены для Mermaid: `char3` = `CHAR(3)`, `text_array` = `TEXT[]`, `text` = `TEXT` с CHECK на перечень значений.
+Диаграмма разбита на части по модулям. Таблицы, которые встречаются в нескольких частях, на последующих диаграммах показаны только ключевыми полями. Обозначения: `PK` — первичный ключ, `FK` — внешний ключ, `UK` — уникальный. Типы упрощены для Mermaid: `char3` = `CHAR(3)`, `text_array` = `TEXT[]`, `text` = `TEXT` с CHECK на перечень значений.
 
-Схемы PostgreSQL (namespaces) по модулям ([D-18](../architecture/open-questions.md#d-18)): `auth`, `merchants`, `accounts`, `ledger`, `payments`, `transfers`, `commissions`, `fraud`, `reconciliation`, `notifications`, `audit`, `platform` (idempotency, outbox, inbox).
+Схемы PostgreSQL по модулям ([D-18](../architecture/decisions.md#d-18)): `auth`, `merchants`, `accounts`, `ledger`, `payments`, `transfers`, `commissions`, `limits`, `simulator`, `notifications`, `audit`, `platform` (idempotency, outbox, inbox). После MVP: `fraud`, `reconciliation`.
 
 ## 1. Финансовое ядро: счета и ledger
 
@@ -12,12 +12,13 @@
 erDiagram
     currencies ||--o{ accounts : "валюта"
     users |o--o{ accounts : "владеет (клиент)"
-    merchants |o--o{ accounts : "владеет (мерчант)"
+    merchants |o--o{ accounts : "владеет (магазин)"
     accounts ||--|| account_balances : "проекция"
     accounts ||--o{ account_status_history : "история статуса"
-    accounts ||--o{ account_restrictions : "ограничения"
     accounts |o--o{ ledger_accounts : "2 ledger-счёта"
+    chart_of_accounts ||--o{ ledger_accounts : "тип счёта"
     currencies ||--o{ ledger_accounts : "валюта"
+    ledger_accounts ||--o{ system_balance_buckets : "бакеты (SYSTEM)"
     ledger_accounts ||--o{ ledger_entries : "проводки"
     journal_transactions ||--|{ ledger_entries : "содержит >=2"
     journal_transactions |o--o| journal_transactions : "reverses"
@@ -26,20 +27,21 @@ erDiagram
     accounts ||--o{ holds : "резервы"
 
     currencies {
-        char3 code PK "ISO 4217"
+        char3 code PK "RUB, USD"
         smallint minor_units "0..4"
         text name
         boolean is_active
     }
     accounts {
-        uuid id PK "UUIDv7"
+        uuid id PK "UUIDv7; UK (id, currency)"
         text account_number UK
-        uuid user_id FK "NULL для мерчанта"
+        uuid user_id FK "NULL для магазина"
         uuid merchant_id FK "NULL для клиента"
         text account_purpose "MAIN, SAVINGS, MERCHANT_SETTLEMENT"
         char3 currency FK
         text status "ACTIVE, BLOCKED, CLOSED"
         text name
+        bigint version
         timestamptz created_at
         timestamptz updated_at
         timestamptz closed_at
@@ -61,42 +63,48 @@ erDiagram
         uuid changed_by
         timestamptz changed_at
     }
-    account_restrictions {
-        uuid id PK
-        uuid account_id FK
-        text restriction "DEBIT, CREDIT, ALL"
-        text reason
-        uuid set_by
-        timestamptz valid_from
-        timestamptz valid_to
-        timestamptz lifted_at
-    }
-    ledger_accounts {
-        uuid id PK
-        text owner_type "CUSTOMER, MERCHANT, SYSTEM"
-        uuid account_id FK "NULL для SYSTEM"
-        text account_type "код CoA: 2100, 4200"
-        text kind "AVAILABLE, HOLD, NULL"
-        text system_code "FEE_INCOME_PAYMENTS..."
-        char3 currency FK
+    chart_of_accounts {
+        text code PK "1100, 2100, 4200..."
+        text name
         text account_class "ASSET..EXPENSE"
         text normal_balance "DEBIT, CREDIT"
         boolean allow_negative
-        boolean has_projection
+        boolean is_contra
+        boolean in_mvp
+    }
+    ledger_accounts {
+        uuid id PK "UK (id, currency)"
+        text owner_type "CUSTOMER, MERCHANT, SYSTEM"
+        uuid account_id FK "NULL для SYSTEM"
+        text account_type FK "код CoA"
+        text kind "AVAILABLE, HOLD, NULL"
+        text system_code "SIM_FUNDING_SOURCE..."
+        char3 currency FK
+        text account_class
+        text normal_balance
+        boolean allow_negative "false в MVP"
+        smallint bucket_count "16 для 1100, 4100, 4200"
         text status "ACTIVE, CLOSED"
         timestamptz created_at
     }
+    system_balance_buckets {
+        uuid ledger_account_id PK, FK
+        smallint bucket_no PK "0..bucket_count-1"
+        bigint balance "CHECK allow_negative OR >= 0"
+        boolean allow_negative
+        timestamptz updated_at
+    }
     journal_transactions {
         uuid id PK
-        text operation "TOPUP, TRANSFER, HOLD_PLACE..."
-        text reference_type "TRANSFER, PAYMENT, REFUND, HOLD..."
+        text operation "SIM_TOPUP, TRANSFER, HOLD_PLACE..."
+        text reference_type "SIM_TOPUP, TRANSFER, HOLD, REFUND, PAYOUT, ADJUSTMENT"
         uuid reference_id
         smallint operation_seq "default 1"
         uuid reverses_journal_id FK, UK "NULL кроме REVERSAL"
         text status "всегда POSTED"
         text description
         uuid initiated_by
-        date accounting_date
+        date accounting_date "UTC"
         timestamptz posted_at
     }
     ledger_entries {
@@ -104,7 +112,7 @@ erDiagram
         uuid journal_transaction_id FK
         uuid ledger_account_id FK
         text entry_type "DEBIT, CREDIT"
-        bigint amount "CHECK > 0"
+        bigint amount "CHECK > 0 AND <= 10^14"
         char3 currency "FK (ledger_account_id, currency)"
         bigint account_version "NULL для SYSTEM"
         bigint balance_after "NULL для SYSTEM"
@@ -124,8 +132,9 @@ erDiagram
         char3 currency
         bigint amount "CHECK > 0"
         text status "ACTIVE, CAPTURED, RELEASED, EXPIRED"
-        text reference_type "PAYMENT, TRANSFER"
-        uuid reference_id UK
+        text reference_type "PAYMENT в MVP"
+        uuid reference_id "UK с reference_type"
+        date limit_period_start
         timestamptz expires_at
         timestamptz created_at
         timestamptz finalized_at
@@ -135,6 +144,7 @@ erDiagram
         text status "DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, POSTED"
         jsonb proposed_entries
         text reason
+        text incident_ref
         uuid created_by
         uuid approved_by "<> created_by"
         uuid journal_transaction_id FK
@@ -143,63 +153,68 @@ erDiagram
     }
 ```
 
-## 2. Платежи, переводы, комиссии
+`account_restrictions` из этапа 1 перенесена на после MVP: в MVP ограничение операций выражается статусом `BLOCKED` ([D-26](../architecture/decisions.md#d-26)).
+
+## 2. Платежи и checkout
 
 ```mermaid
 erDiagram
     merchants ||--o{ stores : "магазины"
     merchants ||--o{ payments : "принимает"
     stores |o--o{ payments : "магазин"
-    accounts |o--o{ payments : "счёт клиента"
-    accounts ||--o{ payments : "счёт мерчанта"
+    accounts |o--o{ payments : "счёт клиента (после подтверждения)"
+    accounts ||--o{ payments : "счёт магазина"
+    payments ||--|| checkout_sessions : "сессия оплаты"
+    users |o--o{ checkout_sessions : "подтвердил"
     payments ||--o{ payment_attempts : "попытки"
     payments ||--o{ payment_status_history : "история"
     payments ||--o{ refunds : "возвраты"
     payments |o--o| holds : "резерв"
-    accounts ||--o{ transfers : "отправитель"
-    accounts ||--o{ transfers : "получатель"
-    transfers |o--o| holds : "резерв (REVIEW)"
-    transfers ||--o{ transfer_status_history : "история"
-    commission_tariffs |o--o{ payments : "тариф"
-    commission_tariffs |o--o{ transfers : "тариф"
-    accounts ||--o{ topups : "пополнения"
-    accounts ||--o{ payouts : "выплаты"
+    commission_tariffs |o--o{ payments : "тариф (при capture)"
 
     payments {
-        uuid id PK
+        uuid id PK "UK (id, currency)"
         uuid merchant_id FK
         uuid store_id FK
         uuid merchant_account_id FK
-        uuid customer_account_id FK "NULL до authorize"
-        uuid customer_user_id FK
+        uuid customer_user_id FK "NULL до подтверждения"
+        uuid customer_account_id FK "NULL до подтверждения"
         bigint amount "CHECK > 0"
         char3 currency
-        bigint fee_amount "CHECK >= 0"
+        bigint fee_amount "при capture"
         uuid fee_tariff_id FK
-        bigint captured_amount "0..amount"
+        bigint captured_amount "0 или amount"
         bigint refunded_amount "0..captured"
-        bigint refunded_fee_amount "если D-09 B"
-        text status "CREATED..REFUNDED"
+        text status "CREATED, AUTHORIZED, CAPTURED, PARTIALLY_REFUNDED, REFUNDED, FAILED, CANCELLED"
         text failure_code
-        text cancel_reason
-        uuid hold_id FK
+        text cancel_reason "MERCHANT_CANCELLED, CHECKOUT_EXPIRED, VOIDED, AUTH_EXPIRED"
+        uuid hold_id
         text idempotency_key "UK с merchant_id"
         text description
         bigint version
-        timestamptz expires_at "срок оплаты"
         timestamptz authorized_at
         timestamptz captured_at
         timestamptz created_at
         timestamptz updated_at
     }
+    checkout_sessions {
+        uuid id PK
+        uuid payment_id FK, UK
+        bytea token_hash UK
+        text status "ACTIVE, CONFIRMED, FAILED, CANCELLED, EXPIRED"
+        uuid customer_user_id FK
+        timestamptz expires_at "+30 мин"
+        timestamptz created_at
+        timestamptz confirmed_at
+    }
     payment_attempts {
         uuid id PK
         uuid payment_id FK
         int attempt_number "UK с payment_id"
-        text operation "AUTHORIZE, CAPTURE, VOID, REFUND"
-        text provider_reference
-        text status "STARTED, SUCCEEDED, FAILED, UNKNOWN"
+        text operation "CONFIRM, CAPTURE, VOID, REFUND"
+        text status "SUCCEEDED, FAILED"
         text error_code
+        uuid actor_id
         timestamptz started_at
         timestamptz finished_at
     }
@@ -217,15 +232,47 @@ erDiagram
         uuid payment_id FK
         bigint amount "CHECK > 0"
         char3 currency
-        bigint fee_refund_amount
-        text status "PENDING, SUCCEEDED, FAILED"
-        text failure_code
+        text status "SUCCEEDED, FAILED"
+        text failure_code "MERCHANT_INSUFFICIENT_FUNDS..."
         text reason
         text idempotency_key "UK с payment_id"
         uuid initiated_by
         timestamptz created_at
-        timestamptz completed_at
     }
+    commission_tariffs {
+        uuid id PK
+        text tariff_code "UK с version"
+        int version
+        text operation_type "TRANSFER_P2P, TRANSFER_OWN, PAYMENT"
+        uuid merchant_id FK "NULL = базовый"
+        char3 currency
+        int rate_bp "0..10000"
+        bigint fixed_amount
+        bigint min_amount
+        bigint max_amount "NULL = без max"
+        text rounding_mode "HALF_UP"
+        timestamptz valid_from
+        timestamptz valid_to "EXCLUDE overlap"
+        uuid created_by
+        uuid approved_by
+    }
+```
+
+## 3. Переводы, симулятор, выплаты, лимиты
+
+```mermaid
+erDiagram
+    accounts ||--o{ transfers : "отправитель"
+    accounts ||--o{ transfers : "получатель"
+    transfers ||--o{ transfer_status_history : "история"
+    commission_tariffs |o--o{ transfers : "тариф"
+    users ||--o{ test_topups : "пополняет"
+    accounts ||--o{ test_topups : "зачисление"
+    merchants ||--o{ payouts : "выводит"
+    accounts ||--o{ payouts : "списание"
+    users ||--o{ limit_counters : "использование лимитов"
+    limit_rules ||--o{ limit_counters : "правило по limit_type"
+
     transfers {
         uuid id PK
         uuid initiated_by FK
@@ -233,11 +280,10 @@ erDiagram
         uuid receiver_account_id FK "<> sender"
         bigint amount "CHECK > 0"
         char3 currency
-        bigint fee_amount "CHECK >= 0"
+        bigint fee_amount "сверх суммы"
         uuid fee_tariff_id FK
-        text status "ON_HOLD, COMPLETED, FAILED, CANCELLED"
+        text status "COMPLETED, FAILED"
         text failure_code
-        uuid hold_id FK
         text idempotency_key "UK с initiated_by"
         text description
         timestamptz created_at
@@ -252,47 +298,54 @@ erDiagram
         uuid changed_by
         timestamptz changed_at
     }
-    commission_tariffs {
-        uuid id PK
-        text tariff_code "TRANSFER_P2P, PAYMENT_DEFAULT"
-        int version "UK с tariff_code"
-        text operation_type "TRANSFER, PAYMENT"
-        uuid merchant_id FK "NULL = базовый"
+    test_topups {
+        uuid id PK "схема simulator"
+        uuid user_id FK
+        uuid account_id FK "MAIN или SAVINGS"
+        bigint amount "CHECK > 0"
         char3 currency
-        int rate_bp "0..10000"
-        bigint fixed_amount
-        bigint min_amount
-        bigint max_amount "NULL = без max"
-        text rounding_mode "HALF_UP"
+        text status "COMPLETED, FAILED"
+        text failure_code
+        text idempotency_key "UK с user_id"
+        uuid initiated_by
+        timestamptz created_at
+    }
+    payouts {
+        uuid id PK "схема merchants"
+        uuid merchant_id FK
+        uuid account_id FK
+        bigint amount "CHECK > 0"
+        char3 currency
+        text status "COMPLETED, FAILED"
+        text failure_code
+        text idempotency_key "UK с merchant_id"
+        uuid requested_by
+        timestamptz created_at
+    }
+    limit_rules {
+        uuid id PK
+        text limit_type "MAX_SINGLE_OPERATION, DAILY_OUTGOING, DAILY_SIM_TOPUP"
+        char3 currency
+        text scope "GLOBAL в MVP"
+        bigint amount "CHECK > 0"
         timestamptz valid_from
         timestamptz valid_to "EXCLUDE overlap"
         uuid created_by
         uuid approved_by
     }
-    topups {
-        uuid id PK
-        uuid account_id FK
-        bigint amount
-        char3 currency
-        text status
-        text idempotency_key
-        uuid initiated_by
-        timestamptz created_at
-    }
-    payouts {
-        uuid id PK
-        uuid merchant_id FK
-        uuid account_id FK
-        bigint amount
-        char3 currency
-        text status "INITIATED, SENT, SETTLED, FAILED"
-        text bank_reference
-        text idempotency_key
-        timestamptz created_at
+    limit_counters {
+        uuid user_id PK
+        char3 currency PK
+        text limit_type PK "DAILY_OUTGOING, DAILY_SIM_TOPUP"
+        date period_start PK "сутки UTC"
+        bigint used_amount "CHECK >= 0"
+        timestamptz updated_at
     }
 ```
 
-## 3. Идентификация и мерчанты
+Связь `limit_rules — limit_counters` логическая (по `limit_type` и `currency`), FK нет.
+
+## 4. Идентификация, мерчанты, платформа, аудит
 
 ```mermaid
 erDiagram
@@ -310,6 +363,7 @@ erDiagram
     stores |o--o{ api_keys : ""
     merchants ||--o{ webhook_endpoints : ""
     webhook_endpoints ||--o{ webhook_deliveries : "доставки"
+    outbox_events ||--o{ webhook_deliveries : "event_id (логически)"
 
     users {
         uuid id PK
@@ -392,7 +446,7 @@ erDiagram
         uuid store_id FK
         text key_prefix UK
         bytea key_hash
-        text mode "TEST, LIVE"
+        text mode "TEST в MVP"
         text_array scopes
         timestamptz expires_at
         timestamptz revoked_at
@@ -410,48 +464,47 @@ erDiagram
         uuid endpoint_id FK
         uuid event_id "outbox_events.id"
         int attempt
-        text status "PENDING, DELIVERED, FAILED, DEAD"
+        text status "PENDING, DELIVERED, DEAD"
         int response_code
+        text last_error
         timestamptz next_attempt_at
+        timestamptz processing_until "lease"
+        text lease_owner
         timestamptz delivered_at
     }
-```
-
-## 4. Надёжность, аудит, фрод
-
-```mermaid
-erDiagram
-    fraud_rules ||--o{ fraud_check_hits : "сработало"
-    fraud_checks ||--o{ fraud_check_hits : ""
-    fraud_checks |o--o| fraud_cases : "инцидент"
-
     idempotency_keys {
         uuid id PK
-        text scope "user:<id> / merchant:<id>"
-        text key "UK с scope, endpoint"
-        text endpoint "POST /api/v1/transfers"
+        text scope "user:id / merchant:id"
+        text endpoint "UK с scope, key"
+        text key
         bytea request_hash "SHA-256"
         text status "IN_PROGRESS, COMPLETED"
-        int response_code
+        smallint response_code
         jsonb response_body
         text resource_type
         uuid resource_id
-        timestamptz locked_until
         timestamptz created_at
-        timestamptz expires_at
+        timestamptz completed_at
+        timestamptz expires_at "+24 ч"
     }
     outbox_events {
-        uuid id PK
+        uuid id PK "event_id"
+        bigint seq UK "identity, порядок"
         text aggregate_type
-        uuid aggregate_id "ключ партиции Kafka"
+        uuid aggregate_id "ключ порядка"
+        bigint aggregate_version
         text event_type "payment.captured"
-        int event_version
+        smallint event_version
         jsonb payload
         jsonb headers "trace_id"
-        timestamptz created_at
-        timestamptz published_at "NULL = не опубликовано"
-        int publish_attempts
+        text status "PENDING, PUBLISHED, DEAD"
+        int attempts
+        timestamptz next_attempt_at
+        timestamptz processing_until "lease"
+        text lease_owner
         text last_error
+        timestamptz created_at
+        timestamptz published_at
     }
     inbox_messages {
         text consumer PK
@@ -475,6 +528,32 @@ erDiagram
         bytea hash
         timestamptz occurred_at
     }
+    notifications {
+        uuid id PK
+        uuid user_id
+        text channel "EMAIL, IN_APP"
+        text template
+        jsonb payload
+        text status
+        timestamptz created_at
+        timestamptz read_at
+    }
+```
+
+Таблицы `idempotency_keys`, `outbox_events`, `inbox_messages` (схема `platform`), `audit_logs` и `notifications` не имеют FK на бизнес-таблицы: связи показаны в [§7](#7-межмодульные-связи).
+
+## 5. После MVP: fraud и сверка
+
+Схемы `fraud` и `reconciliation` в MVP не создаются ([D-20](../architecture/decisions.md#d-20)): нет внешнего провайдера, сверять не с чем, а антифрод в MVP сводится к лимитам ([D-24](../architecture/decisions.md#d-24)). Модель этапа 1 сохранена как задел. Сверка внутренних данных (ledger против проекций) в MVP есть, но это фоновая проверка без собственных таблиц.
+
+### 5.1. Fraud
+
+```mermaid
+erDiagram
+    fraud_rules ||--o{ fraud_check_hits : "сработало"
+    fraud_checks ||--o{ fraud_check_hits : ""
+    fraud_checks |o--o| fraud_cases : "инцидент"
+
     fraud_rules {
         uuid id PK
         text code UK
@@ -508,19 +587,11 @@ erDiagram
         timestamptz created_at
         timestamptz resolved_at
     }
-    notifications {
-        uuid id PK
-        uuid user_id
-        text channel "EMAIL, IN_APP"
-        text template
-        jsonb payload
-        text status
-        timestamptz created_at
-        timestamptz read_at
-    }
 ```
 
-## 5. Сверка (Reconciliation)
+Вместе с fraud вернутся `transfers.hold_id`, статусы `ON_HOLD`/`CANCELLED` у переводов и `holds.reference_type = 'TRANSFER'` ([D-05](../architecture/decisions.md#d-05)).
+
+### 5.2. Сверка с внешним провайдером
 
 ```mermaid
 erDiagram
@@ -566,17 +637,37 @@ erDiagram
     }
 ```
 
-## 6. Межмодульные связи
+Вместе со сверкой вернутся `payment_attempts.provider_reference` и статусы `STARTED`/`UNKNOWN`.
 
-Полиморфные ссылки (без FK) — сознательное решение, рассчитанное на будущее разделение на сервисы ([D-12](../architecture/open-questions.md#d-12)):
+## 6. Изменения относительно этапа 1
+
+| Было | Стало | Решение |
+|---|---|---|
+| Проекция только у пользовательских счетов | `system_balance_buckets` для системных счетов | [D-02](../architecture/decisions.md#d-02) |
+| Тип счёта — свободный текст | Справочник `chart_of_accounts` | [D-03](../architecture/decisions.md#d-03) |
+| `topups` | `simulator.test_topups` | [D-15](../architecture/decisions.md#d-15) |
+| `payouts`: `INITIATED, SENT, SETTLED, FAILED`, `bank_reference` | `COMPLETED, FAILED`, без банка | [D-25](../architecture/decisions.md#d-25) |
+| Платёж без сессии оплаты | `checkout_sessions` | [D-22](../architecture/decisions.md#d-22) |
+| Статус платежа `PENDING` | Нет в MVP | [D-21](../architecture/decisions.md#d-21) |
+| `refunds.fee_refund_amount`, `payments.refunded_fee_amount` | Удалены: комиссия не возвращается | [D-09](../architecture/decisions.md#d-09) |
+| `transfers.ON_HOLD`, `hold_id` | После MVP | [D-05](../architecture/decisions.md#d-05) |
+| Лимитов в схеме нет | `limit_rules`, `limit_counters`, `holds.limit_period_start` | [D-24](../architecture/decisions.md#d-24) |
+| `idempotency_keys.locked_until` | Статусы `IN_PROGRESS`/`COMPLETED`, блокировка на уникальном индексе, `completed_at` | [D-07](../architecture/decisions.md#d-07) |
+| `outbox_events.published_at` как единственный признак | `seq`, `status`, lease (`processing_until`, `lease_owner`), backoff | [D-23](../architecture/decisions.md#d-23) |
+| Fraud и сверка в MVP | После MVP (§5) | [D-20](../architecture/decisions.md#d-20) |
+
+## 7. Межмодульные связи
+
+Полиморфные ссылки без FK — сознательное решение, рассчитанное на будущее разделение модулей ([D-12](../architecture/decisions.md#d-12)):
 
 | Откуда | Куда | Почему без FK |
 |---|---|---|
-| `journal_transactions.reference_id` | transfers / payments / refunds / holds / topups / payouts / manual_adjustments | Ledger не зависит от бизнес-модулей; целостность — `UNIQUE` + инвариант I-10 |
-| `holds.reference_id` | payments / transfers | то же |
+| `journal_transactions.reference_id` | holds / transfers / refunds / test_topups / payouts / manual_adjustments | Ledger не зависит от бизнес-модулей; целостность — `UNIQUE` и инвариант «у каждой бизнес-операции есть журнал» ([ledger-model.md §12](../architecture/ledger-model.md#12-финансовые-инварианты)) |
+| `holds.reference_id` | payments | то же |
 | `outbox_events.aggregate_id` | любой агрегат | инфраструктурная таблица |
-| `audit_logs.resource_id` | любой ресурс | аудит переживает удаление и архивирование ресурсов |
-| `fraud_checks.subject_id` | transfers / payments | Fraud будет выделен в сервис первым (ТЗ §3.3) |
-| `reconciliation_items.payment_id` | payments | слабая связь; совпадение может не найтись |
+| `webhook_deliveries.event_id` | outbox_events | события архивируются раньше доставок |
+| `idempotency_keys.resource_id` | созданный объект | ключи удаляются по TTL |
+| `audit_logs.resource_id` | любой ресурс | аудит переживает архивирование ресурсов |
+| `limit_counters.limit_type` | limit_rules | правила версионируются по периодам |
 
-FK внутри монолита, которые **разрешены** и будут удалены при выделении сервисов: `ledger_accounts.account_id → accounts`, `payments.*_account_id → accounts`, `transfers.*_account_id → accounts`, `accounts.user_id → users`, `accounts.merchant_id → merchants`.
+FK внутри монолита, которые **разрешены** и будут заменены при выделении модуля: `ledger_accounts.account_id → accounts`, `account_balances.account_id → accounts`, `holds.account_id → accounts`, `payments.*_account_id → accounts`, `transfers.*_account_id → accounts`, `test_topups.account_id → accounts`, `payouts.account_id → accounts`, `accounts.user_id → users`, `accounts.merchant_id → merchants`.
