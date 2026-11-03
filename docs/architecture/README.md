@@ -1,6 +1,6 @@
 # PayCore — архитектура финансового ядра
 
-Статус: **проект принят для MVP; идёт этап 3 (реализация)**. В коде — каркас сервиса ([D-38](decisions.md#d-38), [D-39](decisions.md#d-39)) и техническая миграция схемы `platform` (этап 3.2). Финансовых таблиц, `post_journal` и бизнес-модулей ещё нет. Ревью SQL-схемы Ledger — [ledger-schema-review.md](ledger-schema-review.md). Первоисточник требований — [../PROJECT_SPEC.md](../PROJECT_SPEC.md).
+Статус: **проект принят для MVP; идёт этап 3 (реализация)**. В коде — каркас сервиса ([D-38](decisions.md#d-38), [D-39](decisions.md#d-39)), схема `platform` (этап 3.2) и DDL таблиц `accounts`/`ledger` (этап 3.3). Функции `post_journal` и бизнес-модули ещё не реализованы. Ревью SQL-схемы Ledger — [ledger-schema-review.md](ledger-schema-review.md). Первоисточник требований — [../PROJECT_SPEC.md](../PROJECT_SPEC.md).
 
 MVP работает с виртуальными деньгами: источник средств — симулятор, реальных карт и внешних провайдеров нет. Соответствие PCI DSS, банковским требованиям и KYC/AML не заявляется ([D-20](decisions.md#d-20)).
 

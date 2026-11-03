@@ -116,7 +116,8 @@
 | `USAGE` на схему | да | да | да |
 | `journal_transactions`, `ledger_entries` | `SELECT` | `SELECT, INSERT` | `SELECT` |
 | `account_balances`, `system_balance_buckets`, `holds` | `SELECT` | `SELECT, INSERT, UPDATE` | `SELECT` |
-| `ledger_accounts`, `chart_of_accounts`, `ledger_balance_snapshots` | `SELECT` | `SELECT` | `SELECT` |
+| `ledger_accounts` | `SELECT` | `SELECT, INSERT` (`open_ledger_accounts`) | `SELECT` |
+| `chart_of_accounts`, `ledger_balance_snapshots` | `SELECT` | `SELECT` | `SELECT` |
 | `manual_adjustments` | `SELECT, INSERT, UPDATE` | `SELECT` | `SELECT` |
 | функции `ledger.*` | `EXECUTE` (после `REVOKE` у `PUBLIC`) | владелец через `ALTER FUNCTION` (§6.4) | — |
 | `accounts.accounts` | `SELECT, INSERT, UPDATE` | `SELECT` + `UPDATE (updated_at)` | `SELECT` |

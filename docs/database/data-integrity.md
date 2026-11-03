@@ -24,7 +24,7 @@
 | `journal_transactions` | `status = 'POSTED'`; `operation IN (…)`; `reference_type IN (…)`; `(operation = 'REVERSAL') = (reverses_journal_id IS NOT NULL)` |
 | `ledger_accounts` | SYSTEM ⇔ `account_id IS NULL` ⇔ `system_code IS NOT NULL` ⇔ `kind IS NULL`; класс ⇔ нормальное сальдо; `bucket_count BETWEEN 1 AND 256`; `bucket_count = 1` для пользовательских счетов; `owner_type = 'SYSTEM' OR status = 'ACTIVE'` (статус бизнес-счёта хранится только в `accounts.accounts`) |
 | `account_balances` | `available_amount >= 0`; `reserved_amount >= 0`; `version >= 0` |
-| `system_balance_buckets` | `bucket_no >= 0`; `CHECK (allow_negative OR balance >= 0)`. Колонка `allow_negative` копируется из `ledger_accounts` при создании бакетов, пишет её только `paycore_ledger`. Для всех системных счетов MVP значение `false` |
+| `system_balance_buckets` | `owner_type = 'SYSTEM'`; `0 <= bucket_no < bucket_count`; `CHECK (allow_negative OR balance >= 0)`. `owner_type`, `allow_negative`, `bucket_count` — копии родителя, зафиксированные составным FK. Для всех системных счетов MVP `allow_negative = false` |
 | `holds` | `amount > 0`; статус; `finalized_at` ⇔ не `ACTIVE` |
 | `accounts` | `num_nonnulls(user_id, merchant_id) = 1`; статус; `closed_at` ⇔ `CLOSED` |
 | `payments` | `amount > 0`; `0 <= fee_amount < amount` ([D-27](../architecture/decisions.md#d-27): при `fee ≥ amount` capture отклоняется `FEE_EXCEEDS_PAYMENT`, комиссия не урезается); `0 <= captured_amount <= amount`; `0 <= refunded_amount <= captured_amount`; статус ⇔ суммы; `status NOT IN ('AUTHORIZED','CAPTURED','PARTIALLY_REFUNDED','REFUNDED') OR customer_account_id IS NOT NULL`; `status IN ('CREATED','AUTHORIZED','CAPTURED','PARTIALLY_REFUNDED','REFUNDED','FAILED','CANCELLED')` (без `PENDING`, [D-21](../architecture/decisions.md#d-21)) |
@@ -213,7 +213,7 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 | Роль | LOGIN | Права |
 |---|---|---|
 | `paycore_owner` | да (только для миграций) | Владелец схем и таблиц; DDL |
-| `paycore_ledger` | **нет** | Владелец ledger-функций. `SELECT, INSERT` на `journal_transactions`, `ledger_entries`; `SELECT, INSERT, UPDATE` на `account_balances`, `system_balance_buckets`, `holds`; `SELECT` на `ledger_accounts`, `accounts.accounts`, `currencies`, `manual_adjustments`; колоночная привилегия `UPDATE (updated_at)` на `accounts.accounts` — только ради `SELECT … FOR SHARE NOWAIT` (шаг 3 [ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer)). **Нет** `UPDATE/DELETE/TRUNCATE` на журналах и проводках |
+| `paycore_ledger` | **нет** | Владелец будущих ledger-функций. `SELECT, INSERT` на `journal_transactions`, `ledger_entries`, `ledger_accounts` (`open_ledger_accounts`); `SELECT, INSERT, UPDATE` на `account_balances`, `system_balance_buckets`, `holds`; `SELECT` на `chart_of_accounts`, `accounts.accounts`, `currencies`, `manual_adjustments`; колоночная привилегия `UPDATE (updated_at)` на `accounts.accounts` — только ради `SELECT … FOR SHARE NOWAIT` (шаг 3 [ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer)). **Нет** `UPDATE/DELETE/TRUNCATE` на журналах и проводках |
 | `paycore_app` | да | `EXECUTE` на `ledger.*`-функциях; `SELECT` на ledger-таблицах; `SELECT, INSERT, UPDATE` на изменяемых бизнес-таблицах (`payments`, `transfers`, `refunds`, `payouts`, `accounts`, `limit_counters`, …); `SELECT, INSERT` на `*_status_history`, `audit.audit_logs`; `DELETE` только на `platform.outbox_events`, `platform.idempotency_keys`, `platform.inbox_messages` (очистка). `idle_in_transaction_session_timeout = 30s` |
 | `paycore_readonly` | да | `SELECT` для отчётов и Ledger Explorer |
 
@@ -223,7 +223,7 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 
 Так выполняется ТЗ §2.1: даже ADMIN приложения не может изменить баланс в обход ledger. Любое движение денег — журнал через шлюз, любая ручная корректировка — maker-checker и аудит ([D-31](../architecture/decisions.md#d-31)).
 
-На этапе 3.2 роли создаёт `migrate bootstrap` (суперпользователь, `CREATE ROLE`). Goose-миграции выполняет `paycore_owner`. Приложение и интеграционные тесты подключаются только как `paycore_app`. `paycore_ledger` — `NOLOGIN`. Финансовые таблицы в этой фазе не создаются.
+На этапе 3.2 роли создаёт `migrate bootstrap` (суперпользователь, `CREATE ROLE`). Goose-миграции выполняет `paycore_owner`. Приложение и интеграционные тесты подключаются только как `paycore_app`. `paycore_ledger` — `NOLOGIN`. Этап 3.3 создаёт таблицы `accounts` и `ledger` с грантами по таблице; функций `post_journal` нет.
 
 Миграция `00001_platform_schema.sql` выдаёт `paycore_app` права `INSERT, UPDATE` на `platform.schema_info` и ставит `ALTER DEFAULT PRIVILEGES … ON TABLES` в схеме `platform`. Это шире целевой модели: будущие гранты — **по таблице**, без blanket `GRANT` на все таблицы схемы. План — [ledger-schema-review.md §6](../architecture/ledger-schema-review.md#6-план-грантов-будущих-таблиц). Саму миграцию 3.2 этот документ не меняет.
 

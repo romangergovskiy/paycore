@@ -89,25 +89,27 @@ func TestMigrationsAndRoles(t *testing.T) {
 		t.Fatalf("up: %v", err)
 	}
 	v, err := CurrentVersion(ctx, c.owner)
-	if err != nil || v != 1 {
+	if err != nil || v != 3 {
 		t.Fatalf("version after up = %d, %v", v, err)
 	}
 	assertSchemaInfo(t, ctx, c.app, true)
+	assertFinancialSchemas(t, ctx, c.owner, true)
 
-	if err := Down(ctx, c.owner); err != nil {
-		t.Fatalf("down: %v", err)
-	}
-	v, err = CurrentVersion(ctx, c.owner)
-	if err != nil || v != 0 {
-		t.Fatalf("version after down = %d, %v", v, err)
-	}
-	assertNoPlatform(t, ctx, c.owner)
-
-	if err := Up(ctx, c.owner); err != nil {
-		t.Fatalf("up after down: %v", err)
-	}
-	assertSchemaInfo(t, ctx, c.app, true)
-	assertNoFinancialSchemas(t, ctx, c.owner)
+	t.Run("second clean database", func(t *testing.T) {
+		c2 := startCluster(t)
+		if err := Bootstrap(ctx, c2.admin, c2.owner, c2.app, c2.readonly); err != nil {
+			t.Fatalf("bootstrap: %v", err)
+		}
+		if err := Up(ctx, c2.owner); err != nil {
+			t.Fatalf("up: %v", err)
+		}
+		v2, err := CurrentVersion(ctx, c2.owner)
+		if err != nil || v2 != 3 {
+			t.Fatalf("version after up = %d, %v", v2, err)
+		}
+		assertSchemaInfo(t, ctx, c2.app, true)
+		assertFinancialSchemas(t, ctx, c2.owner, true)
+	})
 
 	t.Run("paycore_app session settings and grants", func(t *testing.T) {
 		conn, err := pgx.Connect(ctx, c.app)
@@ -244,7 +246,7 @@ func assertNoPlatform(t *testing.T, ctx context.Context, dsn string) {
 	}
 }
 
-func assertNoFinancialSchemas(t *testing.T, ctx context.Context, dsn string) {
+func assertFinancialSchemas(t *testing.T, ctx context.Context, dsn string, wantAccountsLedger bool) {
 	t.Helper()
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
@@ -252,22 +254,53 @@ func assertNoFinancialSchemas(t *testing.T, ctx context.Context, dsn string) {
 	}
 	defer conn.Close(ctx)
 	rows, err := conn.Query(ctx, `SELECT nspname FROM pg_namespace WHERE nspname = ANY($1)`,
-		[]string{"ledger", "accounts", "payments", "transfers", "commissions", "limits"})
+		[]string{"ledger", "accounts", "auth", "merchants", "payments", "transfers", "commissions", "limits"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
-	var found []string
+	found := map[string]bool{}
 	for rows.Next() {
 		var n string
 		if err := rows.Scan(&n); err != nil {
 			t.Fatal(err)
 		}
-		found = append(found, n)
+		found[n] = true
 	}
-	if len(found) > 0 {
-		t.Fatalf("financial schemas present: %v", found)
+	if found["payments"] || found["transfers"] || found["commissions"] || found["limits"] {
+		t.Fatalf("out-of-scope schemas present: %v", found)
 	}
+	if found["accounts"] != wantAccountsLedger || found["ledger"] != wantAccountsLedger {
+		t.Fatalf("accounts/ledger present=%v want=%v (found %v)", found["accounts"] && found["ledger"], wantAccountsLedger, found)
+	}
+	if found["auth"] != wantAccountsLedger || found["merchants"] != wantAccountsLedger {
+		t.Fatalf("stub auth/merchants present=%v want=%v (found %v)", found["auth"] && found["merchants"], wantAccountsLedger, found)
+	}
+}
+
+func TestPlatformMigrationDown(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	c := startCluster(t)
+	if err := Bootstrap(ctx, c.admin, c.owner, c.app, c.readonly); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if err := UpTo(ctx, c.owner, 1); err != nil {
+		t.Fatalf("up-to 1: %v", err)
+	}
+	if err := Down(ctx, c.owner); err != nil {
+		t.Fatalf("down platform: %v", err)
+	}
+	v, err := CurrentVersion(ctx, c.owner)
+	if err != nil || v != 0 {
+		t.Fatalf("version after down = %d, %v", v, err)
+	}
+	assertNoPlatform(t, ctx, c.owner)
+	if err := UpTo(ctx, c.owner, 1); err != nil {
+		t.Fatalf("up-to 1 after down: %v", err)
+	}
+	assertSchemaInfo(t, ctx, c.app, true)
+	assertFinancialSchemas(t, ctx, c.owner, false)
 }
 
 func TestOpenEmptyDSN(t *testing.T) {

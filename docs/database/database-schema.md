@@ -1,6 +1,6 @@
 # Схема базы данных PostgreSQL
 
-Статус: **принято для MVP** (этап 2). Это не миграции: SQL-фрагменты иллюстративны. В коде есть техническая миграция `platform` (этап 3.2); финансовые таблицы ещё не созданы. Ревью схемы — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
+Статус: **принято для MVP** (этап 2). SQL-фрагменты иллюстративны. В коде миграции `00002_accounts.sql` и `00003_ledger.sql` создают таблицы `accounts` и `ledger` (этап 3.3); функций `post_journal` нет. У финансовых миграций нет Goose Down ([D-38](../architecture/decisions.md#d-38)). Ревью схемы — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
 
 Связанные документы: [er-diagram.md](er-diagram.md), [data-integrity.md](data-integrity.md) (CHECK, FK, индексы, права), [concurrency.md](concurrency.md), [../architecture/ledger-model.md](../architecture/ledger-model.md), [../architecture/decisions.md](../architecture/decisions.md).
 
@@ -68,12 +68,11 @@
 | id | UUID | PK; `UNIQUE (id, currency)` |
 | owner_type | TEXT NN | `CUSTOMER`, `MERCHANT`, `SYSTEM` |
 | account_id | UUID | FK `(account_id, currency)` → `accounts.accounts(id, currency)`; NULL для SYSTEM |
-| account_type | TEXT NN | FK → `chart_of_accounts(code)` |
+| account_type | TEXT NN | код CoA; входит в составной FK на `chart_of_accounts` |
 | kind | TEXT | `AVAILABLE`, `HOLD`; NULL для SYSTEM |
 | system_code | TEXT | `SIM_FUNDING_SOURCE`, `FEE_INCOME_TRANSFERS`, `FEE_INCOME_PAYMENTS`, `OPERATIONAL_LOSSES`; NULL для пользовательских |
 | currency | CHAR(3) NN | |
-| account_class, normal_balance | TEXT NN | согласованы CHECK |
-| allow_negative | BOOLEAN NN | `false` для всех счетов MVP |
+| account_class, normal_balance, allow_negative | TEXT/BOOLEAN NN | копии из `chart_of_accounts`; составной FK `(account_type, account_class, normal_balance, allow_negative)`; в MVP `allow_negative = false` |
 | bucket_count | SMALLINT NN | 1 для пользовательских; 16 для 1100, 4100, 4200; 1 для 5900 |
 | status | TEXT NN | `ACTIVE`, `CLOSED`. Имеет смысл только для системных счетов: `CHECK (owner_type = 'SYSTEM' OR status = 'ACTIVE')`. Статус пользовательских ledger-счетов не дублируется — `post_journal` читает статус бизнес-счёта из `accounts.accounts` ([ledger-model.md §11.4](../architecture/ledger-model.md#114-статусы-счетов-и-допустимые-операции)) |
 | created_at | TIMESTAMPTZ NN | |
@@ -95,13 +94,15 @@
 
 | Колонка | Тип | Ограничения |
 |---|---|---|
-| ledger_account_id | UUID | PK (часть), FK → ledger_accounts (только `owner_type = 'SYSTEM'`) |
+| ledger_account_id | UUID | PK (часть) |
 | bucket_no | SMALLINT | PK (часть), `0 <= bucket_no < bucket_count` |
 | balance | BIGINT NN | DEFAULT 0; `CHECK (allow_negative OR balance >= 0)` |
+| owner_type | TEXT NN | копия; `CHECK (= 'SYSTEM')` |
 | allow_negative | BOOLEAN NN | копия из ledger_accounts |
+| bucket_count | SMALLINT NN | копия из ledger_accounts |
 | updated_at | TIMESTAMPTZ NN | |
 
-Бакеты создаются вместе с системным счётом. Баланс = `SUM(balance)`.
+Составной FK `(ledger_account_id, owner_type, allow_negative, bucket_count)` → `ledger_accounts`. Так копии не расходятся с родителем; триггер не нужен. Бакеты создаются вместе с системным счётом. Баланс = `SUM(balance)`.
 
 ### `journal_transactions` — append-only
 
@@ -150,7 +151,7 @@ PK `(ledger_account_id, snapshot_date)`; `debit_total`, `credit_total`, `balance
 | currency | CHAR(3) NN | |
 | amount | BIGINT NN | `> 0` |
 | status | TEXT NN | `ACTIVE`, `CAPTURED`, `RELEASED`, `EXPIRED` |
-| reference_type | TEXT NN | `PAYMENT` (MVP); `TRANSFER` после MVP |
+| reference_type | TEXT NN | MVP: только `PAYMENT` ([D-37](../architecture/decisions.md#d-37)); `TRANSFER` — отдельная миграция после MVP |
 | reference_id | UUID NN | `UNIQUE (reference_type, reference_id)` |
 | limit_period_start | DATE | период лимита, использованного при резерве ([D-24](../architecture/decisions.md#d-24)) |
 | expires_at | TIMESTAMPTZ NN | |

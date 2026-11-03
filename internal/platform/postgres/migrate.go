@@ -44,6 +44,16 @@ func Up(ctx context.Context, dsn string) error {
 	})
 }
 
+// UpTo applies Goose migrations up to version as paycore_owner.
+func UpTo(ctx context.Context, dsn string, version int64) error {
+	return withGoose(ctx, dsn, func(db *sql.DB) error {
+		if err := goose.UpToContext(ctx, db, ".", version); err != nil {
+			return fmt.Errorf("goose up-to %d: %w", version, err)
+		}
+		return nil
+	})
+}
+
 // Down rolls back a single Goose migration as paycore_owner.
 func Down(ctx context.Context, dsn string) error {
 	return withGoose(ctx, dsn, func(db *sql.DB) error {
