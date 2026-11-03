@@ -22,12 +22,12 @@
 |---|---|
 | `ledger_entries` | `amount > 0 AND amount <= 10^14`; `entry_type IN ('DEBIT','CREDIT')`; `(account_version IS NULL) = (balance_after IS NULL)` |
 | `journal_transactions` | `status = 'POSTED'`; `operation IN (…)`; `reference_type IN (…)`; `(operation = 'REVERSAL') = (reverses_journal_id IS NOT NULL)` |
-| `ledger_accounts` | SYSTEM ⇔ `account_id IS NULL` ⇔ `system_code IS NOT NULL` ⇔ `kind IS NULL`; класс ⇔ нормальное сальдо; `bucket_count BETWEEN 1 AND 256`; `bucket_count = 1` для пользовательских счетов |
+| `ledger_accounts` | SYSTEM ⇔ `account_id IS NULL` ⇔ `system_code IS NOT NULL` ⇔ `kind IS NULL`; класс ⇔ нормальное сальдо; `bucket_count BETWEEN 1 AND 256`; `bucket_count = 1` для пользовательских счетов; `owner_type = 'SYSTEM' OR status = 'ACTIVE'` (статус бизнес-счёта хранится только в `accounts.accounts`) |
 | `account_balances` | `available_amount >= 0`; `reserved_amount >= 0`; `version >= 0` |
 | `system_balance_buckets` | `bucket_no >= 0`; `CHECK (allow_negative OR balance >= 0)`. Колонка `allow_negative` копируется из `ledger_accounts` при создании бакетов, пишет её только `paycore_ledger`. Для всех системных счетов MVP значение `false` |
 | `holds` | `amount > 0`; статус; `finalized_at` ⇔ не `ACTIVE` |
 | `accounts` | `num_nonnulls(user_id, merchant_id) = 1`; статус; `closed_at` ⇔ `CLOSED` |
-| `payments` | `amount > 0`; `0 <= fee_amount <= amount`; `0 <= captured_amount <= amount`; `0 <= refunded_amount <= captured_amount`; статус ⇔ суммы; `status NOT IN ('AUTHORIZED','CAPTURED','PARTIALLY_REFUNDED','REFUNDED') OR customer_account_id IS NOT NULL`; `status IN ('CREATED','AUTHORIZED','CAPTURED','PARTIALLY_REFUNDED','REFUNDED','FAILED','CANCELLED')` (без `PENDING`, [D-21](../architecture/decisions.md#d-21)) |
+| `payments` | `amount > 0`; `0 <= fee_amount < amount` ([D-27](../architecture/decisions.md#d-27): при `fee ≥ amount` capture отклоняется `FEE_EXCEEDS_PAYMENT`, комиссия не урезается); `0 <= captured_amount <= amount`; `0 <= refunded_amount <= captured_amount`; статус ⇔ суммы; `status NOT IN ('AUTHORIZED','CAPTURED','PARTIALLY_REFUNDED','REFUNDED') OR customer_account_id IS NOT NULL`; `status IN ('CREATED','AUTHORIZED','CAPTURED','PARTIALLY_REFUNDED','REFUNDED','FAILED','CANCELLED')` (без `PENDING`, [D-21](../architecture/decisions.md#d-21)) |
 | `checkout_sessions` | статус; `expires_at > created_at`; `CONFIRMED` ⇔ `confirmed_at IS NOT NULL` |
 | `refunds` | `amount > 0`; `status IN ('SUCCEEDED','FAILED')`; `FAILED` ⇔ `failure_code` |
 | `transfers` | `amount > 0`; `fee_amount >= 0`; `sender <> receiver`; `status IN ('COMPLETED','FAILED')`; `FAILED` ⇔ `failure_code` |
@@ -105,6 +105,7 @@ ALTER TABLE transfers.transfers ADD CONSTRAINT fk_transfers_sender_currency
 | Проверка сбалансированности | В функции до любой записи: \(\sum D = \sum C\) по каждой валюте, ≥ 2 проводок, суммы в диапазоне. Страховка — отложенный триггер §4.4 |
 | Запрет `POSTED` для пустого или несбалансированного журнала | Журнал вставляется **после** успешной валидации и в одном вызове с проводками. Отложенный триггер на `journal_transactions` проверяет ≥ 2 проводок и баланс на `COMMIT` |
 | Журнал и проводки в одной транзакции | Один вызов функции = одна транзакция вызывающего. Ошибка внутри функции откатывает всё, включая бизнес-изменения use case |
+| Статус счёта не обходится | Функция сама читает статус каждого бизнес-счёта (`FOR SHARE NOWAIT`) и системного ledger-счёта и сверяет каждую проводку с матрицей «операция × роль × статус» ([ledger-model.md §11.4](../architecture/ledger-model.md#114-статусы-счетов-и-допустимые-операции)). Нарушение → `PC403`; вызов без L3 при параллельной смене статуса → `PC460`. Исключения матрицы (`HOLD_RELEASE` и `REFUND` на `BLOCKED`-покупателя) ослабляют только проверку статуса, бухгалтерские проверки действуют полностью |
 
 ### 4.2. Почему не другие механизмы
 
@@ -117,7 +118,7 @@ ALTER TABLE transfers.transfers ADD CONSTRAINT fk_transfers_sender_currency
 
 ### 4.3. Роль Go
 
-Go-сервис `Ledger.Post` строит журнал, валидирует его в домене (быстрые и понятные ошибки, unit-тесты без БД) и вызывает функцию. Бизнес-правила (статусы платежей, лимиты, комиссии) остаются в Go. Функция проверяет только бухгалтерские инварианты.
+Go-сервис `Ledger.Post` строит журнал, валидирует его в домене (быстрые и понятные ошибки, unit-тесты без БД) и вызывает функцию. Бизнес-правила (статусы платежей, лимиты, комиссии) остаются в Go. Функция проверяет бухгалтерские инварианты и допустимость операции по статусу счёта ([D-26](../architecture/decisions.md#d-26)); use case проверяет статус заранее, чтобы сохранить отказ как `FAILED`-объект.
 
 ### 4.4. Вторая линия: триггеры
 
@@ -212,11 +213,13 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 | Роль | LOGIN | Права |
 |---|---|---|
 | `paycore_owner` | да (только для миграций) | Владелец схем и таблиц; DDL |
-| `paycore_ledger` | **нет** | Владелец ledger-функций. `SELECT, INSERT` на `journal_transactions`, `ledger_entries`; `SELECT, INSERT, UPDATE` на `account_balances`, `system_balance_buckets`, `holds`; `SELECT` на `ledger_accounts`, `accounts.accounts`, `currencies`. **Нет** `UPDATE/DELETE/TRUNCATE` на журналах и проводках |
+| `paycore_ledger` | **нет** | Владелец ledger-функций. `SELECT, INSERT` на `journal_transactions`, `ledger_entries`; `SELECT, INSERT, UPDATE` на `account_balances`, `system_balance_buckets`, `holds`; `SELECT` на `ledger_accounts`, `accounts.accounts`, `currencies`, `manual_adjustments`; колоночная привилегия `UPDATE (updated_at)` на `accounts.accounts` — только ради `SELECT … FOR SHARE NOWAIT` (шаг 3 [ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer)). **Нет** `UPDATE/DELETE/TRUNCATE` на журналах и проводках |
 | `paycore_app` | да | `EXECUTE` на `ledger.*`-функциях; `SELECT` на ledger-таблицах; `SELECT, INSERT, UPDATE` на изменяемых бизнес-таблицах (`payments`, `transfers`, `refunds`, `payouts`, `accounts`, `limit_counters`, …); `SELECT, INSERT` на `*_status_history`, `audit.audit_logs`; `DELETE` только на `platform.outbox_events`, `platform.idempotency_keys`, `platform.inbox_messages` (очистка). `idle_in_transaction_session_timeout = 30s` |
 | `paycore_readonly` | да | `SELECT` для отчётов и Ledger Explorer |
 
 `SELECT … FOR UPDATE` требует права `UPDATE`. Поэтому `paycore_app` не может сама заблокировать `account_balances` и делает это через `ledger.lock_account_balances`. Это ещё и гарантирует сортировку L5.
+
+Любая row-lock-клауза (`FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE`) требует права `UPDATE` хотя бы на одну колонку таблицы. Поэтому `paycore_ledger` получает `UPDATE` только на `accounts.accounts.updated_at`: это минимально достаточно для `FOR SHARE NOWAIT` и не позволяет менять статус, валюту или владельца. Ledger-функции `accounts.accounts` не обновляют; это проверяется ревью и интеграционным тестом (после вызова `post_journal` строка счёта не изменилась).
 
 Так выполняется ТЗ §2.1: даже ADMIN приложения не может изменить баланс в обход ledger. Любое движение денег — журнал через шлюз, любая ручная корректировка — maker-checker и аудит ([D-31](../architecture/decisions.md#d-31)).
 

@@ -14,7 +14,7 @@
 | Схемы | По модулям ([D-18](../architecture/decisions.md#d-18)): `auth`, `merchants`, `accounts`, `ledger`, `payments`, `transfers`, `commissions`, `limits`, `simulator`, `notifications`, `audit`, `platform`. После MVP: `fraud`, `reconciliation` |
 | PK | `UUID`, значения UUIDv7 из Go ([D-14](../architecture/decisions.md#d-14)) |
 | Деньги | `BIGINT` в минорных единицах, `CHECK` на диапазон |
-| Валюта | `CHAR(3)`, FK на `accounts.currencies`. MVP: RUB, USD |
+| Валюта | `CHAR(3)`, FK на `accounts.currencies`. MVP: только RUB ([D-30](../architecture/decisions.md#d-30)); колонки и составные FK остаются, чтобы добавить валюту без изменения схемы |
 | Перечисления | `TEXT + CHECK` ([D-13](../architecture/decisions.md#d-13)) |
 | Время | `TIMESTAMPTZ`, UTC ([D-29](../architecture/decisions.md#d-29)) |
 | Удаление | Финансовые и аудиторские данные не удаляются; FK без каскадов |
@@ -26,7 +26,7 @@
 
 ### `currencies`
 
-`code CHAR(3) PK` (`^[A-Z]{3}$`), `minor_units SMALLINT NN` (0…4), `name TEXT NN`, `is_active BOOLEAN NN`. Сид: RUB (2), USD (2).
+`code CHAR(3) PK` (`^[A-Z]{3}$`), `minor_units SMALLINT NN` (0…4), `name TEXT NN`, `is_active BOOLEAN NN`. Сид: только RUB (`minor_units = 2`, `is_active = true`). Другие валюты добавляются в следующих фазах строкой справочника и системными счетами в этой валюте; до тех пор API отклоняет их кодом `CURRENCY_NOT_SUPPORTED` ([D-30](../architecture/decisions.md#d-30)).
 
 ### `accounts` — бизнес-счёт
 
@@ -75,7 +75,7 @@
 | account_class, normal_balance | TEXT NN | согласованы CHECK |
 | allow_negative | BOOLEAN NN | `false` для всех счетов MVP |
 | bucket_count | SMALLINT NN | 1 для пользовательских; 16 для 1100, 4100, 4200; 1 для 5900 |
-| status | TEXT NN | `ACTIVE`, `CLOSED` |
+| status | TEXT NN | `ACTIVE`, `CLOSED`. Имеет смысл только для системных счетов: `CHECK (owner_type = 'SYSTEM' OR status = 'ACTIVE')`. Статус пользовательских ledger-счетов не дублируется — `post_journal` читает статус бизнес-счёта из `accounts.accounts` ([ledger-model.md §11.4](../architecture/ledger-model.md#114-статусы-счетов-и-допустимые-операции)) |
 | created_at | TIMESTAMPTZ NN | |
 
 ### `account_balances` — проекция бизнес-счёта
@@ -174,7 +174,7 @@ PK `(ledger_account_id, snapshot_date)`; `debit_total`, `credit_total`, `balance
 | customer_account_id | UUID | FK `(…, currency)`; заполняется при подтверждении |
 | amount | BIGINT NN | `> 0` |
 | currency | CHAR(3) NN | |
-| fee_amount | BIGINT NN | DEFAULT 0; рассчитывается при capture |
+| fee_amount | BIGINT NN | DEFAULT 0; рассчитывается при capture; `CHECK (fee_amount < amount)` — capture с `fee ≥ amount` отклоняется `FEE_EXCEEDS_PAYMENT` ([D-27](../architecture/decisions.md#d-27)) |
 | fee_tariff_id | UUID | FK; при capture |
 | captured_amount, refunded_amount | BIGINT NN | DEFAULT 0 |
 | status | TEXT NN | `CREATED`, `AUTHORIZED`, `CAPTURED`, `PARTIALLY_REFUNDED`, `REFUNDED`, `FAILED`, `CANCELLED` ([D-21](../architecture/decisions.md#d-21)) |
@@ -199,7 +199,7 @@ PK `(ledger_account_id, snapshot_date)`; `debit_total`, `credit_total`, `balance
 
 ### `payment_attempts`
 
-`id, payment_id FK, attempt_number (UNIQUE с payment_id), operation (CONFIRM, CAPTURE, VOID, REFUND), status (SUCCEEDED, FAILED), error_code, actor_id, started_at, finished_at`. В MVP это история попыток обработки (ТЗ §2.4). `provider_reference` и статусы `STARTED`/`UNKNOWN` добавляются вместе с внешним провайдером.
+`id, payment_id FK, attempt_number (UNIQUE с payment_id), operation (CONFIRM, CAPTURE, VOID, REFUND), status (SUCCEEDED, FAILED), error_code, actor_id, started_at, finished_at`. Коды `error_code` для `CAPTURE`: `FEE_EXCEEDS_PAYMENT` ([D-27](../architecture/decisions.md#d-27)), `ACCOUNT_NOT_ACTIVE`, `AUTH_EXPIRED`, `INVALID_STATE`. В MVP это история попыток обработки (ТЗ §2.4). `provider_reference` и статусы `STARTED`/`UNKNOWN` добавляются вместе с внешним провайдером.
 
 ### `payment_status_history` — append-only
 
@@ -219,7 +219,7 @@ PK `(ledger_account_id, snapshot_date)`; `debit_total`, `credit_total`, `balance
 
 ### `payouts` ([D-25](../architecture/decisions.md#d-25))
 
-`id, merchant_id FK, account_id FK (…, currency), amount > 0, currency, status (COMPLETED, FAILED), failure_code, idempotency_key (UNIQUE с merchant_id), requested_by, created_at`.
+`id, merchant_id FK, account_id FK (…, currency), amount > 0, currency, status (COMPLETED, FAILED), failure_code, idempotency_key (UNIQUE с merchant_id), requested_by, created_at`. Коды `failure_code`: `INSUFFICIENT_FUNDS` (остаток магазина), `ACCOUNT_NOT_ACTIVE`, `PAYOUT_SOURCE_INSUFFICIENT`. `PAYOUT_SOURCE_INSUFFICIENT` — нехватка бакетов 1100; отказ фиксируется через `SAVEPOINT` ([concurrency.md §5.6](concurrency.md#56-тестовое-пополнение-и-выплата), [chart-of-accounts.md §3](../architecture/chart-of-accounts.md#3-системные-счета-остаток-контроль-проекция)).
 
 ## 7. Схема `simulator`
 
