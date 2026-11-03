@@ -223,7 +223,7 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 
 Так выполняется ТЗ §2.1: даже ADMIN приложения не может изменить баланс в обход ledger. Любое движение денег — журнал через шлюз, любая ручная корректировка — maker-checker и аудит ([D-31](../architecture/decisions.md#d-31)).
 
-На этапе 3.2 роли создаёт `migrate bootstrap` (суперпользователь, `CREATE ROLE`). Goose-миграции выполняет `paycore_owner`. Приложение и интеграционные тесты подключаются только как `paycore_app`. `paycore_ledger` — `NOLOGIN`. Финансовые таблицы в этой фазе не создаются.
+На этапе 3.2 роли создаёт `migrate bootstrap` (суперпользователь, `CREATE ROLE`). Goose-миграции выполняет `paycore_owner`. Приложение и интеграционные тесты подключаются только как `paycore_app`. `paycore_ledger` — `NOLOGIN`. Этап 3.3 создаёт таблицы `accounts` и `ledger` с грантами по таблице; функций `post_journal` нет.
 
 Миграция `00001_platform_schema.sql` выдаёт `paycore_app` права `INSERT, UPDATE` на `platform.schema_info` и ставит `ALTER DEFAULT PRIVILEGES … ON TABLES` в схеме `platform`. Это шире целевой модели: будущие гранты — **по таблице**, без blanket `GRANT` на все таблицы схемы. План — [ledger-schema-review.md §6](../architecture/ledger-schema-review.md#6-план-грантов-будущих-таблиц). Саму миграцию 3.2 этот документ не меняет.
 

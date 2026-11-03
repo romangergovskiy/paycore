@@ -6,6 +6,8 @@
 
 Схемы PostgreSQL по модулям ([D-18](../architecture/decisions.md#d-18)): `auth`, `merchants`, `accounts`, `ledger`, `payments`, `transfers`, `commissions`, `limits`, `simulator`, `notifications`, `audit`, `platform` (idempotency, outbox, inbox). После MVP: `fraud`, `reconciliation`.
 
+Этап 3.3 создаёт `accounts` и `ledger` целиком. `auth.users` и `merchants.merchants` — заглушки с PK, чтобы объявить FK со счетов; модули auth/merchants и схемы payments/transfers в этой фазе не реализуются.
+
 ## 1. Финансовое ядро: счета и ledger
 
 ```mermaid

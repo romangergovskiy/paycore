@@ -1,6 +1,6 @@
 # Схема базы данных PostgreSQL
 
-Статус: **принято для MVP** (этап 2). Это не миграции: SQL-фрагменты иллюстративны. В коде есть техническая миграция `platform` (этап 3.2); финансовые таблицы ещё не созданы. Ревью схемы — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
+Статус: **принято для MVP** (этап 2). SQL-фрагменты иллюстративны. В коде миграции `00002_accounts.sql` и `00003_ledger.sql` создают таблицы `accounts` и `ledger` (этап 3.3); функций `post_journal` нет. Down у финансовых миграций нужен тестам apply/rollback; [D-38](../architecture/decisions.md#d-38) по-прежнему означает, что в production финансовые таблицы не откатывают. Ревью схемы — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
 
 Связанные документы: [er-diagram.md](er-diagram.md), [data-integrity.md](data-integrity.md) (CHECK, FK, индексы, права), [concurrency.md](concurrency.md), [../architecture/ledger-model.md](../architecture/ledger-model.md), [../architecture/decisions.md](../architecture/decisions.md).
 
