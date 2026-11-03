@@ -13,7 +13,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const sys5900 = "00000000-0000-4000-8000-000000005900"
+const (
+	sys5900 = "00000000-0000-4000-8000-000000005900"
+	sys4200 = "00000000-0000-4000-8000-000000004200"
+)
 
 type idgen struct {
 	mu sync.Mutex
@@ -48,7 +51,7 @@ type pjRow struct {
 }
 
 func TestPostJournalGateway(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 	c := startCluster(t)
 	if err := Bootstrap(ctx, c.admin, c.owner, c.app, c.readonly); err != nil {
@@ -112,6 +115,23 @@ func TestPostJournalGateway(t *testing.T) {
 		}
 		if pubExec {
 			t.Fatal("PUBLIC has EXECUTE on post_journal")
+		}
+
+		var formOwner string
+		var formPub bool
+		if err := owner.QueryRow(ctx, `
+			SELECT r.rolname, has_function_privilege('public', p.oid, 'EXECUTE')
+			  FROM pg_proc p
+			  JOIN pg_namespace n ON n.oid = p.pronamespace
+			  JOIN pg_roles r ON r.oid = p.proowner
+			 WHERE n.nspname = 'ledger' AND p.proname = 'assert_journal_form'`).Scan(&formOwner, &formPub); err != nil {
+			t.Fatal(err)
+		}
+		if formOwner != RoleLedger {
+			t.Fatalf("assert_journal_form owner = %s", formOwner)
+		}
+		if formPub {
+			t.Fatal("PUBLIC has EXECUTE on assert_journal_form")
 		}
 
 		var nologin bool
@@ -258,6 +278,7 @@ func TestPostJournalGateway(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
+				before := readState(t, ctx, app, cust.accountID)
 				_, err := postJournal(ctx, app, []string{cust.accountID}, postArgs{
 					journalID:     ids.next(),
 					operation:     "SIM_TOPUP",
@@ -266,10 +287,12 @@ func TestPostJournalGateway(t *testing.T) {
 					entries:       tc.entries,
 				})
 				requireCode(t, err, "PC400")
+				requireState(t, readState(t, ctx, app, cust.accountID), before)
 			})
 		}
 
 		t.Run("foreign currency", func(t *testing.T) {
+			before := readState(t, ctx, app, cust.accountID)
 			_, err := postJournal(ctx, app, []string{cust.accountID}, postArgs{
 				journalID:     ids.next(),
 				operation:     "SIM_TOPUP",
@@ -281,6 +304,7 @@ func TestPostJournalGateway(t *testing.T) {
 				},
 			})
 			requireCode(t, err, "PC400")
+			requireState(t, readState(t, ctx, app, cust.accountID), before)
 		})
 	})
 
@@ -289,6 +313,7 @@ func TestPostJournalGateway(t *testing.T) {
 		if _, err := app.Exec(ctx, `UPDATE accounts.accounts SET status = 'BLOCKED', version = version + 1 WHERE id = $1`, blocked.accountID); err != nil {
 			t.Fatal(err)
 		}
+		blkBefore := readState(t, ctx, app, blocked.accountID)
 		_, err := postJournal(ctx, app, []string{blocked.accountID}, postArgs{
 			journalID:     ids.next(),
 			operation:     "SIM_TOPUP",
@@ -300,11 +325,13 @@ func TestPostJournalGateway(t *testing.T) {
 			},
 		})
 		requireCode(t, err, "PC403")
+		requireState(t, readState(t, ctx, app, blocked.accountID), blkBefore)
 
 		closed := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-CLS")
 		if _, err := app.Exec(ctx, `UPDATE accounts.accounts SET status = 'CLOSED', closed_at = now(), version = version + 1 WHERE id = $1`, closed.accountID); err != nil {
 			t.Fatal(err)
 		}
+		clsBefore := readState(t, ctx, app, closed.accountID)
 		_, err = postJournal(ctx, app, []string{closed.accountID}, postArgs{
 			journalID:     ids.next(),
 			operation:     "SIM_TOPUP",
@@ -316,9 +343,12 @@ func TestPostJournalGateway(t *testing.T) {
 			},
 		})
 		requireCode(t, err, "PC403")
+		requireState(t, readState(t, ctx, app, closed.accountID), clsBefore)
 	})
 
 	t.Run("insufficient funds PC402", func(t *testing.T) {
+		before := readState(t, ctx, app, cust.accountID)
+		recvBefore := readState(t, ctx, app, recv.accountID)
 		_, err := postJournal(ctx, app, []string{cust.accountID, recv.accountID}, postArgs{
 			journalID:     ids.next(),
 			operation:     "TRANSFER",
@@ -333,7 +363,10 @@ func TestPostJournalGateway(t *testing.T) {
 		if got := pgMsg(err); got != "" && got != "INSUFFICIENT_FUNDS" {
 			t.Logf("PC402 message = %s", got)
 		}
+		requireState(t, readState(t, ctx, app, cust.accountID), before)
+		requireState(t, readState(t, ctx, app, recv.accountID), recvBefore)
 
+		sysBefore := readState(t, ctx, app, cust.accountID)
 		_, err = postJournal(ctx, app, nil, postArgs{
 			journalID:     ids.next(),
 			operation:     "ADJUSTMENT",
@@ -348,6 +381,7 @@ func TestPostJournalGateway(t *testing.T) {
 		if got := pgMsg(err); got != "SYSTEM_ACCOUNT_INSUFFICIENT" {
 			t.Fatalf("system PC402 message = %q", got)
 		}
+		requireState(t, readState(t, ctx, app, cust.accountID), sysBefore)
 	})
 
 	t.Run("idempotent replay and conflict", func(t *testing.T) {
@@ -510,6 +544,9 @@ func TestPostJournalGateway(t *testing.T) {
 		if err != nil {
 			t.Fatalf("HOLD_PLACE: %v", err)
 		}
+		if got := readHold(t, ctx, app, holdID); got.Status != "ACTIVE" || got.Amount != 100 || got.AccountID != funded.accountID {
+			t.Fatalf("placed hold = %+v", got)
+		}
 		var avail, reserved int64
 		if err := app.QueryRow(ctx, `SELECT available_amount, reserved_amount FROM ledger.account_balances WHERE account_id = $1`, funded.accountID).Scan(&avail, &reserved); err != nil {
 			t.Fatal(err)
@@ -531,6 +568,8 @@ func TestPostJournalGateway(t *testing.T) {
 				"action":     "RELEASE",
 				"hold_id":    holdID,
 				"account_id": funded.accountID,
+				"amount":     100,
+				"currency":   "RUB",
 			},
 		})
 		if err != nil {
@@ -578,6 +617,8 @@ func TestPostJournalGateway(t *testing.T) {
 				"action":     "CAPTURE",
 				"hold_id":    hold2,
 				"account_id": funded.accountID,
+				"amount":     100,
+				"currency":   "RUB",
 			},
 		})
 		requireCode(t, err, "PC409")
@@ -711,6 +752,620 @@ func TestPostJournalGateway(t *testing.T) {
 			t.Fatalf("after drain avail=%d want 6000", avail)
 		}
 	})
+
+	t.Run("strict operation forms PC400", func(t *testing.T) {
+		funded := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-FORM")
+		topup(t, ctx, app, ids, funded, 5000)
+		peer := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-FORM-P")
+		merch := seedMerchant(t, ctx, owner, app, ids, "PC-PJ-FORM-M")
+		topup(t, ctx, app, ids, peer, 1000)
+		holdID, payRef, exp := ids.next(), ids.next(), time.Date(2026, 12, 1, 15, 0, 0, 0, time.UTC)
+		placeHold(t, ctx, app, ids, funded, holdID, payRef, 400, exp)
+		placeHold(t, ctx, app, ids, peer, ids.next(), ids.next(), 400, exp)
+		before := readState(t, ctx, app, funded.accountID)
+		holdBefore := readHold(t, ctx, app, holdID)
+
+		cases := []struct {
+			name string
+			lock []string
+			args postArgs
+			want string
+		}{
+			{
+				name: "SIM_TOPUP uses 4100",
+				lock: []string{funded.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: sys4100, EntryType: "DEBIT", Amount: 10, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: funded.avail, EntryType: "CREDIT", Amount: 10, Currency: "RUB"},
+					},
+				},
+				want: "PC400",
+			},
+			{
+				name: "SIM_TOPUP with hold_action",
+				lock: []string{funded.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: sys1100, EntryType: "DEBIT", Amount: 10, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: funded.avail, EntryType: "CREDIT", Amount: 10, Currency: "RUB"},
+					},
+					hold: map[string]any{"action": "PLACE", "hold_id": ids.next(), "account_id": funded.accountID, "amount": 10, "currency": "RUB"},
+				},
+				want: "PC400",
+			},
+			{
+				name: "TRANSFER uses 4200",
+				lock: []string{funded.accountID, peer.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "TRANSFER", referenceType: "TRANSFER", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: funded.avail, EntryType: "DEBIT", Amount: 50, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: peer.avail, EntryType: "CREDIT", Amount: 40, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: sys4200, EntryType: "CREDIT", Amount: 10, Currency: "RUB"},
+					},
+				},
+				want: "PC400",
+			},
+			{
+				name: "TRANSFER uses 1100",
+				lock: []string{funded.accountID, peer.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "TRANSFER", referenceType: "TRANSFER", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: funded.avail, EntryType: "DEBIT", Amount: 50, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: peer.avail, EntryType: "CREDIT", Amount: 40, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: sys1100, EntryType: "CREDIT", Amount: 10, Currency: "RUB"},
+					},
+				},
+				want: "PC400",
+			},
+			{
+				name: "PAYOUT uses 4100",
+				lock: []string{merch.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "PAYOUT", referenceType: "PAYOUT", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: merch.avail, EntryType: "DEBIT", Amount: 10, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: sys4100, EntryType: "CREDIT", Amount: 10, Currency: "RUB"},
+					},
+				},
+				want: "PC400",
+			},
+			{
+				name: "REFUND uses 1100",
+				lock: []string{merch.accountID, funded.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "REFUND", referenceType: "REFUND", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: sys1100, EntryType: "DEBIT", Amount: 10, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: funded.avail, EntryType: "CREDIT", Amount: 10, Currency: "RUB"},
+					},
+				},
+				want: "PC400",
+			},
+			{
+				name: "HOLD_PLACE amount mismatch",
+				lock: []string{funded.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "HOLD_PLACE", referenceType: "HOLD", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: funded.avail, EntryType: "DEBIT", Amount: 80, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: funded.hold, EntryType: "CREDIT", Amount: 80, Currency: "RUB"},
+					},
+					hold: holdPlace(ids.next(), funded.accountID, ids.next(), 100, exp),
+				},
+				want: "PC400",
+			},
+			{
+				name: "HOLD_PLACE other account",
+				lock: []string{funded.accountID, peer.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "HOLD_PLACE", referenceType: "HOLD", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: peer.avail, EntryType: "DEBIT", Amount: 50, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: peer.hold, EntryType: "CREDIT", Amount: 50, Currency: "RUB"},
+					},
+					hold: holdPlace(ids.next(), funded.accountID, ids.next(), 50, exp),
+				},
+				want: "PC400",
+			},
+			{
+				name: "HOLD_CAPTURE uses 4100",
+				lock: []string{funded.accountID, merch.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "HOLD_CAPTURE", referenceType: "HOLD", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: funded.hold, EntryType: "DEBIT", Amount: 400, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: merch.avail, EntryType: "CREDIT", Amount: 390, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: sys4100, EntryType: "CREDIT", Amount: 10, Currency: "RUB"},
+					},
+					hold: holdCapture(holdID, funded.accountID, 400),
+				},
+				want: "PC400",
+			},
+			{
+				name: "HOLD_CAPTURE wrong action",
+				lock: []string{funded.accountID, merch.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "HOLD_CAPTURE", referenceType: "HOLD", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: funded.hold, EntryType: "DEBIT", Amount: 400, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: merch.avail, EntryType: "CREDIT", Amount: 400, Currency: "RUB"},
+					},
+					hold: map[string]any{
+						"action": "PLACE", "hold_id": holdID, "account_id": funded.accountID,
+						"amount": 400, "currency": "RUB", "expires_at": exp,
+						"reference_type": "PAYMENT", "reference_id": payRef,
+					},
+				},
+				want: "PC400",
+			},
+			{
+				name: "HOLD_CAPTURE other account hold",
+				lock: []string{funded.accountID, peer.accountID, merch.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "HOLD_CAPTURE", referenceType: "HOLD", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: peer.hold, EntryType: "DEBIT", Amount: 400, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: merch.avail, EntryType: "CREDIT", Amount: 400, Currency: "RUB"},
+					},
+					hold: holdCapture(holdID, peer.accountID, 400),
+				},
+				want: "PC400",
+			},
+			{
+				name: "HOLD_RELEASE amount mismatch",
+				lock: []string{funded.accountID},
+				args: postArgs{
+					journalID: ids.next(), operation: "HOLD_RELEASE", referenceType: "HOLD", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: funded.hold, EntryType: "DEBIT", Amount: 400, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: funded.avail, EntryType: "CREDIT", Amount: 400, Currency: "RUB"},
+					},
+					hold: map[string]any{"action": "RELEASE", "hold_id": holdID, "account_id": funded.accountID, "amount": 50, "currency": "RUB"},
+				},
+				want: "PC400",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := postJournal(ctx, app, tc.lock, tc.args)
+				requireCode(t, err, tc.want)
+				requireState(t, readState(t, ctx, app, funded.accountID), before)
+				if got := readHold(t, ctx, app, holdID); got != holdBefore {
+					t.Fatalf("hold mutated: %+v → %+v", holdBefore, got)
+				}
+			})
+		}
+	})
+
+	t.Run("idempotency hold_action reverses adjustment", func(t *testing.T) {
+		acc := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-IDEM")
+		topup(t, ctx, app, ids, acc, 2000)
+		ref := ids.next()
+		e1, e2 := ids.next(), ids.next()
+		entries := []pjEntry{
+			{ID: e1, LedgerAccountID: sys1100, EntryType: "DEBIT", Amount: 300, Currency: "RUB"},
+			{ID: e2, LedgerAccountID: acc.avail, EntryType: "CREDIT", Amount: 300, Currency: "RUB"},
+		}
+		first, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ref, entries: entries,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := readState(t, ctx, app, acc.accountID)
+		replay, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ref, entries: entries,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !replay[0].AlreadyPosted || replay[0].JournalID != first[0].JournalID {
+			t.Fatalf("replay = %+v", replay)
+		}
+		requireState(t, readState(t, ctx, app, acc.accountID), before)
+
+		_, err = postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ref, entries: entries,
+			hold: map[string]any{"action": "PLACE", "hold_id": ids.next(), "account_id": acc.accountID, "amount": 300, "currency": "RUB"},
+		})
+		requireCode(t, err, "PC409")
+		requireState(t, readState(t, ctx, app, acc.accountID), before)
+
+		_, err = postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ref, entries: entries,
+			adjustmentID: ids.next(),
+		})
+		requireCode(t, err, "PC409")
+		requireState(t, readState(t, ctx, app, acc.accountID), before)
+
+		holdID, payRef, exp := ids.next(), ids.next(), time.Date(2026, 12, 2, 12, 0, 0, 0, time.UTC)
+		hold := holdPlace(holdID, acc.accountID, payRef, 200, exp)
+		placeEntries := []pjEntry{
+			{ID: ids.next(), LedgerAccountID: acc.avail, EntryType: "DEBIT", Amount: 200, Currency: "RUB"},
+			{ID: ids.next(), LedgerAccountID: acc.hold, EntryType: "CREDIT", Amount: 200, Currency: "RUB"},
+		}
+		holdRef := ids.next()
+		placed, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "HOLD_PLACE", referenceType: "HOLD", referenceID: holdRef,
+			entries: placeEntries, hold: hold,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterPlace := readState(t, ctx, app, acc.accountID)
+		holdReplay, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "HOLD_PLACE", referenceType: "HOLD", referenceID: holdRef,
+			entries: placeEntries, hold: hold,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !holdReplay[0].AlreadyPosted || holdReplay[0].JournalID != placed[0].JournalID {
+			t.Fatalf("hold replay = %+v", holdReplay)
+		}
+		requireState(t, readState(t, ctx, app, acc.accountID), afterPlace)
+
+		diffExp := holdPlace(holdID, acc.accountID, payRef, 200, exp.Add(time.Hour))
+		_, err = postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "HOLD_PLACE", referenceType: "HOLD", referenceID: holdRef,
+			entries: placeEntries, hold: diffExp,
+		})
+		requireCode(t, err, "PC409")
+		requireState(t, readState(t, ctx, app, acc.accountID), afterPlace)
+		if got := readHold(t, ctx, app, holdID); got.Status != "ACTIVE" || got.Amount != 200 {
+			t.Fatalf("hold after idempotency conflict = %+v", got)
+		}
+
+		origJID := first[0].JournalID
+		revEntries := []pjEntry{
+			{ID: ids.next(), LedgerAccountID: acc.avail, EntryType: "DEBIT", Amount: 300, Currency: "RUB"},
+			{ID: ids.next(), LedgerAccountID: sys1100, EntryType: "CREDIT", Amount: 300, Currency: "RUB"},
+		}
+		rev, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "REVERSAL", referenceType: "SIM_TOPUP", referenceID: ref,
+			reversesJournalID: origJID, entries: revEntries,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterRev := readState(t, ctx, app, acc.accountID)
+		revReplay, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "REVERSAL", referenceType: "SIM_TOPUP", referenceID: ref,
+			reversesJournalID: origJID, entries: revEntries,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !revReplay[0].AlreadyPosted || revReplay[0].JournalID != rev[0].JournalID {
+			t.Fatalf("reversal replay = %+v", revReplay)
+		}
+		requireState(t, readState(t, ctx, app, acc.accountID), afterRev)
+
+		otherTopup, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ids.next(),
+			entries: []pjEntry{
+				{ID: ids.next(), LedgerAccountID: sys1100, EntryType: "DEBIT", Amount: 10, Currency: "RUB"},
+				{ID: ids.next(), LedgerAccountID: acc.avail, EntryType: "CREDIT", Amount: 10, Currency: "RUB"},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterOther := readState(t, ctx, app, acc.accountID)
+		_, err = postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "REVERSAL", referenceType: "SIM_TOPUP", referenceID: ref,
+			reversesJournalID: otherTopup[0].JournalID, entries: revEntries,
+		})
+		requireCode(t, err, "PC409")
+		requireState(t, readState(t, ctx, app, acc.accountID), afterOther)
+	})
+
+	t.Run("hold capture release and other-account", func(t *testing.T) {
+		custA := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-HA")
+		custB := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-HB")
+		merch := seedMerchant(t, ctx, owner, app, ids, "PC-PJ-HM")
+		topup(t, ctx, app, ids, custA, 1000)
+		topup(t, ctx, app, ids, custB, 1000)
+		exp := time.Date(2026, 12, 3, 8, 0, 0, 0, time.UTC)
+		holdA, payA := ids.next(), ids.next()
+		holdB, payB := ids.next(), ids.next()
+		placeHold(t, ctx, app, ids, custA, holdA, payA, 250, exp)
+		placeHold(t, ctx, app, ids, custB, holdB, payB, 250, exp)
+
+		beforeA := readState(t, ctx, app, custA.accountID)
+		beforeB := readState(t, ctx, app, custB.accountID)
+		_, err := postJournal(ctx, app, []string{custA.accountID, custB.accountID, merch.accountID}, postArgs{
+			journalID: ids.next(), operation: "HOLD_CAPTURE", referenceType: "HOLD", referenceID: ids.next(),
+			entries: []pjEntry{
+				{ID: ids.next(), LedgerAccountID: custB.hold, EntryType: "DEBIT", Amount: 250, Currency: "RUB"},
+				{ID: ids.next(), LedgerAccountID: merch.avail, EntryType: "CREDIT", Amount: 250, Currency: "RUB"},
+			},
+			hold: holdCapture(holdA, custB.accountID, 250),
+		})
+		requireCode(t, err, "PC400")
+		requireState(t, readState(t, ctx, app, custA.accountID), beforeA)
+		requireState(t, readState(t, ctx, app, custB.accountID), beforeB)
+		if got := readHold(t, ctx, app, holdA); got.Status != "ACTIVE" {
+			t.Fatalf("hold A status = %s", got.Status)
+		}
+
+		capRows, err := postJournal(ctx, app, []string{custA.accountID, merch.accountID}, postArgs{
+			journalID: ids.next(), operation: "HOLD_CAPTURE", referenceType: "HOLD", referenceID: ids.next(),
+			entries: []pjEntry{
+				{ID: ids.next(), LedgerAccountID: custA.hold, EntryType: "DEBIT", Amount: 250, Currency: "RUB"},
+				{ID: ids.next(), LedgerAccountID: merch.avail, EntryType: "CREDIT", Amount: 240, Currency: "RUB"},
+				{ID: ids.next(), LedgerAccountID: sys4200, EntryType: "CREDIT", Amount: 10, Currency: "RUB"},
+			},
+			hold: holdCapture(holdA, custA.accountID, 250),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if capRows[0].AlreadyPosted {
+			t.Fatal("capture already_posted")
+		}
+		var avail, reserved int64
+		if err := app.QueryRow(ctx, `SELECT available_amount, reserved_amount FROM ledger.account_balances WHERE account_id = $1`, custA.accountID).Scan(&avail, &reserved); err != nil {
+			t.Fatal(err)
+		}
+		if avail != 750 || reserved != 0 {
+			t.Fatalf("after capture A avail=%d reserved=%d", avail, reserved)
+		}
+		if got := readHold(t, ctx, app, holdA); got.Status != "CAPTURED" {
+			t.Fatalf("hold A = %+v", got)
+		}
+		var merchAvail int64
+		if err := app.QueryRow(ctx, `SELECT available_amount FROM ledger.account_balances WHERE account_id = $1`, merch.accountID).Scan(&merchAvail); err != nil {
+			t.Fatal(err)
+		}
+		if merchAvail != 240 {
+			t.Fatalf("merchant after capture = %d", merchAvail)
+		}
+
+		afterCap := readState(t, ctx, app, custA.accountID)
+		_, err = postJournal(ctx, app, []string{custA.accountID}, postArgs{
+			journalID: ids.next(), operation: "HOLD_RELEASE", referenceType: "HOLD", referenceID: ids.next(),
+			entries: []pjEntry{
+				{ID: ids.next(), LedgerAccountID: custA.hold, EntryType: "DEBIT", Amount: 250, Currency: "RUB"},
+				{ID: ids.next(), LedgerAccountID: custA.avail, EntryType: "CREDIT", Amount: 250, Currency: "RUB"},
+			},
+			hold: map[string]any{"action": "RELEASE", "hold_id": holdA, "account_id": custA.accountID, "amount": 250, "currency": "RUB"},
+		})
+		requireCode(t, err, "PC402")
+		requireState(t, readState(t, ctx, app, custA.accountID), afterCap)
+		if got := readHold(t, ctx, app, holdA); got.Status != "CAPTURED" {
+			t.Fatalf("captured hold mutated = %+v", got)
+		}
+
+		rel, err := postJournal(ctx, app, []string{custB.accountID}, postArgs{
+			journalID: ids.next(), operation: "HOLD_RELEASE", referenceType: "HOLD", referenceID: ids.next(),
+			entries: []pjEntry{
+				{ID: ids.next(), LedgerAccountID: custB.hold, EntryType: "DEBIT", Amount: 250, Currency: "RUB"},
+				{ID: ids.next(), LedgerAccountID: custB.avail, EntryType: "CREDIT", Amount: 250, Currency: "RUB"},
+			},
+			hold: map[string]any{"action": "RELEASE", "hold_id": holdB, "account_id": custB.accountID, "amount": 250, "currency": "RUB"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rel[0].AlreadyPosted {
+			t.Fatal("release already_posted")
+		}
+		if err := app.QueryRow(ctx, `SELECT available_amount, reserved_amount FROM ledger.account_balances WHERE account_id = $1`, custB.accountID).Scan(&avail, &reserved); err != nil {
+			t.Fatal(err)
+		}
+		if avail != 1000 || reserved != 0 {
+			t.Fatalf("after release B avail=%d reserved=%d", avail, reserved)
+		}
+		if got := readHold(t, ctx, app, holdB); got.Status != "RELEASED" {
+			t.Fatalf("hold B = %+v", got)
+		}
+
+		dupBefore := readState(t, ctx, app, custA.accountID)
+		_, err = postJournal(ctx, app, []string{custA.accountID}, postArgs{
+			journalID: ids.next(), operation: "HOLD_PLACE", referenceType: "HOLD", referenceID: ids.next(),
+			entries: []pjEntry{
+				{ID: ids.next(), LedgerAccountID: custA.avail, EntryType: "DEBIT", Amount: 100, Currency: "RUB"},
+				{ID: ids.next(), LedgerAccountID: custA.hold, EntryType: "CREDIT", Amount: 100, Currency: "RUB"},
+			},
+			hold: holdPlace(holdA, custA.accountID, ids.next(), 100, exp),
+		})
+		requireCode(t, err, "PC409")
+		requireState(t, readState(t, ctx, app, custA.accountID), dupBefore)
+		if got := readHold(t, ctx, app, holdA); got.Status != "CAPTURED" || got.Amount != 250 {
+			t.Fatalf("duplicate place mutated hold A = %+v", got)
+		}
+	})
+
+	t.Run("concurrent holds capture vs release mixed ops", func(t *testing.T) {
+		acc := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-PAR")
+		peer := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-PAR-P")
+		merch := seedMerchant(t, ctx, owner, app, ids, "PC-PJ-PAR-M")
+		topup(t, ctx, app, ids, acc, 20000)
+		exp := time.Date(2026, 12, 4, 9, 0, 0, 0, time.UTC)
+
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		holds := []string{ids.next(), ids.next()}
+		start := make(chan struct{})
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				conn, err := pgx.Connect(ctx, c.app)
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				defer conn.Close(ctx)
+				<-start
+				_, errs[i] = postJournal(ctx, conn, []string{acc.accountID}, postArgs{
+					journalID: ids.next(), operation: "HOLD_PLACE", referenceType: "HOLD", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: acc.avail, EntryType: "DEBIT", Amount: 3000, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: acc.hold, EntryType: "CREDIT", Amount: 3000, Currency: "RUB"},
+					},
+					hold: holdPlace(holds[i], acc.accountID, ids.next(), 3000, exp),
+				})
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("parallel hold %d: %v", i, err)
+			}
+		}
+		var avail, reserved int64
+		if err := app.QueryRow(ctx, `SELECT available_amount, reserved_amount FROM ledger.account_balances WHERE account_id = $1`, acc.accountID).Scan(&avail, &reserved); err != nil {
+			t.Fatal(err)
+		}
+		if avail != 14000 || reserved != 6000 {
+			t.Fatalf("after parallel holds avail=%d reserved=%d", avail, reserved)
+		}
+		for _, id := range holds {
+			if got := readHold(t, ctx, app, id); got.Status != "ACTIVE" || got.Amount != 3000 {
+				t.Fatalf("parallel hold %s = %+v", id, got)
+			}
+		}
+
+		holdCR := ids.next()
+		placeHold(t, ctx, app, ids, acc, holdCR, ids.next(), 2000, exp)
+		start = make(chan struct{})
+		errs = make([]error, 2)
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				conn, err := pgx.Connect(ctx, c.app)
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				defer conn.Close(ctx)
+				<-start
+				if i == 0 {
+					_, errs[i] = postJournal(ctx, conn, []string{acc.accountID, merch.accountID}, postArgs{
+						journalID: ids.next(), operation: "HOLD_CAPTURE", referenceType: "HOLD", referenceID: ids.next(),
+						entries: []pjEntry{
+							{ID: ids.next(), LedgerAccountID: acc.hold, EntryType: "DEBIT", Amount: 2000, Currency: "RUB"},
+							{ID: ids.next(), LedgerAccountID: merch.avail, EntryType: "CREDIT", Amount: 2000, Currency: "RUB"},
+						},
+						hold: holdCapture(holdCR, acc.accountID, 2000),
+					})
+					return
+				}
+				_, errs[i] = postJournal(ctx, conn, []string{acc.accountID}, postArgs{
+					journalID: ids.next(), operation: "HOLD_RELEASE", referenceType: "HOLD", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: acc.hold, EntryType: "DEBIT", Amount: 2000, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: acc.avail, EntryType: "CREDIT", Amount: 2000, Currency: "RUB"},
+					},
+					hold: map[string]any{"action": "RELEASE", "hold_id": holdCR, "account_id": acc.accountID, "amount": 2000, "currency": "RUB"},
+				})
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		ok, pc409 := 0, 0
+		for _, err := range errs {
+			if err == nil {
+				ok++
+				continue
+			}
+			if pgCode(err) == "PC409" {
+				pc409++
+				continue
+			}
+			t.Fatalf("capture vs release err = %v", err)
+		}
+		if ok != 1 || pc409 != 1 {
+			t.Fatalf("capture vs release ok=%d pc409=%d errs=%v", ok, pc409, errs)
+		}
+		gotHold := readHold(t, ctx, app, holdCR)
+		if gotHold.Status != "CAPTURED" && gotHold.Status != "RELEASED" {
+			t.Fatalf("hold after race = %+v", gotHold)
+		}
+		if err := app.QueryRow(ctx, `SELECT available_amount, reserved_amount FROM ledger.account_balances WHERE account_id = $1`, acc.accountID).Scan(&avail, &reserved); err != nil {
+			t.Fatal(err)
+		}
+		if reserved != 6000 {
+			t.Fatalf("reserved after capture/release race = %d want 6000 (two leftover holds)", reserved)
+		}
+		var merchAvail int64
+		if err := app.QueryRow(ctx, `SELECT available_amount FROM ledger.account_balances WHERE account_id = $1`, merch.accountID).Scan(&merchAvail); err != nil {
+			t.Fatal(err)
+		}
+		switch gotHold.Status {
+		case "CAPTURED":
+			if merchAvail != 2000 {
+				t.Fatalf("merchant after capture race = %d", merchAvail)
+			}
+		case "RELEASED":
+			if merchAvail != 0 {
+				t.Fatalf("merchant after release race = %d", merchAvail)
+			}
+		}
+
+		start = make(chan struct{})
+		errs = make([]error, 2)
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				conn, err := pgx.Connect(ctx, c.app)
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				defer conn.Close(ctx)
+				<-start
+				if i == 0 {
+					_, errs[i] = postJournal(ctx, conn, []string{acc.accountID, peer.accountID}, postArgs{
+						journalID: ids.next(), operation: "TRANSFER", referenceType: "TRANSFER", referenceID: ids.next(),
+						entries: []pjEntry{
+							{ID: ids.next(), LedgerAccountID: acc.avail, EntryType: "DEBIT", Amount: 1000, Currency: "RUB"},
+							{ID: ids.next(), LedgerAccountID: peer.avail, EntryType: "CREDIT", Amount: 1000, Currency: "RUB"},
+						},
+					})
+					return
+				}
+				_, errs[i] = postJournal(ctx, conn, []string{acc.accountID}, postArgs{
+					journalID: ids.next(), operation: "HOLD_PLACE", referenceType: "HOLD", referenceID: ids.next(),
+					entries: []pjEntry{
+						{ID: ids.next(), LedgerAccountID: acc.avail, EntryType: "DEBIT", Amount: 1000, Currency: "RUB"},
+						{ID: ids.next(), LedgerAccountID: acc.hold, EntryType: "CREDIT", Amount: 1000, Currency: "RUB"},
+					},
+					hold: holdPlace(ids.next(), acc.accountID, ids.next(), 1000, exp),
+				})
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("mixed op %d: %v", i, err)
+			}
+		}
+		if err := app.QueryRow(ctx, `SELECT available_amount, reserved_amount FROM ledger.account_balances WHERE account_id = $1`, acc.accountID).Scan(&avail, &reserved); err != nil {
+			t.Fatal(err)
+		}
+		if reserved != 7000 {
+			t.Fatalf("after mixed ops reserved=%d want 7000", reserved)
+		}
+		var peerAvail int64
+		if err := app.QueryRow(ctx, `SELECT available_amount FROM ledger.account_balances WHERE account_id = $1`, peer.accountID).Scan(&peerAvail); err != nil {
+			t.Fatal(err)
+		}
+		if peerAvail != 1000 {
+			t.Fatalf("peer after mixed ops = %d", peerAvail)
+		}
+	})
 }
 
 type seededAccount struct {
@@ -773,12 +1428,14 @@ func openPair(t *testing.T, ctx context.Context, app *pgx.Conn, accountID, owner
 }
 
 type postArgs struct {
-	journalID     string
-	operation     string
-	referenceType string
-	referenceID   string
-	entries       []pjEntry
-	hold          map[string]any
+	journalID         string
+	operation         string
+	referenceType     string
+	referenceID       string
+	entries           []pjEntry
+	hold              map[string]any
+	reversesJournalID string
+	adjustmentID      string
 }
 
 func postJournal(ctx context.Context, conn *pgx.Conn, lockIDs []string, a postArgs) ([]pjRow, error) {
@@ -813,6 +1470,14 @@ func postJournal(ctx context.Context, conn *pgx.Conn, lockIDs []string, a postAr
 		}
 		hold = string(hb)
 	}
+	var reverses any
+	if a.reversesJournalID != "" {
+		reverses = a.reversesJournalID
+	}
+	var adjustment any
+	if a.adjustmentID != "" {
+		adjustment = a.adjustmentID
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT posted_journal_id::text, already_posted, posted_entry_id::text, posted_ledger_account_id::text,
 		       posted_entry_type, posted_amount, posted_currency::text, posted_account_version, posted_balance_after
@@ -820,7 +1485,7 @@ func postJournal(ctx context.Context, conn *pgx.Conn, lockIDs []string, a postAr
 			$1::uuid, $2, $3, $4::uuid, $5::smallint, $6::uuid, $7::uuid,
 			$8, $9::uuid, $10::date, $11::jsonb, $12::jsonb)`,
 		a.journalID, a.operation, a.referenceType, a.referenceID, int16(1),
-		nil, nil, "test", nil, time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC),
+		reverses, adjustment, "test", nil, time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC),
 		string(raw), hold,
 	)
 	if err != nil {
@@ -875,5 +1540,102 @@ func requireCode(t *testing.T, err error, code string) {
 	got := pgCode(err)
 	if got != code {
 		t.Fatalf("want SQLSTATE %s, got %s (%v)", code, got, err)
+	}
+}
+
+type ledgerState struct {
+	Journals, Entries, Holds int64
+	Avail, Reserved          int64
+}
+
+type holdRow struct {
+	Status    string
+	Amount    int64
+	AccountID string
+	Currency  string
+}
+
+func readState(t *testing.T, ctx context.Context, conn *pgx.Conn, accountID string) ledgerState {
+	t.Helper()
+	var s ledgerState
+	if err := conn.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM ledger.journal_transactions),
+		       (SELECT count(*) FROM ledger.ledger_entries),
+		       (SELECT count(*) FROM ledger.holds),
+		       (SELECT available_amount FROM ledger.account_balances WHERE account_id = $1),
+		       (SELECT reserved_amount FROM ledger.account_balances WHERE account_id = $1)`,
+		accountID).Scan(&s.Journals, &s.Entries, &s.Holds, &s.Avail, &s.Reserved); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func requireState(t *testing.T, got, want ledgerState) {
+	t.Helper()
+	if got != want {
+		t.Fatalf("ledger state = %+v want %+v", got, want)
+	}
+}
+
+func readHold(t *testing.T, ctx context.Context, conn *pgx.Conn, holdID string) holdRow {
+	t.Helper()
+	var h holdRow
+	if err := conn.QueryRow(ctx, `
+		SELECT status, amount, account_id::text, currency::text FROM ledger.holds WHERE id = $1`,
+		holdID).Scan(&h.Status, &h.Amount, &h.AccountID, &h.Currency); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+func holdPlace(holdID, accountID, payRef string, amount int64, exp time.Time) map[string]any {
+	return map[string]any{
+		"action":         "PLACE",
+		"hold_id":        holdID,
+		"account_id":     accountID,
+		"amount":         amount,
+		"currency":       "RUB",
+		"expires_at":     exp,
+		"reference_type": "PAYMENT",
+		"reference_id":   payRef,
+	}
+}
+
+func holdCapture(holdID, accountID string, amount int64) map[string]any {
+	return map[string]any{
+		"action":     "CAPTURE",
+		"hold_id":    holdID,
+		"account_id": accountID,
+		"amount":     amount,
+		"currency":   "RUB",
+	}
+}
+
+func topup(t *testing.T, ctx context.Context, app *pgx.Conn, ids *idgen, acc seededAccount, amount int64) {
+	t.Helper()
+	_, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+		journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ids.next(),
+		entries: []pjEntry{
+			{ID: ids.next(), LedgerAccountID: sys1100, EntryType: "DEBIT", Amount: amount, Currency: "RUB"},
+			{ID: ids.next(), LedgerAccountID: acc.avail, EntryType: "CREDIT", Amount: amount, Currency: "RUB"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("topup: %v", err)
+	}
+}
+
+func placeHold(t *testing.T, ctx context.Context, app *pgx.Conn, ids *idgen, acc seededAccount, holdID, payRef string, amount int64, exp time.Time) {
+	t.Helper()
+	_, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+		journalID: ids.next(), operation: "HOLD_PLACE", referenceType: "HOLD", referenceID: ids.next(),
+		entries: []pjEntry{
+			{ID: ids.next(), LedgerAccountID: acc.avail, EntryType: "DEBIT", Amount: amount, Currency: "RUB"},
+			{ID: ids.next(), LedgerAccountID: acc.hold, EntryType: "CREDIT", Amount: amount, Currency: "RUB"},
+		},
+		hold: holdPlace(holdID, acc.accountID, payRef, amount, exp),
+	})
+	if err != nil {
+		t.Fatalf("HOLD_PLACE: %v", err)
 	}
 }

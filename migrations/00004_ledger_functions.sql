@@ -80,6 +80,376 @@ END;
 $$;
 -- +goose StatementEnd
 
+-- Forms follow money-flows.md / ledger-model.md §6–§8. ADJUSTMENT has no
+-- single posting shape there; it may use MVP accounts only (not 2210, not
+-- post-MVP CoA codes).
+-- +goose StatementBegin
+CREATE FUNCTION ledger.assert_journal_form(
+    p_operation text,
+    p_reference_type text,
+    p_rows jsonb,
+    p_hold_action jsonb
+) RETURNS void
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = pg_catalog, ledger, pg_temp
+AS $$
+DECLARE
+    v_n integer;
+    v_hold record;
+    v_debit record;
+    v_credit record;
+    v_fee record;
+    v_other integer;
+BEGIN
+    v_n := jsonb_array_length(p_rows);
+
+    IF p_operation = 'SIM_TOPUP' THEN
+        IF p_reference_type <> 'SIM_TOPUP' OR v_n <> 2 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid SIM_TOPUP form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        IF p_hold_action IS NOT NULL AND p_hold_action <> 'null'::jsonb THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: hold_action is not valid for this operation'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, account_type text, kind text, entry_type text)
+         WHERE NOT (
+                (x.owner_type = 'SYSTEM' AND x.account_type = '1100' AND x.kind IS NULL AND x.entry_type = 'DEBIT')
+             OR (x.owner_type = 'CUSTOMER' AND x.account_type = '2100' AND x.kind = 'AVAILABLE' AND x.entry_type = 'CREDIT')
+         );
+        IF v_other <> 0
+           OR NOT EXISTS (
+               SELECT 1 FROM jsonb_to_recordset(p_rows) AS x(owner_type text, account_type text, entry_type text)
+                WHERE x.owner_type = 'SYSTEM' AND x.account_type = '1100' AND x.entry_type = 'DEBIT')
+           OR NOT EXISTS (
+               SELECT 1 FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+                WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type = 'CREDIT')
+        THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid SIM_TOPUP form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        RETURN;
+    END IF;
+
+    IF p_operation = 'TRANSFER' THEN
+        IF p_reference_type <> 'TRANSFER' OR v_n NOT IN (2, 3) THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid TRANSFER form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        IF p_hold_action IS NOT NULL AND p_hold_action <> 'null'::jsonb THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: hold_action is not valid for this operation'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type = 'DEBIT';
+        IF v_other <> 1 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid TRANSFER form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT x.account_id, x.amount
+          INTO v_debit
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text, account_id uuid, amount bigint)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type = 'DEBIT';
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type = 'CREDIT';
+        IF v_other <> 1 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid TRANSFER form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT x.account_id, x.amount
+          INTO v_credit
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text, account_id uuid, amount bigint)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type = 'CREDIT';
+        IF v_debit.account_id IS NOT DISTINCT FROM v_credit.account_id THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid TRANSFER form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, account_type text, entry_type text)
+         WHERE x.owner_type = 'SYSTEM' AND x.account_type = '4100' AND x.entry_type = 'CREDIT';
+        SELECT x.amount
+          INTO v_fee
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, account_type text, entry_type text, amount bigint)
+         WHERE x.owner_type = 'SYSTEM' AND x.account_type = '4100' AND x.entry_type = 'CREDIT';
+        IF v_n = 2 THEN
+            IF v_other <> 0 OR v_debit.amount <> v_credit.amount THEN
+                RAISE EXCEPTION 'INVALID_JOURNAL: invalid TRANSFER form'
+                    USING ERRCODE = 'PC400';
+            END IF;
+        ELSE
+            IF v_other <> 1 OR v_fee.amount IS NULL OR v_fee.amount <= 0
+               OR v_debit.amount <> v_credit.amount + v_fee.amount THEN
+                RAISE EXCEPTION 'INVALID_JOURNAL: invalid TRANSFER form'
+                    USING ERRCODE = 'PC400';
+            END IF;
+        END IF;
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE NOT (
+                (x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type IN ('DEBIT', 'CREDIT'))
+             OR (x.owner_type = 'SYSTEM' AND x.account_type = '4100' AND x.entry_type = 'CREDIT')
+         );
+        IF v_other <> 0 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid TRANSFER form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        RETURN;
+    END IF;
+
+    IF p_operation IN ('HOLD_PLACE', 'HOLD_CAPTURE', 'HOLD_RELEASE') THEN
+        IF p_reference_type <> 'HOLD' THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid % form', p_operation
+                USING ERRCODE = 'PC400';
+        END IF;
+        IF p_hold_action IS NULL OR jsonb_typeof(p_hold_action) <> 'object' THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: hold_action is required'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT x.action, x.hold_id, x.account_id, x.amount, x.currency, x.expires_at,
+               x.reference_type, x.reference_id
+          INTO v_hold
+          FROM jsonb_to_record(p_hold_action) AS x(
+              action text, hold_id uuid, account_id uuid, amount bigint, currency text,
+              expires_at timestamptz, reference_type text, reference_id uuid);
+        IF v_hold.hold_id IS NULL OR v_hold.account_id IS NULL OR v_hold.action IS NULL
+           OR v_hold.amount IS NULL OR v_hold.currency IS NULL THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: hold_action fields are required'
+                USING ERRCODE = 'PC400';
+        END IF;
+    END IF;
+
+    IF p_operation = 'HOLD_PLACE' THEN
+        IF v_hold.action <> 'PLACE' OR v_n <> 2 OR v_hold.expires_at IS NULL
+           OR v_hold.reference_type IS DISTINCT FROM 'PAYMENT' OR v_hold.reference_id IS NULL THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_PLACE form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type = 'DEBIT';
+        IF v_other <> 1 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_PLACE form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT x.account_id, x.amount, x.currency
+          INTO v_debit
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text, account_id uuid, amount bigint, currency text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type = 'DEBIT';
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'HOLD' AND x.account_type = '2110' AND x.entry_type = 'CREDIT';
+        IF v_other <> 1 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_PLACE form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT x.account_id, x.amount, x.currency
+          INTO v_credit
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text, account_id uuid, amount bigint, currency text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'HOLD' AND x.account_type = '2110' AND x.entry_type = 'CREDIT';
+        IF v_debit.account_id IS DISTINCT FROM v_credit.account_id
+           OR v_debit.account_id IS DISTINCT FROM v_hold.account_id
+           OR v_debit.amount IS DISTINCT FROM v_credit.amount
+           OR v_debit.amount IS DISTINCT FROM v_hold.amount
+           OR v_debit.currency IS DISTINCT FROM v_hold.currency
+           OR v_credit.currency IS DISTINCT FROM v_hold.currency THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: HOLD_PLACE hold_action does not match entries'
+                USING ERRCODE = 'PC400';
+        END IF;
+        RETURN;
+    END IF;
+
+    IF p_operation = 'HOLD_RELEASE' THEN
+        IF v_hold.action NOT IN ('RELEASE', 'EXPIRE') OR v_n <> 2 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_RELEASE form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'HOLD' AND x.account_type = '2110' AND x.entry_type = 'DEBIT';
+        IF v_other <> 1 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_RELEASE form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT x.account_id, x.amount, x.currency
+          INTO v_debit
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text, account_id uuid, amount bigint, currency text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'HOLD' AND x.account_type = '2110' AND x.entry_type = 'DEBIT';
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type = 'CREDIT';
+        IF v_other <> 1 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_RELEASE form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT x.account_id, x.amount, x.currency
+          INTO v_credit
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text, account_id uuid, amount bigint, currency text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type = 'CREDIT';
+        IF v_debit.account_id IS DISTINCT FROM v_credit.account_id
+           OR v_debit.account_id IS DISTINCT FROM v_hold.account_id
+           OR v_debit.amount IS DISTINCT FROM v_credit.amount
+           OR v_debit.amount IS DISTINCT FROM v_hold.amount
+           OR v_debit.currency IS DISTINCT FROM v_hold.currency
+           OR v_credit.currency IS DISTINCT FROM v_hold.currency THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: HOLD_RELEASE must match the hold account, amount and currency'
+                USING ERRCODE = 'PC400';
+        END IF;
+        RETURN;
+    END IF;
+
+    IF p_operation = 'HOLD_CAPTURE' THEN
+        IF v_hold.action <> 'CAPTURE' OR v_n NOT IN (2, 3) THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_CAPTURE form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'HOLD' AND x.account_type = '2110' AND x.entry_type = 'DEBIT';
+        IF v_other <> 1 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_CAPTURE form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT x.account_id, x.amount, x.currency
+          INTO v_debit
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text, account_id uuid, amount bigint, currency text)
+         WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'HOLD' AND x.account_type = '2110' AND x.entry_type = 'DEBIT';
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE x.owner_type = 'MERCHANT' AND x.kind = 'AVAILABLE' AND x.account_type = '2200' AND x.entry_type = 'CREDIT';
+        IF v_other <> 1 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_CAPTURE form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT x.account_id, x.amount
+          INTO v_credit
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text, account_id uuid, amount bigint)
+         WHERE x.owner_type = 'MERCHANT' AND x.kind = 'AVAILABLE' AND x.account_type = '2200' AND x.entry_type = 'CREDIT';
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, account_type text, entry_type text)
+         WHERE x.owner_type = 'SYSTEM' AND x.account_type = '4200' AND x.entry_type = 'CREDIT';
+        SELECT x.amount
+          INTO v_fee
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, account_type text, entry_type text, amount bigint)
+         WHERE x.owner_type = 'SYSTEM' AND x.account_type = '4200' AND x.entry_type = 'CREDIT';
+        IF v_n = 2 THEN
+            IF v_other <> 0 OR v_debit.amount <> v_credit.amount THEN
+                RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_CAPTURE form'
+                    USING ERRCODE = 'PC400';
+            END IF;
+        ELSE
+            IF v_other <> 1 OR v_fee.amount IS NULL OR v_fee.amount <= 0
+               OR v_fee.amount >= v_debit.amount
+               OR v_debit.amount <> v_credit.amount + v_fee.amount THEN
+                RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_CAPTURE form'
+                    USING ERRCODE = 'PC400';
+            END IF;
+        END IF;
+        IF v_debit.account_id IS DISTINCT FROM v_hold.account_id
+           OR v_debit.amount IS DISTINCT FROM v_hold.amount
+           OR v_debit.currency IS DISTINCT FROM v_hold.currency THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: HOLD_CAPTURE cannot move a hold of another account'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE NOT (
+                (x.owner_type = 'CUSTOMER' AND x.kind = 'HOLD' AND x.account_type = '2110' AND x.entry_type = 'DEBIT')
+             OR (x.owner_type = 'MERCHANT' AND x.kind = 'AVAILABLE' AND x.account_type = '2200' AND x.entry_type = 'CREDIT')
+             OR (x.owner_type = 'SYSTEM' AND x.account_type = '4200' AND x.entry_type = 'CREDIT')
+         );
+        IF v_other <> 0 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_CAPTURE form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        RETURN;
+    END IF;
+
+    IF p_operation = 'REFUND' THEN
+        IF p_reference_type <> 'REFUND' OR v_n <> 2 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid REFUND form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        IF p_hold_action IS NOT NULL AND p_hold_action <> 'null'::jsonb THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: hold_action is not valid for this operation'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE NOT (
+                (x.owner_type = 'MERCHANT' AND x.kind = 'AVAILABLE' AND x.account_type = '2200' AND x.entry_type = 'DEBIT')
+             OR (x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type = 'CREDIT')
+         );
+        IF v_other <> 0
+           OR (SELECT count(*) FROM jsonb_to_recordset(p_rows) AS x(entry_type text) WHERE x.entry_type = 'DEBIT') <> 1 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid REFUND form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        RETURN;
+    END IF;
+
+    IF p_operation = 'PAYOUT' THEN
+        IF p_reference_type <> 'PAYOUT' OR v_n <> 2 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid PAYOUT form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        IF p_hold_action IS NOT NULL AND p_hold_action <> 'null'::jsonb THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: hold_action is not valid for this operation'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
+         WHERE NOT (
+                (x.owner_type = 'MERCHANT' AND x.kind = 'AVAILABLE' AND x.account_type = '2200' AND x.entry_type = 'DEBIT')
+             OR (x.owner_type = 'SYSTEM' AND x.account_type = '1100' AND x.kind IS NULL AND x.entry_type = 'CREDIT')
+         );
+        IF v_other <> 0 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid PAYOUT form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        RETURN;
+    END IF;
+
+    IF p_operation = 'ADJUSTMENT' THEN
+        IF p_reference_type <> 'ADJUSTMENT' OR v_n < 2 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: invalid ADJUSTMENT form'
+                USING ERRCODE = 'PC400';
+        END IF;
+        IF p_hold_action IS NOT NULL AND p_hold_action <> 'null'::jsonb THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: hold_action is not valid for this operation'
+                USING ERRCODE = 'PC400';
+        END IF;
+        SELECT count(*) INTO v_other
+          FROM jsonb_to_recordset(p_rows) AS x(owner_type text, kind text, account_type text)
+         WHERE NOT (
+                (x.owner_type = 'CUSTOMER' AND x.kind IN ('AVAILABLE', 'HOLD') AND x.account_type IN ('2100', '2110'))
+             OR (x.owner_type = 'MERCHANT' AND x.kind = 'AVAILABLE' AND x.account_type = '2200')
+             OR (x.owner_type = 'SYSTEM' AND x.account_type IN ('1100', '4100', '4200', '5900'))
+         );
+        IF v_other <> 0 THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: ADJUSTMENT uses non-MVP accounts'
+                USING ERRCODE = 'PC400';
+        END IF;
+        RETURN;
+    END IF;
+
+    IF p_operation = 'REVERSAL' THEN
+        IF p_hold_action IS NOT NULL AND p_hold_action <> 'null'::jsonb THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: hold_action is not valid for this operation'
+                USING ERRCODE = 'PC400';
+        END IF;
+        RETURN;
+    END IF;
+
+    RAISE EXCEPTION 'INVALID_JOURNAL: unknown operation'
+        USING ERRCODE = 'PC400';
+END;
+$$;
+-- +goose StatementEnd
+
 -- +goose StatementBegin
 CREATE FUNCTION ledger.open_ledger_accounts(
     p_account_id uuid,
@@ -306,11 +676,12 @@ DECLARE
     v_take bigint;
     v_bucket integer;
     v_hold record;
-    v_hold_status text;
+    v_hold_row record;
     v_new_hold_status text;
     v_n integer;
     v_orig_op text;
     v_orig_ref text;
+    v_stored_rev uuid;
     v_acct_updated timestamptz;
 BEGIN
     IF p_journal_id IS NULL OR p_operation IS NULL OR p_reference_type IS NULL
@@ -330,8 +701,11 @@ BEGIN
         ('x' || substr(md5(concat_ws('|', p_reference_type, p_reference_id::text, p_operation, v_seq::text)), 1, 16))::bit(64)::bigint
     );
 
-    -- 1. Existing journal: identical entries → already_posted; otherwise PC409.
-    SELECT j.id INTO v_existing
+    -- 1. Existing journal: identical significant fields → already_posted; else PC409.
+    -- Compares entries, reverses_journal_id, hold_action, and adjustment_id.
+    -- adjustment_id is not a journal_transactions column (00003); non-REVERSAL
+    -- extra adjustment_id is a difference. REVERSAL cannot compare it after commit.
+    SELECT j.id, j.reverses_journal_id INTO v_existing, v_stored_rev
       FROM ledger.journal_transactions AS j
      WHERE j.reference_type = p_reference_type
        AND j.reference_id = p_reference_id
@@ -361,6 +735,67 @@ BEGIN
         ) THEN
             RAISE EXCEPTION 'CONFLICT: journal already posted with different entries'
                 USING ERRCODE = 'PC409';
+        END IF;
+        IF v_stored_rev IS DISTINCT FROM p_reverses_journal_id THEN
+            RAISE EXCEPTION 'CONFLICT: journal already posted with different reverses_journal_id'
+                USING ERRCODE = 'PC409';
+        END IF;
+        IF p_operation <> 'REVERSAL' AND p_adjustment_id IS NOT NULL THEN
+            RAISE EXCEPTION 'CONFLICT: journal already posted with different adjustment_id'
+                USING ERRCODE = 'PC409';
+        END IF;
+        IF p_operation NOT IN ('HOLD_PLACE', 'HOLD_CAPTURE', 'HOLD_RELEASE') THEN
+            IF p_hold_action IS NOT NULL AND p_hold_action <> 'null'::jsonb THEN
+                RAISE EXCEPTION 'CONFLICT: journal already posted with different hold_action'
+                    USING ERRCODE = 'PC409';
+            END IF;
+        ELSE
+            IF p_hold_action IS NULL OR jsonb_typeof(p_hold_action) <> 'object' THEN
+                RAISE EXCEPTION 'CONFLICT: journal already posted with different hold_action'
+                    USING ERRCODE = 'PC409';
+            END IF;
+            SELECT x.action, x.hold_id, x.account_id, x.amount, x.currency, x.expires_at,
+                   x.reference_type, x.reference_id
+              INTO v_hold
+              FROM jsonb_to_record(p_hold_action) AS x(
+                  action text, hold_id uuid, account_id uuid, amount bigint, currency text,
+                  expires_at timestamptz, reference_type text, reference_id uuid);
+            SELECT h.id, h.account_id, h.currency, h.amount, h.status,
+                   h.reference_type, h.reference_id, h.expires_at
+              INTO v_hold_row
+              FROM ledger.holds AS h
+             WHERE h.id = v_hold.hold_id;
+            IF NOT FOUND
+               OR v_hold.hold_id IS NULL OR v_hold.account_id IS NULL OR v_hold.action IS NULL
+               OR v_hold.amount IS NULL OR v_hold.currency IS NULL
+               OR v_hold_row.account_id IS DISTINCT FROM v_hold.account_id
+               OR v_hold_row.amount IS DISTINCT FROM v_hold.amount
+               OR v_hold_row.currency IS DISTINCT FROM v_hold.currency::char(3) THEN
+                RAISE EXCEPTION 'CONFLICT: journal already posted with different hold_action'
+                    USING ERRCODE = 'PC409';
+            END IF;
+            IF p_operation = 'HOLD_PLACE' THEN
+                IF v_hold.action <> 'PLACE'
+                   OR v_hold_row.reference_type IS DISTINCT FROM v_hold.reference_type
+                   OR v_hold_row.reference_id IS DISTINCT FROM v_hold.reference_id
+                   OR v_hold_row.expires_at IS DISTINCT FROM v_hold.expires_at THEN
+                    RAISE EXCEPTION 'CONFLICT: journal already posted with different hold_action'
+                        USING ERRCODE = 'PC409';
+                END IF;
+            ELSIF p_operation = 'HOLD_CAPTURE' THEN
+                IF v_hold.action <> 'CAPTURE' OR v_hold_row.status <> 'CAPTURED' THEN
+                    RAISE EXCEPTION 'CONFLICT: journal already posted with different hold_action'
+                        USING ERRCODE = 'PC409';
+                END IF;
+            ELSE
+                IF (v_hold.action = 'RELEASE' AND v_hold_row.status = 'RELEASED')
+                   OR (v_hold.action = 'EXPIRE' AND v_hold_row.status = 'EXPIRED') THEN
+                    NULL;
+                ELSE
+                    RAISE EXCEPTION 'CONFLICT: journal already posted with different hold_action'
+                        USING ERRCODE = 'PC409';
+                END IF;
+            END IF;
         END IF;
         RETURN QUERY
         SELECT v_existing, true, e.id, e.ledger_account_id, e.entry_type, e.amount,
@@ -488,75 +923,22 @@ BEGIN
             USING ERRCODE = 'PC400';
     END IF;
 
-    -- Operation form (account types / sides). Status is step 3.
-    IF p_operation = 'SIM_TOPUP' THEN
-        IF p_reference_type <> 'SIM_TOPUP' OR jsonb_array_length(v_rows) <> 2 THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: invalid SIM_TOPUP form'
-                USING ERRCODE = 'PC400';
-        END IF;
-        IF NOT EXISTS (
-            SELECT 1 FROM jsonb_to_recordset(v_rows) AS x(owner_type text, account_type text, entry_type text)
-             WHERE x.owner_type = 'SYSTEM' AND x.account_type = '1100' AND x.entry_type = 'DEBIT'
-        ) OR NOT EXISTS (
-            SELECT 1 FROM jsonb_to_recordset(v_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
-             WHERE x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type = 'CREDIT'
-        ) THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: invalid SIM_TOPUP form'
-                USING ERRCODE = 'PC400';
-        END IF;
-    ELSIF p_operation = 'TRANSFER' THEN
-        IF p_reference_type <> 'TRANSFER' THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: invalid TRANSFER form'
-                USING ERRCODE = 'PC400';
-        END IF;
-        IF EXISTS (
-            SELECT 1 FROM jsonb_to_recordset(v_rows) AS x(owner_type text, kind text, account_type text, entry_type text)
-             WHERE NOT (
-                 (x.owner_type = 'CUSTOMER' AND x.kind = 'AVAILABLE' AND x.account_type = '2100' AND x.entry_type IN ('DEBIT', 'CREDIT'))
-                 OR (x.owner_type = 'SYSTEM' AND x.account_type = '4100' AND x.entry_type = 'CREDIT')
-             )
-        ) THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: invalid TRANSFER form'
-                USING ERRCODE = 'PC400';
-        END IF;
-    ELSIF p_operation = 'HOLD_PLACE' THEN
-        IF p_reference_type <> 'HOLD' OR jsonb_array_length(v_rows) <> 2 THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_PLACE form'
-                USING ERRCODE = 'PC400';
-        END IF;
-    ELSIF p_operation = 'HOLD_RELEASE' THEN
-        IF p_reference_type <> 'HOLD' THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_RELEASE form'
-                USING ERRCODE = 'PC400';
-        END IF;
-        SELECT count(DISTINCT x.account_id) INTO v_n
-          FROM jsonb_to_recordset(v_rows) AS x(account_id uuid, owner_type text)
-         WHERE x.owner_type <> 'SYSTEM';
-        IF v_n <> 1 THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: HOLD_RELEASE must stay on one business account'
-                USING ERRCODE = 'PC400';
-        END IF;
-    ELSIF p_operation = 'HOLD_CAPTURE' THEN
-        IF p_reference_type <> 'HOLD' THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_CAPTURE form'
-                USING ERRCODE = 'PC400';
-        END IF;
-    ELSIF p_operation = 'REFUND' THEN
-        IF p_reference_type <> 'REFUND' THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: invalid REFUND form'
-                USING ERRCODE = 'PC400';
-        END IF;
-    ELSIF p_operation = 'PAYOUT' THEN
-        IF p_reference_type <> 'PAYOUT' THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: invalid PAYOUT form'
-                USING ERRCODE = 'PC400';
-        END IF;
-    ELSIF p_operation = 'ADJUSTMENT' THEN
-        IF p_reference_type <> 'ADJUSTMENT' THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: invalid ADJUSTMENT form'
-                USING ERRCODE = 'PC400';
-        END IF;
-    ELSIF p_operation = 'REVERSAL' THEN
+    -- Operation form (money-flows.md). Status is step 3.
+    PERFORM ledger.assert_journal_form(p_operation, p_reference_type, v_rows, p_hold_action);
+
+    IF p_operation IN ('HOLD_PLACE', 'HOLD_CAPTURE', 'HOLD_RELEASE') THEN
+        SELECT x.action, x.hold_id, x.account_id, x.amount, x.currency, x.expires_at,
+               x.reference_type, x.reference_id
+          INTO v_hold
+          FROM jsonb_to_record(p_hold_action) AS x(
+              action text, hold_id uuid, account_id uuid, amount bigint, currency text,
+              expires_at timestamptz, reference_type text, reference_id uuid);
+    ELSIF p_adjustment_id IS NOT NULL AND p_operation <> 'REVERSAL' THEN
+        RAISE EXCEPTION 'INVALID_JOURNAL: adjustment_id is only valid for REVERSAL'
+            USING ERRCODE = 'PC400';
+    END IF;
+
+    IF p_operation = 'REVERSAL' THEN
         SELECT j.operation, j.reference_type INTO v_orig_op, v_orig_ref
           FROM ledger.journal_transactions AS j
          WHERE j.id = p_reverses_journal_id;
@@ -600,41 +982,6 @@ BEGIN
             RAISE EXCEPTION 'INVALID_JOURNAL: REVERSAL entries must mirror the original'
                 USING ERRCODE = 'PC400';
         END IF;
-    ELSE
-        RAISE EXCEPTION 'INVALID_JOURNAL: unknown operation'
-            USING ERRCODE = 'PC400';
-    END IF;
-
-    IF p_operation IN ('HOLD_PLACE', 'HOLD_CAPTURE', 'HOLD_RELEASE') THEN
-        IF p_hold_action IS NULL OR jsonb_typeof(p_hold_action) <> 'object' THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: hold_action is required'
-                USING ERRCODE = 'PC400';
-        END IF;
-        SELECT x.action, x.hold_id, x.account_id, x.amount, x.currency, x.expires_at,
-               x.reference_type, x.reference_id
-          INTO v_hold
-          FROM jsonb_to_record(p_hold_action) AS x(
-              action text, hold_id uuid, account_id uuid, amount bigint, currency text,
-              expires_at timestamptz, reference_type text, reference_id uuid);
-        IF v_hold.hold_id IS NULL OR v_hold.account_id IS NULL OR v_hold.action IS NULL THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: hold_action fields are required'
-                USING ERRCODE = 'PC400';
-        END IF;
-        IF p_operation = 'HOLD_PLACE' AND v_hold.action <> 'PLACE' THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: HOLD_PLACE requires PLACE'
-                USING ERRCODE = 'PC400';
-        END IF;
-        IF p_operation = 'HOLD_CAPTURE' AND v_hold.action <> 'CAPTURE' THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: HOLD_CAPTURE requires CAPTURE'
-                USING ERRCODE = 'PC400';
-        END IF;
-        IF p_operation = 'HOLD_RELEASE' AND v_hold.action NOT IN ('RELEASE', 'EXPIRE') THEN
-            RAISE EXCEPTION 'INVALID_JOURNAL: HOLD_RELEASE requires RELEASE or EXPIRE'
-                USING ERRCODE = 'PC400';
-        END IF;
-    ELSIF p_hold_action IS NOT NULL AND p_hold_action <> 'null'::jsonb THEN
-        RAISE EXCEPTION 'INVALID_JOURNAL: hold_action is not valid for this operation'
-            USING ERRCODE = 'PC400';
     END IF;
 
     -- 3. Account status. L3: FOR SHARE NOWAIT on business accounts (PC460, never wait down).
@@ -829,21 +1176,53 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- 6. L7 holds.
+    -- 6. L7 holds (concurrency.md): insert PLACE or lock+transition CAPTURE/RELEASE.
+    -- SELECT FOR UPDATE is the same L7 row lock as the subsequent UPDATE, taken
+    -- after L5/L6 so amount/currency/account/status are re-checked atomically.
+    -- Concurrent CAPTURE vs RELEASE of one hold serialize here. Not a new lock
+    -- level; not xmin.
     IF p_operation = 'HOLD_PLACE' THEN
-        INSERT INTO ledger.holds (
-            id, account_id, currency, amount, status, reference_type, reference_id, expires_at
-        ) VALUES (
-            v_hold.hold_id,
-            v_hold.account_id,
-            coalesce(v_hold.currency, 'RUB'),
-            v_hold.amount,
-            'ACTIVE',
-            coalesce(v_hold.reference_type, 'PAYMENT'),
-            coalesce(v_hold.reference_id, p_reference_id),
-            v_hold.expires_at
-        );
+        BEGIN
+            INSERT INTO ledger.holds (
+                id, account_id, currency, amount, status, reference_type, reference_id, expires_at
+            ) VALUES (
+                v_hold.hold_id,
+                v_hold.account_id,
+                v_hold.currency,
+                v_hold.amount,
+                'ACTIVE',
+                v_hold.reference_type,
+                v_hold.reference_id,
+                v_hold.expires_at
+            );
+        EXCEPTION
+            WHEN unique_violation THEN
+                RAISE EXCEPTION 'CONFLICT: hold already exists'
+                    USING ERRCODE = 'PC409';
+        END;
     ELSIF p_operation IN ('HOLD_CAPTURE', 'HOLD_RELEASE') THEN
+        SELECT h.id, h.account_id, h.currency, h.amount, h.status
+          INTO v_hold_row
+          FROM ledger.holds AS h
+         WHERE h.id = v_hold.hold_id
+           FOR UPDATE OF h;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'CONFLICT: hold not found'
+                USING ERRCODE = 'PC409';
+        END IF;
+        IF v_hold_row.status <> 'ACTIVE' THEN
+            RAISE EXCEPTION 'CONFLICT: hold is not ACTIVE'
+                USING ERRCODE = 'PC409';
+        END IF;
+        IF v_hold_row.account_id IS DISTINCT FROM v_hold.account_id THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: cannot change a hold while posting another account'
+                USING ERRCODE = 'PC400';
+        END IF;
+        IF v_hold_row.amount IS DISTINCT FROM v_hold.amount
+           OR v_hold_row.currency IS DISTINCT FROM v_hold.currency::char(3) THEN
+            RAISE EXCEPTION 'INVALID_JOURNAL: hold amount or currency does not match'
+                USING ERRCODE = 'PC400';
+        END IF;
         v_new_hold_status := CASE v_hold.action
             WHEN 'CAPTURE' THEN 'CAPTURED'
             WHEN 'RELEASE' THEN 'RELEASED'
@@ -907,13 +1286,14 @@ BEGIN
          WHERE n.nspname = 'ledger'
            AND p.proname IN (
                'entry_status_allowed',
+               'assert_journal_form',
                'open_ledger_accounts',
                'lock_account_balances',
                'post_journal'
            )
     LOOP
         EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', r.sig);
-        IF r.proname <> 'entry_status_allowed' THEN
+        IF r.proname NOT IN ('entry_status_allowed', 'assert_journal_form') THEN
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO paycore_app', r.sig);
         END IF;
         EXECUTE format('ALTER FUNCTION %s OWNER TO paycore_ledger', r.sig);
