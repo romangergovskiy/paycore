@@ -14,14 +14,14 @@ MVP работает с виртуальными деньгами: источн�
 | [ledger-model.md](ledger-model.md) | Финансовая модель: double-entry, журналы и проводки, правила дебета и кредита, балансы и бакеты, резервы, комиссии, неизменяемость, контракт `post_journal`, инварианты |
 | [chart-of-accounts.md](chart-of-accounts.md) | План счетов; по каждому системному счёту — знак остатка, контроль, проекция, горячая строка |
 | [money-flows.md](money-flows.md) | Машины состояний; симулятор; переводы; checkout → авторизация → capture; отмена и истечение; возвраты с числовыми примерами; сквозной сценарий; выплаты; сторно |
-| [financial-invariants-testing.md](financial-invariants-testing.md) | План тестирования: unit, property-based, права и функции, идемпотентность, outbox, конкурентные S-01…S-24, fault injection |
+| [financial-invariants-testing.md](financial-invariants-testing.md) | План тестирования: unit, property-based, права и функции, идемпотентность, outbox, конкурентные S-01…S-28, fault injection |
 
 Модель данных — в [../database/README.md](../database/README.md).
 
 ## Ключевые решения (кратко)
 
 1. **Ledger — первоисточник.** Журнал из ≥ 2 проводок, в каждой валюте \(\sum D = \sum C\), записи append-only, исправления — только сторно и корректировки (maker-checker) — [D-06](decisions.md#d-06), [D-31](decisions.md#d-31).
-2. **Деньги — `BIGINT` в минорных единицах**, RUB и USD, округление только в Commission Engine (`HALF_UP`, ставки в bp) — [D-17](decisions.md#d-17), [D-30](decisions.md#d-30).
+2. **Деньги — `BIGINT` в минорных единицах**, в MVP только RUB (модель мультивалютная), округление только в Commission Engine (`HALF_UP`, ставки в bp) — [D-17](decisions.md#d-17), [D-30](decisions.md#d-30).
 3. **Бизнес-счёт ↔ два ledger-счёта** (доступно и резерв). Резерв — проводка — [D-01](decisions.md#d-01).
 4. **Синхронная проекция у всех счетов:** `account_balances` у клиентов и магазинов, бакеты у системных счетов; CHECK ≥ 0 ловит отрицательный остаток в момент записи — [D-02](decisions.md#d-02).
 5. **Единственный путь записи в ledger — функции `SECURITY DEFINER`** и права ролей; триггеры — вторая линия — [D-03](decisions.md#d-03).

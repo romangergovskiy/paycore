@@ -27,7 +27,7 @@ erDiagram
     accounts ||--o{ holds : "резервы"
 
     currencies {
-        char3 code PK "RUB, USD"
+        char3 code PK "MVP: RUB"
         smallint minor_units "0..4"
         text name
         boolean is_active
@@ -84,7 +84,7 @@ erDiagram
         text normal_balance
         boolean allow_negative "false в MVP"
         smallint bucket_count "16 для 1100, 4100, 4200"
-        text status "ACTIVE, CLOSED"
+        text status "ACTIVE, CLOSED; не ACTIVE только у SYSTEM"
         timestamptz created_at
     }
     system_balance_buckets {
@@ -181,7 +181,7 @@ erDiagram
         uuid customer_account_id FK "NULL до подтверждения"
         bigint amount "CHECK > 0"
         char3 currency
-        bigint fee_amount "при capture"
+        bigint fee_amount "при capture, CHECK < amount"
         uuid fee_tariff_id FK
         bigint captured_amount "0 или amount"
         bigint refunded_amount "0..captured"
@@ -213,7 +213,7 @@ erDiagram
         int attempt_number "UK с payment_id"
         text operation "CONFIRM, CAPTURE, VOID, REFUND"
         text status "SUCCEEDED, FAILED"
-        text error_code
+        text error_code "FEE_EXCEEDS_PAYMENT, ACCOUNT_NOT_ACTIVE..."
         uuid actor_id
         timestamptz started_at
         timestamptz finished_at
@@ -317,7 +317,7 @@ erDiagram
         bigint amount "CHECK > 0"
         char3 currency
         text status "COMPLETED, FAILED"
-        text failure_code
+        text failure_code "PAYOUT_SOURCE_INSUFFICIENT..."
         text idempotency_key "UK с merchant_id"
         uuid requested_by
         timestamptz created_at

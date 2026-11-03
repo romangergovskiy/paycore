@@ -26,53 +26,70 @@
 
 ## 3. Единый порядок захвата блокировок
 
-Все use case берут блокировки строго в этом порядке. Внутри уровня — по возрастанию ключа. Уровень можно пропустить, но нельзя вернуться на предыдущий.
+Все use case берут блокировки строго в этом порядке. Внутри уровня — по возрастанию ключа. Уровень можно пропустить, но нельзя вернуться на предыдущий. Повторное обращение к строке, уже заблокированной на более раннем уровне (например, `UPDATE limit_counters` после проведения или `UPDATE payments` в конце транзакции), новой блокировкой не считается.
 
 | Уровень | Объект | Режим | Кто берёт |
 |---|---|---|---|
 | **L1** | `platform.idempotency_keys` (вставка ключа) | ожидание на уникальном индексе | use case API |
-| **L2** | Бизнес-агрегат: `payments` (вместе с его `checkout_sessions`), `manual_adjustments` | `FOR UPDATE` | use case |
-| **L3** | `accounts.accounts` — все участники | `FOR SHARE`, по `id` | use case |
+| **L2** | Бизнес-агрегат: `payments` (вместе с его `checkout_sessions`), `manual_adjustments` | `FOR UPDATE` | use case, scheduler |
+| **L3** | `accounts.accounts` — все участники | `FOR SHARE` для денежных операций; `FOR NO KEY UPDATE` для смены статуса (блокировка, разблокировка, закрытие); по `id` | use case |
 | **L4** | `limits.limit_counters` — счётчики лимитов | `INSERT … ON CONFLICT DO NOTHING` + `FOR UPDATE`, по `(user_id, currency, limit_type, period_start)` | use case |
 | **L5** | `ledger.account_balances` — все участники | `FOR UPDATE`, по `account_id` | `ledger.lock_account_balances` (повторно в `post_journal`, блокировка уже наша) |
 | **L6** | `ledger.system_balance_buckets` | увеличение — один бакет; уменьшение — все бакеты счёта; по `(ledger_account_id, bucket_no)` | `ledger.post_journal` |
-| **L7** | `ledger.holds` | условный `UPDATE … WHERE status = 'ACTIVE'` | `ledger.post_journal` |
-| **L8** | Вставки: журнал, проводки, бизнес-объекты, история, outbox, аудит; `UPDATE idempotency_keys → COMPLETED` | новые строки / уже захваченная строка | use case + функция |
+| **L7** | `ledger.holds` | вставка резерва или условный `UPDATE … WHERE status = 'ACTIVE'` | `ledger.post_journal` |
+| **L8** | Вставки и обновления: журнал и проводки; бизнес-объекты (`transfers`, `refunds`, `payouts`, `test_topups`, `payment_attempts`, изменения `payments`/`checkout_sessions`/`accounts`); `*_status_history`; `outbox_events`; `audit_logs`; `UPDATE idempotency_keys → COMPLETED` | новые строки или строки, уже заблокированные на L1–L4 | use case + `post_journal` (шаг 7) |
 
-На этапе 2 добавлены два уровня: **L4** (лимиты, [D-24](../architecture/decisions.md#d-24)) и **L6** (бакеты системных счетов, [D-02](../architecture/decisions.md#d-02)). Уровень `holds` перенесён в L7: резерв меняется только внутри `post_journal`, и все его переходы уже сериализованы блокировкой платежа на L2.
+На этапе 2 добавлены **L4** (лимиты, [D-24](../architecture/decisions.md#d-24)) и **L6** (бакеты системных счетов, [D-02](../architecture/decisions.md#d-02)). Уровень `holds` — L7: резерв меняется только внутри `post_journal`, все его переходы уже сериализованы блокировкой платежа на L2. На этапе 2.1 L8 включён в формулу и матрицу, а шаблон возврата исправлен: в нём бизнес-объект вставлялся до вызова `post_journal`, то есть до L6–L7.
+
+**Правила L8.**
+
+1. Ни одна запись L8 не выполняется до того, как взяты все нужные блокировки L2–L7. Поэтому бизнес-объекты (`refunds`, `payouts`, `transfers` …) вставляются **после** `post_journal`. Их id (UUIDv7) генерирует Go заранее, и он передаётся в функцию как `reference_id`. FK журнала на объект нет ([er-diagram.md §7](er-diagram.md#7-межмодульные-связи)), так что порядок вставки не важен для целостности.
+2. Отказ (`FAILED`-объект, `payment_attempts`) записывается на шаге `finish` — после последней взятой блокировки. После него новые блокировки не берутся.
+3. Вставка строки с FK берёт `FOR KEY SHARE` на родительской строке (`accounts`, `payments`, `ledger_accounts`). Этот режим совместим с `FOR SHARE` и `FOR NO KEY UPDATE`. Конфликтует он только с `FOR UPDATE` на той же строке, а `FOR UPDATE` на `payments` (L2) держит та же транзакция. Поэтому для смены статуса счёта используется `FOR NO KEY UPDATE`, а не `FOR UPDATE`: иначе вставка резерва или проводки ждала бы смены статуса на L8, то есть «вниз» по порядку.
+4. Уникальные индексы L8 (`journal_transactions` по бизнес-ключу, `refunds (payment_id, idempotency_key)` …) могут заставить ждать только транзакцию с тем же бизнес-ключом. Такая транзакция уже сериализована с нами на L1 или L2, поэтому в момент нашей вставки она либо завершена, либо ещё не дошла до L8.
+5. `audit_logs` в MVP без хеш-цепочки, вставка не блокирует других. Если будет принята хеш-цепочка ([Q-20](../architecture/open-questions.md#q-20)), строка «последний хеш» станет блокировкой L8, которую берут последней, перед `COMMIT`.
 
 ### 3.1. Матрица «сценарий × уровни»
 
-| Сценарий | L1 | L2 | L3 | L4 | L5 | L6 | L7 |
-|---|---|---|---|---|---|---|---|
-| Тестовое пополнение | ✓ | | клиент | лимит пополнения | клиент | 1100: один бакет | |
-| Перевод другому клиенту | ✓ | | отправитель, получатель | суточный лимит отправителя | оба | 4100: один бакет | |
-| Перевод между своими счетами | ✓ | | оба | — | оба | — | |
-| Создание платежа | ✓ | | (счёт магазина) | | | | |
-| Подтверждение checkout | ✓ | платёж + checkout | покупатель, магазин | суточный лимит покупателя | покупатель | | вставка резерва |
-| Capture | ✓ | платёж | покупатель, магазин | | покупатель, магазин | 4200: один бакет | резерв |
-| Void | ✓ | платёж | покупатель | возврат лимита (тот же период) | покупатель | | резерв |
-| Истечение резерва (scheduler) | | платёж | покупатель | возврат лимита | покупатель | | резерв |
-| Истечение checkout (scheduler) | | платёж + checkout | | | | | |
-| Возврат | ✓ | платёж | покупатель, магазин | | покупатель, магазин | | |
-| Выплата | ✓ | | магазин | | магазин | 1100: **все** бакеты | |
-| Корректировка / сторно | ✓ | заявка | участники | | участники | затронутые счета | |
-| Блокировка счёта | ✓ | | `UPDATE` (эксклюзивно) | | | | |
+| Сценарий | L1 | L2 | L3 | L4 | L5 | L6 | L7 | L8 |
+|---|---|---|---|---|---|---|---|---|
+| Тестовое пополнение | ✓ | | клиент | лимит пополнения | клиент | 1100: один бакет | | журнал; `test_topups`; outbox; ключ |
+| Перевод другому клиенту | ✓ | | отправитель, получатель | суточный лимит отправителя | оба | 4100: один бакет | | журнал; `UPDATE limit_counters`; `transfers`; история; outbox; ключ |
+| Перевод между своими счетами | ✓ | | оба | — | оба | — | | журнал; `transfers`; история; outbox; ключ |
+| Перевод отклонён | ✓ | | (до отказа) | (до отказа) | (до отказа) | | | `transfers (FAILED)`; ключ |
+| Создание платежа | ✓ | | счёт магазина | | | | | `payments`; `checkout_sessions`; outbox; ключ |
+| Отмена до оплаты | ✓ | платёж + checkout | | | | | | `UPDATE payments`, checkout; история; outbox; ключ |
+| Подтверждение checkout | ✓ | платёж + checkout | покупатель, магазин | суточный лимит покупателя | покупатель | | вставка резерва | журнал; `UPDATE payments`, checkout, `limit_counters`; `payment_attempts`; история; outbox; ключ |
+| Capture | ✓ | платёж | покупатель, магазин | | покупатель, магазин | 4200: один бакет | резерв | журнал; `UPDATE payments`; `payment_attempts`; история; outbox; ключ |
+| Capture отклонён (`FEE_EXCEEDS_PAYMENT`, статус счёта) | ✓ | платёж | (до отказа) | | | | | `payment_attempts (FAILED)`; ключ |
+| Void | ✓ | платёж | покупатель | возврат лимита (тот же период) | покупатель | | резерв | журнал; `UPDATE payments`, `limit_counters`; история; outbox; ключ |
+| Истечение резерва (scheduler) | | платёж | покупатель | возврат лимита | покупатель | | резерв | журнал; `UPDATE payments`, `limit_counters`; история; outbox |
+| Истечение checkout (scheduler) | | платёж + checkout | | | | | | `UPDATE payments`, checkout; история; outbox |
+| Возврат | ✓ | платёж | покупатель, магазин | | покупатель, магазин | | | журнал; `refunds`; `UPDATE payments`; история; outbox; ключ |
+| Возврат отклонён | ✓ | платёж | (до отказа) | | (до отказа) | | | `refunds (FAILED)`; ключ |
+| Выплата | ✓ | | магазин | | магазин | 1100: **все** бакеты | | журнал; `payouts`; outbox; ключ |
+| Корректировка / сторно | ✓ | заявка | участники | | участники | затронутые системные счета | (резерв, если сторнируется `HOLD_*`) | журнал; `UPDATE manual_adjustments`; аудит; ключ |
+| Блокировка / разблокировка счёта | ✓ | | `FOR NO KEY UPDATE` | | | | | `UPDATE accounts`; история; аудит; outbox; ключ |
+| Закрытие счёта | ✓ | | `FOR NO KEY UPDATE` | | счёт (проверка нулевых остатков) | | | `UPDATE accounts`; история; аудит; outbox; ключ |
 
 Доказательство отсутствия deadlock. Каждая транзакция берёт блокировки в одном глобальном порядке:
 
 \[
-(L1) < (L2,\ id) < (L3,\ id) < (L4,\ key) < (L5,\ account\_id) < (L6,\ account,\ bucket) < (L7,\ id)
+(L1) < (L2,\ id) < (L3,\ id) < (L4,\ key) < (L5,\ account\_id) < (L6,\ account,\ bucket) < (L7,\ id) < (L8)
 \]
 
 Ожидание возможно только «вверх» по этому порядку, поэтому цикл ожиданий невозможен. Отдельно:
 
+- L8 — последний уровень: после первой записи L8 транзакция не берёт блокировок L1–L7 (правило 1), а ожидания внутри L8 возможны только между транзакциями, уже сериализованными на L1–L2 (правило 4);
 - увеличение системного счёта держит один бакет и после него ждёт только L7/L8;
-- уменьшение берёт все бакеты по возрастанию;
-- блокировка счёта держит только L3;
+- уменьшение берёт все бакеты по возрастанию `bucket_no`;
+- смена статуса счёта держит только L3 (и L5 при закрытии, после L3);
+- `post_journal` читает статус счёта с `FOR SHARE NOWAIT` ([ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer)): эта блокировка уже наша с L3, а если нет — функция не ждёт, а падает, так что ожидания «вниз» не возникает;
 - фоновые задачи не начинают с блокировки `holds`: кандидатов выбирают без блокировок, затем идут L2 → ….
 
-В Go блокировки L3–L5 берёт один компонент (Unit of Work сервиса проведения), он сам сортирует ключи. L6–L7 берёт только SQL-функция.
+В Go блокировки L3–L5 берёт один компонент (Unit of Work сервиса проведения), он сам сортирует ключи. L6–L7 и записи журнала в L8 берёт только SQL-функция.
+
+Проверка шаблонов §5 на соответствие порядку выполнена по всем строкам матрицы и сценариям S-01…S-28 (§9). Фактический порядок совпадает с L1…L8 после исправления шаблона возврата.
 
 ## 4. Идемпотентность HTTP
 
@@ -168,16 +185,19 @@ BEGIN RC;
  L1  idempotency (1)
  L3  SELECT id, status, currency, user_id FROM accounts.accounts
        WHERE id IN ($sender, $receiver) ORDER BY id FOR SHARE;
-     проверки: владелец sender = инициатор; оба ACTIVE; валюта; sender ≠ receiver; лимит на операцию
+     проверки: владелец sender = инициатор; оба ACTIVE (BLOCKED и CLOSED не отправляют и не получают, D-26);
+       валюта активна и совпадает; sender ≠ receiver; лимит на операцию
      комиссия по тарифу (0 для своих счетов)
  L4  (только перевод другому клиенту) счётчик суточного лимита отправителя:
        INSERT … ON CONFLICT DO NOTHING; SELECT … FOR UPDATE;
        used + amount > limit → transfers(FAILED, LIMIT_EXCEEDED) → finish
  L5  SELECT * FROM ledger.lock_account_balances(ARRAY[$sender, $receiver]);   -- сортирует, FOR UPDATE
      available(sender) < amount + fee → transfers(FAILED, INSUFFICIENT_FUNDS) → finish
- L6–L8  ledger.post_journal(TRANSFER, …): Дт sender:2100 amount+fee / Кт receiver:2100 amount / Кт 4100 fee
-     UPDATE limit_counters SET used = used + amount;
-     INSERT transfers(COMPLETED), transfer_status_history, outbox('transfer.completed')
+ L6–L8  ledger.post_journal(TRANSFER, reference_id = $transfer_id, …):
+       Дт sender:2100 amount+fee / Кт receiver:2100 amount / Кт 4100 fee
+       (внутри: статусы FOR SHARE NOWAIT → L6 один бакет 4100 → L8 журнал и проводки)
+ L8  UPDATE limit_counters SET used = used + amount;            -- строка уже наша с L4
+     INSERT transfers(COMPLETED, id = $transfer_id), transfer_status_history, outbox('transfer.completed')
 finish:
      UPDATE idempotency_keys → COMPLETED (ответ 201 или 422)
 COMMIT;
@@ -193,12 +213,13 @@ BEGIN RC;
  L2  SELECT … FROM payments.payments WHERE id = $p FOR UPDATE;
      SELECT … FROM payments.checkout_sessions WHERE payment_id = $p FOR UPDATE;
      status = CREATED, checkout ACTIVE и не истёк, токен совпадает
- L3  accounts (покупатель, магазин) FOR SHARE по id; счёт покупателя принадлежит ему, ACTIVE, валюта
+ L3  accounts (покупатель, магазин) FOR SHARE по id; счёт покупателя принадлежит ему; оба ACTIVE; валюта
  L4  суточный лимит покупателя
  L5  lock_account_balances([customer])
-     нет средств / лимит → payments CREATED→FAILED, checkout FAILED, payment_attempts(FAILED) → finish
- L6–L8  post_journal(HOLD_PLACE, hold: PLACE, expires_at = now()+7d): Дт A:2100 / Кт A:2110
-     UPDATE payments SET status='AUTHORIZED', customer_account_id, hold_id, version+1 WHERE id=$p AND status='CREATED'
+     нет средств / лимит / статус → payments CREATED→FAILED, checkout FAILED, payment_attempts(FAILED) → finish
+ L7–L8  post_journal(HOLD_PLACE, hold: PLACE, expires_at = now()+7d): Дт A:2100 / Кт A:2110
+       (внутри: L7 вставка holds ACTIVE → L8 журнал и проводки; бакетов нет)
+ L8  UPDATE payments SET status='AUTHORIZED', customer_account_id, hold_id, version+1 WHERE id=$p AND status='CREATED'
      checkout → CONFIRMED; limit used += amount; history; payment_attempts(SUCCEEDED); outbox('payment.authorized')
 finish: idempotency → COMPLETED
 COMMIT;
@@ -211,19 +232,23 @@ BEGIN RC;
  L1  idempotency (scope = магазин)
  L2  SELECT … FROM payments WHERE id=$p FOR UPDATE;   status = AUTHORIZED, иначе 409 INVALID_STATE
      резерв (чтение): status ACTIVE и expires_at > now(), иначе 409 AUTH_EXPIRED
-     комиссия по тарифу на now(): fee = min(fee, amount)
- L3  accounts (покупатель, магазин) FOR SHARE; магазин ACTIVE; счёт покупателя не BLOCKED (D-26)
+     комиссия по тарифу на now(): fee >= amount → payment_attempts(CAPTURE, FAILED, FEE_EXCEEDS_PAYMENT),
+       платёж и резерв не меняются → finish (422)                     -- D-27
+ L3  accounts (покупатель, магазин) FOR SHARE; оба ACTIVE, иначе payment_attempts(FAILED, ACCOUNT_NOT_ACTIVE) → finish (422)
  L5  lock_account_balances([customer, merchant])
  L6–L8  post_journal(HOLD_CAPTURE, hold: CAPTURE): Дт A:2110 amount / Кт MA:2200 amount−fee / Кт 4200 fee
-        (внутри: UPDATE holds SET status='CAPTURED' WHERE id=$h AND status='ACTIVE' — 0 строк → PC409)
-     UPDATE payments SET status='CAPTURED', captured_amount, fee_amount, fee_tariff_id, version+1 WHERE id=$p AND status='AUTHORIZED'
-     history; outbox('payment.captured'); idempotency → COMPLETED
+        (внутри: L6 один бакет 4200 → L7 UPDATE holds SET status='CAPTURED'
+         WHERE id=$h AND status='ACTIVE' — 0 строк → PC409 → L8 журнал и проводки)
+ L8  UPDATE payments SET status='CAPTURED', captured_amount, fee_amount, fee_tariff_id, version+1
+      WHERE id=$p AND status='AUTHORIZED';                           -- CHECK fee_amount < amount
+     payment_attempts(SUCCEEDED); history; outbox('payment.captured')
+finish: idempotency → COMPLETED (200 или 422)
 COMMIT;
 ```
 
 ### 5.4. Void, истечение резерва, истечение checkout
 
-- **Void**: как capture до L3; L3 — только покупатель; L4 — возврат лимита, если период тот же; L5 — покупатель; `post_journal(HOLD_RELEASE, hold: RELEASE)`; платёж → `CANCELLED (VOIDED)`. Void разрешён и при `BLOCKED`-счёте покупателя ([D-26](../architecture/decisions.md#d-26)).
+- **Void**: L1; L2 платёж (`AUTHORIZED`, иначе `409 INVALID_STATE`); L3 — только покупатель (`ACTIVE` или `BLOCKED`; статус магазина не проверяется, [D-26](../architecture/decisions.md#d-26)); L4 — возврат лимита, если период тот же; L5 — покупатель; `post_journal(HOLD_RELEASE, hold: RELEASE)` (внутри: L7 резерв `ACTIVE → RELEASED` → L8 журнал); L8 платёж → `CANCELLED (VOIDED)`, история, outbox, ключ.
 - **Истечение резерва** (scheduler, несколько экземпляров):
 
 ```text
@@ -234,12 +259,13 @@ BEGIN RC;
   SELECT … FROM payments WHERE id=$p FOR UPDATE;                         -- L2
   IF status <> 'AUTHORIZED' OR hold.expires_at >= now() → COMMIT;        -- уже обработан другим
   L3 покупатель FOR SHARE; L4 возврат лимита; L5 покупатель
-  post_journal(HOLD_RELEASE, hold: EXPIRE); payments → CANCELLED (AUTH_EXPIRED); history; outbox
+  post_journal(HOLD_RELEASE, hold: EXPIRE)                              -- L7 → L8; покупатель ACTIVE или BLOCKED
+  payments → CANCELLED (AUTH_EXPIRED); history; outbox                  -- L8
 COMMIT;
 ```
 
   Второй экземпляр ждёт на L2, затем видит `status <> 'AUTHORIZED'` и выходит без эффекта.
-- **Истечение checkout**: L2 (платёж + checkout); если `CREATED` и истёк, то → `CANCELLED (CHECKOUT_EXPIRED)`. Проводок нет.
+- **Истечение checkout**: кандидаты без блокировок; затем своя транзакция: L2 (платёж + checkout); если `CREATED` и истёк, то L8 → `CANCELLED (CHECKOUT_EXPIRED)`, checkout `EXPIRED`, история, outbox. Проводок нет.
 
 ### 5.5. Возврат
 
@@ -250,9 +276,12 @@ BEGIN RC;
      status ∈ {CAPTURED, PARTIALLY_REFUNDED}; refunded_amount + $amount ≤ captured_amount
      иначе refunds(FAILED, REFUND_EXCEEDS_CAPTURED | INVALID_STATE) → finish
  L3  accounts (покупатель, магазин) FOR SHARE; магазин ACTIVE; покупатель ACTIVE или BLOCKED (не CLOSED)
+     иначе refunds(FAILED, ACCOUNT_NOT_ACTIVE) → finish
  L5  lock_account_balances([customer, merchant])
      merchant.available < amount → refunds(FAILED, MERCHANT_INSUFFICIENT_FUNDS) → finish
- L8  INSERT refunds(SUCCEEDED); post_journal(REFUND): Дт MA:2200 / Кт A:2100 amount
+ L8  post_journal(REFUND, reference_id = $refund_id): Дт MA:2200 / Кт A:2100 amount
+       (бакетов и резервов нет; внутри: статусы NOWAIT → L8 журнал и проводки)
+     INSERT refunds(SUCCEEDED, id = $refund_id);                    -- после post_journal (правило L8 №1)
      UPDATE payments SET refunded_amount = refunded_amount + $amount,
             status = CASE WHEN refunded_amount + $amount = captured_amount THEN 'REFUNDED' ELSE 'PARTIALLY_REFUNDED' END,
             version = version + 1
@@ -264,12 +293,33 @@ COMMIT;
 
 ### 5.6. Тестовое пополнение и выплата
 
-- **Пополнение**: L1; L3 счёт клиента (`ACTIVE`, не мерчантский); L4 суточный лимит пополнений; L5 клиент; `post_journal(SIM_TOPUP)`: Дт 1100 (один бакет) / Кт A:2100; `test_topups(COMPLETED)`; outbox.
-- **Выплата**: L1; L3 счёт магазина; L5 магазин; проверка `available ≥ amount`; `post_journal(PAYOUT)`: Дт MA:2200 / Кт 1100. Здесь L6 блокирует **все** бакеты 1100 по порядку, проверяет сумму и распределяет списание. `payouts(COMPLETED)`; outbox.
+- **Пополнение**: L1; L3 счёт клиента (`ACTIVE`, не магазинный; `BLOCKED` и `CLOSED` → `FAILED (ACCOUNT_NOT_ACTIVE)`); L4 суточный лимит пополнений; L5 клиент; `post_journal(SIM_TOPUP)`: Дт 1100 (L6: один бакет) / Кт A:2100; L8 `test_topups(COMPLETED)`, `UPDATE limit_counters`, outbox, ключ.
+- **Выплата**:
 
-### 5.7. Блокировка счёта
+```text
+BEGIN RC;
+ L1  idempotency (scope = магазин)
+ L3  счёт магазина FOR SHARE; ACTIVE, иначе payouts(FAILED, ACCOUNT_NOT_ACTIVE) → finish
+ L5  lock_account_balances([merchant]); available < amount → payouts(FAILED, INSUFFICIENT_FUNDS) → finish
+     SAVEPOINT sp_payout;
+ L6–L8  post_journal(PAYOUT, reference_id = $payout_id): Дт MA:2200 / Кт 1100
+       (внутри: L6 все бакеты 1100 по возрастанию bucket_no, SUM ≥ amount, списание по бакетам → L8 журнал)
+     PC402 SYSTEM_ACCOUNT_INSUFFICIENT → ROLLBACK TO sp_payout;      -- блокировки бакетов снимаются
+       payouts(FAILED, PAYOUT_SOURCE_INSUFFICIENT); алерт → finish
+ L8  INSERT payouts(COMPLETED, id = $payout_id); outbox('payout.completed')
+finish: idempotency → COMPLETED (201 или 422)
+COMMIT;
+```
 
-`UPDATE accounts SET status='BLOCKED', version = version + 1 WHERE id=$a AND status='ACTIVE'` + `account_status_history` + audit + outbox. Этот `UPDATE` ждёт все транзакции, держащие `FOR SHARE` (L3) на счёте. Новые денежные транзакции после него видят `BLOCKED`.
+  `SAVEPOINT` нужен только здесь: проверить бакеты заранее use case не может (их блокирует функция), а отказ должен сохраниться как `FAILED`. Нехватка 1100 возможна, только если компенсации превысили доход ([chart-of-accounts.md §3](../architecture/chart-of-accounts.md#3-системные-счета-остаток-контроль-проекция)).
+
+### 5.7. Блокировка, разблокировка и закрытие счёта
+
+- **Блокировка**: L1; L3 `SELECT … FROM accounts WHERE id=$a FOR NO KEY UPDATE` (статус `ACTIVE`, иначе `409 INVALID_STATE`); L8 `UPDATE accounts SET status='BLOCKED', version = version + 1` (неключевые колонки, строка уже наша), `account_status_history`, audit, outbox. `FOR NO KEY UPDATE` ждёт все транзакции, держащие `FOR SHARE` (L3) на счёте. Новые денежные транзакции после него видят `BLOCKED`. Блокировка не трогает резервы и проекции: ранее созданный резерв остаётся `ACTIVE` и может быть освобождён void или истечением.
+- **Разблокировка**: то же, `BLOCKED → ACTIVE`.
+- **Закрытие** ([D-28](../architecture/decisions.md#d-28)): L1; L3 `SELECT … FROM accounts WHERE id=$a FOR NO KEY UPDATE` (`ACTIVE` или `BLOCKED`); L5 `lock_account_balances([$a])`; `available = 0 AND reserved = 0`, иначе `409 ACCOUNT_NOT_EMPTY`; L8 `UPDATE accounts SET status='CLOSED', closed_at = now()`, история, audit, outbox. Используется `FOR NO KEY UPDATE`, а не `FOR UPDATE`, чтобы не конфликтовать с `FOR KEY SHARE` от вставок с FK (правило L8 №3).
+
+Почему блокировка не обходит ограничения. Операция, взявшая L3 до блокировки, завершается по правилам `ACTIVE`; после коммита блокировки любая новая операция видит `BLOCKED` под L3, а `post_journal` повторно проверяет статус по матрице ([ledger-model.md §11.4](../architecture/ledger-model.md#114-статусы-счетов-и-допустимые-операции)). Исключения матрицы только возвращают владельцу его деньги и проходят все бухгалтерские проверки.
 
 ## 6. Повторы (retry)
 
@@ -281,7 +331,8 @@ COMMIT;
 | `57014` query_canceled | `statement_timeout` | Без повтора, `503` |
 | `23505` unique_violation | Бизнес-дубль | Не повторять: прочитать существующий объект → идемпотентный ответ или `409` |
 | `23514` check_violation, `PC402` | Нет средств (обход проверки) | Не повторять: доменная ошибка |
-| `PC400`, `PC409`, `P0001` | Нарушение контракта ledger или триггера | Не повторять: `500` + алерт (баг) |
+| `PC403` | Статус счёта запрещает операцию (use case пропустил проверку) | Не повторять: доменный отказ `ACCOUNT_NOT_ACTIVE` + алерт (use case должен был отклонить раньше) |
+| `PC400`, `PC409`, `PC460`, `P0001` | Нарушение контракта ledger, протокола блокировок или триггера | Не повторять: `500` + алерт (баг) |
 | Обрыв на `COMMIT` | Исход неизвестен | Сервер не повторяет. Клиент повторяет с тем же ключом (§4.3, случай 7) |
 
 Правила обёртки:
@@ -396,7 +447,7 @@ COMMIT;   -- с Kafka: затем commit offset
 | S-06 | **Два частичных возврата**: 3 000 + 3 000 ₽ по платежу 5 000 ₽ | L2, L5 | L2 сериализует возвраты; проверка `refunded + amount ≤ captured`; `CHECK refunded_amount ≤ captured_amount` | Один `SUCCEEDED`, один `FAILED (REFUND_EXCEEDS_CAPTURED)`; `refunded_amount = 300 000` |
 | S-07 | **Возвраты двух разных платежей** одного магазина при остатке на один | L2 (разные), L5 (общий магазин) | L5 строки магазина + `CHECK available ≥ 0` | Один `SUCCEEDED`, второй — `FAILED (MERCHANT_INSUFFICIENT_FUNDS)` |
 | S-08 | **Перевод и платёж с одного счёта** одновременно | L5 | Одна строка `account_balances` покупателя для обоих | \(\sum\) списаний и резервов ≤ остатка; второй — `INSUFFICIENT_FUNDS` |
-| S-09 | **Блокировка счёта во время перевода или платежа** | L3 | `FOR SHARE` (L3) против эксклюзивного `UPDATE accounts` | Операция закоммичена до блокировки **или** отклонена `ACCOUNT_NOT_ACTIVE`; после коммита блокировки — ни одной новой операции |
+| S-09 | **Блокировка счёта во время перевода или платежа** | L3 | `FOR SHARE` (L3) операции против `UPDATE accounts … status='BLOCKED'` (режим `FOR NO KEY UPDATE`); `post_journal` перепроверяет статус под `FOR SHARE NOWAIT` | Операция закоммичена до блокировки **или** отклонена `ACCOUNT_NOT_ACTIVE`; после коммита блокировки — ни одной новой операции по запрещённым ролям матрицы ([ledger-model.md §11.4](../architecture/ledger-model.md#114-статусы-счетов-и-допустимые-операции)) |
 | S-10 | **Суточный лимит**: 100 000 ₽, два параллельных перевода по 60 000 ₽ с **разных** счетов одного пользователя | L4 | Общий счётчик `(user, currency, DAILY_OUTGOING, day)` под `FOR UPDATE` | Один проходит, второй — `LIMIT_EXCEEDED` |
 | S-11 | **Суточный лимит при первом запросе дня** (строки счётчика ещё нет) | L4 | `INSERT … ON CONFLICT DO NOTHING` — второй ждёт вставку первого; затем `FOR UPDATE` | Как S-10 |
 | S-12 | **Повтор запроса с тем же ключом** (одновременно и последовательно) | L1 | §4.3, случаи 1, 6 | Одна операция, ответы идентичны |
@@ -409,9 +460,13 @@ COMMIT;   -- с Kafka: затем commit offset
 | S-19 | **Падение scheduler** во время истечения резервов | L2 | Каждый резерв — своя транзакция; кандидаты выбираются заново | Каждый резерв освобождён ровно один раз |
 | S-20 | **Повышенная нагрузка на доход 4200**: много одновременных capture разных магазинов | L6 | Увеличение — в один бакет по `hash(journal_id)` | Нет сериализации на одной строке; `SUM` бакетов = пересчёт по проводкам |
 | S-21 | **Выплата одновременно с пополнениями** (1100 уменьшается и растёт) | L5, L6 | Пополнение держит один бакет 1100; выплата берёт все бакеты по возрастанию `bucket_no` и ждёт; цикла нет, потому что пополнение после бакета ничего не ждёт | Нет deadlock; каждый бакет ≥ 0; сумма 1100 = пересчёт |
-| S-22 | **Смена тарифа во время capture** | — | Тариф неизменяем; выбирается по `now()` в транзакции capture; `fee_tariff_id` фиксирует версию | Комиссия по одной конкретной версии |
+| S-22 | **Смена тарифа во время capture** | — | Тариф неизменяем; выбирается по `now()` в транзакции capture; `fee_tariff_id` фиксирует версию; при `fee ≥ amount` capture отклоняется до вызова `post_journal` | Комиссия по одной конкретной версии **или** `422 FEE_EXCEEDS_PAYMENT`: резерв `ACTIVE`, платёж `AUTHORIZED`, журнала нет ([D-27](../architecture/decisions.md#d-27)) |
 | S-23 | **Решение на устаревшем остатке** (реплика) | — | Проверки только на primary под L5 | Невозможно по построению |
-| S-24 | **Закрытие счёта при активном резерве или остатке** | L3, L5 | Закрытие: `UPDATE accounts` (L3) + чтение проекции под L5 | `409 ACCOUNT_NOT_EMPTY` ([D-28](../architecture/decisions.md#d-28)) |
+| S-24 | **Закрытие счёта при активном резерве или остатке** | L3, L5, L8 | Закрытие: `FOR NO KEY UPDATE` счёта (L3) + чтение проекции под L5, затем `UPDATE accounts` (L8) | `409 ACCOUNT_NOT_EMPTY` ([D-28](../architecture/decisions.md#d-28)); закрытие не конфликтует с `FOR KEY SHARE` вставок с FK |
+| S-25 | **Блокировка покупателя одновременно с void или истечением резерва** | L2, L3, L5, L7 | Void и истечение берут L3 `FOR SHARE` только счёта покупателя; `HOLD_RELEASE` для `BLOCKED` разрешён матрицей | Резерв освобождён ровно один раз при любом порядке коммитов; `reserved` уменьшается, `available` растёт |
+| S-26 | **Блокировка покупателя одновременно с возвратом** | L2, L3, L5, L6 | Возврат берёт L3 обоих счетов; матрица: кредит `BLOCKED`-покупателя разрешён, дебет магазина — только `ACTIVE` | `SUCCEEDED` при любом порядке; при `BLOCKED`-магазине — `FAILED (ACCOUNT_NOT_ACTIVE)`, журнала нет |
+| S-27 | **Блокировка магазина одновременно с capture** | L2, L3 | Capture требует `ACTIVE` у обоих счетов под L3 | Capture закоммичен до блокировки **или** `422 ACCOUNT_NOT_ACTIVE`; платёж остаётся `AUTHORIZED`, резерв можно освободить void или истечением |
+| S-28 | **Прямой вызов `post_journal` в обход use case** для `BLOCKED`/`CLOSED`-счёта | — | Проверка статуса в функции под `FOR SHARE NOWAIT` | `PC403` для запрещённой комбинации; `PC460`, если вызывающий не взял L3 и строку держит смена статуса |
 
 После MVP: «отмена перевода `ON_HOLD` одновременно с одобрением» (L2 — перевод), падение между вызовами внешнего провайдера ([money-flows.md §12](../architecture/money-flows.md#12-после-mvp-внешний-провайдер-review-асинхронные-выплаты)).
 
