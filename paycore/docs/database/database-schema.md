@@ -1,272 +1,324 @@
 # Схема базы данных PostgreSQL
 
-Статус: **проект, не миграции**. SQL-фрагменты в документах `docs/database/` иллюстративны и служат для однозначного описания решений. Настоящие миграции пишутся на этапе реализации.
+Статус: **принято для MVP** (этап 2). Это не миграции: SQL-фрагменты иллюстративны. Миграции пишутся на этапе реализации.
 
-Связанные документы: [er-diagram.md](er-diagram.md), [data-integrity.md](data-integrity.md), [concurrency.md](concurrency.md), [../architecture/ledger-model.md](../architecture/ledger-model.md).
+Связанные документы: [er-diagram.md](er-diagram.md), [data-integrity.md](data-integrity.md) (CHECK, FK, индексы, права), [concurrency.md](concurrency.md), [../architecture/ledger-model.md](../architecture/ledger-model.md), [../architecture/decisions.md](../architecture/decisions.md).
 
 ## 1. Общие соглашения
 
-| Тема | Решение | Ссылка |
-|---|---|---|
-| Версия PostgreSQL | 16+ (допущение) | [Q-22](../architecture/open-questions.md#q-22) |
-| Драйвер | `pgx/v5`, явный SQL, без ORM (ТЗ §4) | |
-| Миграции | golang-migrate или Goose (ТЗ §7). Только forward, без `down` для финансовых таблиц в production | [Q-23](../architecture/open-questions.md#q-23) |
-| Схемы | Отдельная схема PostgreSQL на модуль | [D-18](../architecture/open-questions.md#d-18) |
-| Первичные ключи | `UUID`, значения — UUIDv7, генерируются в приложении | [D-14](../architecture/open-questions.md#d-14) |
-| Деньги | `BIGINT` в минорных единицах, `CHECK` на диапазон | [ledger-model.md §3](../architecture/ledger-model.md#3-представление-денег) |
-| Валюта | `CHAR(3)`, FK на `accounts.currencies(code)` | |
-| Статусы и перечисления | `TEXT` + `CHECK (status IN (...))` | [D-13](../architecture/open-questions.md#d-13) |
-| Время | `TIMESTAMPTZ`, хранится в UTC; `DEFAULT now()` | [Q-17](../architecture/open-questions.md#q-17) |
-| Email | `TEXT` + уникальный индекс по `lower(email)` (или `citext`) | |
-| Удаление | Финансовые и аудиторские данные не удаляются; `ON DELETE RESTRICT` (по умолчанию `NO ACTION`) везде; каскадов нет | [data-integrity.md §2](data-integrity.md#2-внешние-ключи) |
-| `updated_at` | Только у изменяемых таблиц. У append-only таблиц его нет | |
-| Оптимистичная версия | `version BIGINT` у `account_balances`, `payments` | |
+| Тема | Решение |
+|---|---|
+| PostgreSQL | 16+ ([D-34](../architecture/decisions.md#d-34)) |
+| Доступ | `pgx/v5`, явный SQL, без ORM (ТЗ §4). Запись в ledger — только через функции `ledger.*` ([D-03](../architecture/decisions.md#d-03)) |
+| Миграции | golang-migrate или Goose (ТЗ §7, выбор — [Q-23](../architecture/open-questions.md#q-23)); для финансовых таблиц только forward |
+| Схемы | По модулям ([D-18](../architecture/decisions.md#d-18)): `auth`, `merchants`, `accounts`, `ledger`, `payments`, `transfers`, `commissions`, `limits`, `simulator`, `notifications`, `audit`, `platform`. После MVP: `fraud`, `reconciliation` |
+| PK | `UUID`, значения UUIDv7 из Go ([D-14](../architecture/decisions.md#d-14)) |
+| Деньги | `BIGINT` в минорных единицах, `CHECK` на диапазон |
+| Валюта | `CHAR(3)`, FK на `accounts.currencies`. MVP: RUB, USD |
+| Перечисления | `TEXT + CHECK` ([D-13](../architecture/decisions.md#d-13)) |
+| Время | `TIMESTAMPTZ`, UTC ([D-29](../architecture/decisions.md#d-29)) |
+| Удаление | Финансовые и аудиторские данные не удаляются; FK без каскадов |
+| `updated_at` | Только у изменяемых таблиц |
 
-Типы в таблицах ниже: `NN` — `NOT NULL`, иначе допускается NULL.
+`NN` — `NOT NULL`. Подробные CHECK — [data-integrity.md §1](data-integrity.md#1-check-ограничения-финансовые-таблицы).
 
 ## 2. Схема `accounts`
 
 ### `currencies`
 
-| Колонка | Тип | Ограничения |
-|---|---|---|
-| code | CHAR(3) | PK, `CHECK (code ~ '^[A-Z]{3}$')` |
-| minor_units | SMALLINT NN | `CHECK (minor_units BETWEEN 0 AND 4)` |
-| name | TEXT NN | |
-| is_active | BOOLEAN NN | DEFAULT true |
+`code CHAR(3) PK` (`^[A-Z]{3}$`), `minor_units SMALLINT NN` (0…4), `name TEXT NN`, `is_active BOOLEAN NN`. Сид: RUB (2), USD (2).
 
 ### `accounts` — бизнес-счёт
 
 | Колонка | Тип | Ограничения |
 |---|---|---|
-| id | UUID | PK |
+| id | UUID | PK; `UNIQUE (id, currency)` для составных FK |
 | account_number | TEXT NN | UNIQUE; формат — [Q-13](../architecture/open-questions.md#q-13) |
 | user_id | UUID | FK → `auth.users` |
 | merchant_id | UUID | FK → `merchants.merchants` |
-| account_purpose | TEXT NN | `IN ('MAIN','SAVINGS','MERCHANT_SETTLEMENT')` |
+| account_purpose | TEXT NN | `MAIN`, `SAVINGS`, `MERCHANT_SETTLEMENT` |
 | currency | CHAR(3) NN | FK → currencies |
-| status | TEXT NN | `IN ('ACTIVE','BLOCKED','CLOSED')`, DEFAULT 'ACTIVE' |
+| status | TEXT NN | `ACTIVE`, `BLOCKED`, `CLOSED` ([D-26](../architecture/decisions.md#d-26), [D-28](../architecture/decisions.md#d-28)) |
 | name | TEXT | |
-| created_at, updated_at | TIMESTAMPTZ NN | |
-| closed_at | TIMESTAMPTZ | `CHECK ((status = 'CLOSED') = (closed_at IS NOT NULL))` |
+| version | BIGINT NN | инкремент при смене статуса |
+| created_at, updated_at, closed_at | TIMESTAMPTZ | `closed_at` ⇔ `CLOSED` |
 
-- Ровно один владелец: `CHECK (num_nonnulls(user_id, merchant_id) = 1)` ([D-11](../architecture/open-questions.md#d-11)).
-- `CHECK ((merchant_id IS NOT NULL) = (account_purpose = 'MERCHANT_SETTLEMENT'))`.
-- `UNIQUE (id, currency)` — цель для составных FK (согласованность валюты).
-
-### `account_balances` — проекция (ТЗ §4.3)
-
-| Колонка | Тип | Ограничения |
-|---|---|---|
-| account_id | UUID | PK; FK `(account_id, currency)` → `accounts(id, currency)` |
-| currency | CHAR(3) NN | часть составного FK; дублирует валюту счёта, как в ТЗ, но согласованность гарантирована |
-| available_amount | BIGINT NN | DEFAULT 0, `CHECK (available_amount >= 0)` |
-| reserved_amount | BIGINT NN | DEFAULT 0, `CHECK (reserved_amount >= 0)` |
-| version | BIGINT NN | DEFAULT 0 |
-| updated_at | TIMESTAMPTZ NN | |
-
-Строка создаётся в той же транзакции, что и счёт. Изменяется **только** сервисом проведения ([ledger-model.md §11](../architecture/ledger-model.md#11-контракт-сервиса-проведения-концептуально)).
+`CHECK (num_nonnulls(user_id, merchant_id) = 1)` ([D-11](../architecture/decisions.md#d-11)); `merchant_id IS NOT NULL` ⇔ `MERCHANT_SETTLEMENT`. Магазин имеет один счёт на валюту: `UNIQUE (merchant_id, currency) WHERE merchant_id IS NOT NULL`.
 
 ### `account_status_history` — append-only
 
-`id, account_id FK, from_status, to_status, reason TEXT NN, changed_by UUID NN, changed_at`. Каждая смена `accounts.status` пишет строку в той же транзакции (ТЗ §2.2 «История изменений статуса»).
+`id, account_id FK, from_status, to_status, reason TEXT NN, changed_by UUID NN, changed_at`. Пишется в той же транзакции, что и смена статуса (ТЗ §2.2).
 
-### `account_restrictions` — «ограничение операций» (ТЗ §2.2)
+### `account_restrictions` — после MVP
 
-`id, account_id FK, restriction IN ('DEBIT','CREDIT','ALL'), reason, set_by, valid_from, valid_to, lifted_at, lifted_by`. Действующее ограничение: `lifted_at IS NULL AND now() BETWEEN valid_from AND coalesce(valid_to, 'infinity')`. Нужна ли эта таблица или достаточно `status` — [Q-14](../architecture/open-questions.md#q-14).
+Частичные ограничения (DEBIT/CREDIT). В MVP «ограничение операций» реализуется статусом `BLOCKED` ([D-26](../architecture/decisions.md#d-26)).
 
 ## 3. Схема `ledger`
+
+Писать в таблицы этой схемы может только роль `paycore_ledger` через функции ([data-integrity.md §4](data-integrity.md#4-неизменяемость-ledger)).
+
+### `chart_of_accounts` — справочник
+
+`code TEXT PK` (`1100`, `2100`, …), `name`, `account_class`, `normal_balance`, `allow_negative`, `is_contra`, `in_mvp`. Содержимое — [chart-of-accounts.md](../architecture/chart-of-accounts.md).
 
 ### `ledger_accounts`
 
 | Колонка | Тип | Ограничения |
 |---|---|---|
-| id | UUID | PK |
-| owner_type | TEXT NN | `IN ('CUSTOMER','MERCHANT','SYSTEM')` |
-| account_id | UUID | FK `(account_id, currency)` → `accounts(id, currency)` |
-| account_type | TEXT NN | код CoA, `IN ('1100','1200',…,'5900')` или FK на справочник `chart_of_accounts` |
-| kind | TEXT | `IN ('AVAILABLE','HOLD')` |
-| system_code | TEXT | |
-| currency | CHAR(3) NN | FK → currencies |
-| account_class | TEXT NN | `IN ('ASSET','LIABILITY','EQUITY','REVENUE','EXPENSE')` |
-| normal_balance | TEXT NN | `IN ('DEBIT','CREDIT')` |
-| allow_negative | BOOLEAN NN | |
-| has_projection | BOOLEAN NN | |
-| status | TEXT NN | `IN ('ACTIVE','CLOSED')` |
+| id | UUID | PK; `UNIQUE (id, currency)` |
+| owner_type | TEXT NN | `CUSTOMER`, `MERCHANT`, `SYSTEM` |
+| account_id | UUID | FK `(account_id, currency)` → `accounts.accounts(id, currency)`; NULL для SYSTEM |
+| account_type | TEXT NN | FK → `chart_of_accounts(code)` |
+| kind | TEXT | `AVAILABLE`, `HOLD`; NULL для SYSTEM |
+| system_code | TEXT | `SIM_FUNDING_SOURCE`, `FEE_INCOME_TRANSFERS`, `FEE_INCOME_PAYMENTS`, `OPERATIONAL_LOSSES`; NULL для пользовательских |
+| currency | CHAR(3) NN | |
+| account_class, normal_balance | TEXT NN | согласованы CHECK |
+| allow_negative | BOOLEAN NN | `false` для всех счетов MVP |
+| bucket_count | SMALLINT NN | 1 для пользовательских; 16 для 1100, 4100, 4200; 1 для 5900 |
+| status | TEXT NN | `ACTIVE`, `CLOSED` |
 | created_at | TIMESTAMPTZ NN | |
 
-CHECK:
+### `account_balances` — проекция бизнес-счёта
 
-- `(owner_type = 'SYSTEM') = (account_id IS NULL)`;
-- `(owner_type = 'SYSTEM') = (system_code IS NOT NULL)`;
-- `(owner_type = 'SYSTEM') = (kind IS NULL)`;
-- `has_projection = (owner_type <> 'SYSTEM')`;
-- согласованность класса и сальдо: `(account_class IN ('ASSET','EXPENSE')) = (normal_balance = 'DEBIT')`. Исключение — контр-счёт 4900, его можно оформить флагом `is_contra`.
+| Колонка | Тип | Ограничения |
+|---|---|---|
+| account_id | UUID | PK; FK `(account_id, currency)` → `accounts.accounts` |
+| currency | CHAR(3) NN | |
+| available_amount | BIGINT NN | DEFAULT 0, `>= 0` |
+| reserved_amount | BIGINT NN | DEFAULT 0, `>= 0` |
+| version | BIGINT NN | DEFAULT 0 |
+| updated_at | TIMESTAMPTZ NN | |
 
-UNIQUE: `(account_id, kind)` WHERE `account_id IS NOT NULL`; `(system_code, currency)` WHERE `owner_type = 'SYSTEM'`; `(id, currency)` для составного FK из `ledger_entries`.
+Таблица остаётся в схеме `ledger`, хотя в ТЗ §4.3 она описана рядом со счетами: изменяет её только ledger.
 
-Справочник `chart_of_accounts(code PK, name, account_class, normal_balance, allow_negative)` — опционально. Он делает CoA данными, а не CHECK-перечнем. Рекомендация: справочник, а `ledger_accounts.account_type` — FK на него.
+### `system_balance_buckets` — проекция системных счетов ([D-02](../architecture/decisions.md#d-02))
+
+| Колонка | Тип | Ограничения |
+|---|---|---|
+| ledger_account_id | UUID | PK (часть), FK → ledger_accounts (только `owner_type = 'SYSTEM'`) |
+| bucket_no | SMALLINT | PK (часть), `0 <= bucket_no < bucket_count` |
+| balance | BIGINT NN | DEFAULT 0; `CHECK (allow_negative OR balance >= 0)` |
+| allow_negative | BOOLEAN NN | копия из ledger_accounts |
+| updated_at | TIMESTAMPTZ NN | |
+
+Бакеты создаются вместе с системным счётом. Баланс = `SUM(balance)`.
 
 ### `journal_transactions` — append-only
 
 | Колонка | Тип | Ограничения |
 |---|---|---|
 | id | UUID | PK |
-| operation | TEXT NN | `IN ('TOPUP','TRANSFER','HOLD_PLACE','HOLD_CAPTURE','HOLD_RELEASE','REFUND','PAYOUT_INIT','PAYOUT_SETTLE','PAYOUT_FAIL','REVERSAL','ADJUSTMENT', …)` |
-| reference_type | TEXT NN | `IN ('TOPUP','TRANSFER','PAYMENT','REFUND','HOLD','PAYOUT','ADJUSTMENT')` |
+| operation | TEXT NN | `SIM_TOPUP`, `TRANSFER`, `HOLD_PLACE`, `HOLD_CAPTURE`, `HOLD_RELEASE`, `REFUND`, `PAYOUT`, `REVERSAL`, `ADJUSTMENT` |
+| reference_type | TEXT NN | `SIM_TOPUP`, `TRANSFER`, `HOLD`, `REFUND`, `PAYOUT`, `ADJUSTMENT` |
 | reference_id | UUID NN | |
-| operation_seq | SMALLINT NN | DEFAULT 1, `CHECK (operation_seq >= 1)` |
-| reverses_journal_id | UUID | FK → journal_transactions(id), UNIQUE |
-| status | TEXT NN | `CHECK (status = 'POSTED')` ([D-06](../architecture/open-questions.md#d-06)) |
+| operation_seq | SMALLINT NN | DEFAULT 1 |
+| reverses_journal_id | UUID | FK → journal_transactions, UNIQUE |
+| status | TEXT NN | `= 'POSTED'` ([D-06](../architecture/decisions.md#d-06)) |
 | description | TEXT | |
 | initiated_by | UUID | |
-| accounting_date | DATE NN | |
-| posted_at | TIMESTAMPTZ NN | DEFAULT now() |
+| accounting_date | DATE NN | UTC |
+| posted_at | TIMESTAMPTZ NN | |
 
-- **UNIQUE `(reference_type, reference_id, operation, operation_seq)`** — идемпотентность проведения.
-- `CHECK ((operation = 'REVERSAL') = (reverses_journal_id IS NOT NULL))`.
+`UNIQUE (reference_type, reference_id, operation, operation_seq)`.
 
 ### `ledger_entries` — append-only
 
 | Колонка | Тип | Ограничения |
 |---|---|---|
 | id | UUID | PK |
-| journal_transaction_id | UUID NN | FK → journal_transactions |
-| ledger_account_id | UUID NN | FK `(ledger_account_id, currency)` → `ledger_accounts(id, currency)` |
-| entry_type | TEXT NN | `IN ('DEBIT','CREDIT')` |
-| amount | BIGINT NN | `CHECK (amount > 0 AND amount <= 100000000000000)` (MAX, [Q-11](../architecture/open-questions.md#q-11)) |
+| journal_transaction_id | UUID NN | FK |
+| ledger_account_id | UUID NN | FK `(ledger_account_id, currency)` → ledger_accounts |
+| entry_type | TEXT NN | `DEBIT`, `CREDIT` |
+| amount | BIGINT NN | `> 0 AND <= 10^14` |
 | currency | CHAR(3) NN | |
-| account_version | BIGINT | |
-| balance_after | BIGINT | |
+| account_version | BIGINT | только пользовательские счета |
+| balance_after | BIGINT | только пользовательские счета |
 | created_at | TIMESTAMPTZ NN | |
 
-- `UNIQUE (journal_transaction_id, ledger_account_id)` — одна проводка на счёт в журнале.
-- `UNIQUE (ledger_account_id, account_version)` — защита от потерянных обновлений проекции ([D-16](../architecture/open-questions.md#d-16)).
-- `CHECK ((account_version IS NULL) = (balance_after IS NULL))`.
-- Согласованность `has_projection ⇔ account_version IS NOT NULL` проверяется в сервисе проведения и тестах (CHECK не видит другую таблицу).
+`UNIQUE (journal_transaction_id, ledger_account_id)`; `UNIQUE (ledger_account_id, account_version)`.
 
 ### `ledger_balance_snapshots`
 
-PK `(ledger_account_id, snapshot_date)`; `debit_total`, `credit_total`, `balance BIGINT NN`, `computed_at`. Заполняется задачей по закрытому дню. Нужна для быстрых балансов системных счетов и отчётов. Это производные данные, поэтому их разрешено пересчитывать.
+PK `(ledger_account_id, snapshot_date)`; `debit_total`, `credit_total`, `balance`, `computed_at`. Производные данные для отчётов, пересчитываемые. На проверку остатков не влияют.
 
-### `holds`
+### `holds` ([D-37](../architecture/decisions.md#d-37))
 
 | Колонка | Тип | Ограничения |
 |---|---|---|
 | id | UUID | PK |
-| account_id | UUID NN | FK `(account_id, currency)` → accounts |
+| account_id | UUID NN | FK `(account_id, currency)` |
 | currency | CHAR(3) NN | |
-| amount | BIGINT NN | `CHECK (amount > 0)` |
-| status | TEXT NN | `IN ('ACTIVE','CAPTURED','RELEASED','EXPIRED')` |
-| reference_type | TEXT NN | `IN ('PAYMENT','TRANSFER')` |
-| reference_id | UUID NN | `UNIQUE (reference_type, reference_id)` — один резерв на объект (MVP) |
+| amount | BIGINT NN | `> 0` |
+| status | TEXT NN | `ACTIVE`, `CAPTURED`, `RELEASED`, `EXPIRED` |
+| reference_type | TEXT NN | `PAYMENT` (MVP); `TRANSFER` после MVP |
+| reference_id | UUID NN | `UNIQUE (reference_type, reference_id)` |
+| limit_period_start | DATE | период лимита, использованного при резерве ([D-24](../architecture/decisions.md#d-24)) |
 | expires_at | TIMESTAMPTZ NN | |
-| created_at | TIMESTAMPTZ NN | |
-| finalized_at | TIMESTAMPTZ | `CHECK ((status = 'ACTIVE') = (finalized_at IS NULL))` |
-
-Модуль-владелец `holds` — Ledger (резерв — учётное понятие), а не Payments ([Q-24](../architecture/open-questions.md#q-24)).
+| created_at, finalized_at | TIMESTAMPTZ | `finalized_at` ⇔ не ACTIVE |
 
 ### `manual_adjustments`
 
-Структура — в ER. Ключевые CHECK: `approved_by IS NULL OR approved_by <> created_by`; `(status = 'POSTED') = (journal_transaction_id IS NOT NULL)`; `reason` NOT NULL.
+`id, status (DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, POSTED), proposed_entries JSONB NN, reason TEXT NN, incident_ref TEXT NN, created_by NN, approved_by, journal_transaction_id FK, created_at, decided_at`. `approved_by <> created_by` ([D-31](../architecture/decisions.md#d-31)).
 
 ## 4. Схема `payments`
 
 ### `payments`
 
-Поля — в [ER](er-diagram.md#2-платежи-переводы-комиссии). Ограничения:
+| Колонка | Тип | Примечание |
+|---|---|---|
+| id | UUID | PK; `UNIQUE (id, currency)` |
+| merchant_id | UUID NN | FK |
+| store_id | UUID | FK → `merchants.stores` |
+| merchant_account_id | UUID NN | FK `(…, currency)` |
+| customer_user_id | UUID | заполняется при подтверждении checkout |
+| customer_account_id | UUID | FK `(…, currency)`; заполняется при подтверждении |
+| amount | BIGINT NN | `> 0` |
+| currency | CHAR(3) NN | |
+| fee_amount | BIGINT NN | DEFAULT 0; рассчитывается при capture |
+| fee_tariff_id | UUID | FK; при capture |
+| captured_amount, refunded_amount | BIGINT NN | DEFAULT 0 |
+| status | TEXT NN | `CREATED`, `AUTHORIZED`, `CAPTURED`, `PARTIALLY_REFUNDED`, `REFUNDED`, `FAILED`, `CANCELLED` ([D-21](../architecture/decisions.md#d-21)) |
+| failure_code, cancel_reason | TEXT | `cancel_reason`: `MERCHANT_CANCELLED`, `CHECKOUT_EXPIRED`, `VOIDED`, `AUTH_EXPIRED` |
+| hold_id | UUID | |
+| idempotency_key | TEXT NN | `UNIQUE (merchant_id, idempotency_key)` |
+| description | TEXT | |
+| version | BIGINT NN | |
+| authorized_at, captured_at, created_at, updated_at | TIMESTAMPTZ | |
 
-- `amount > 0`; `fee_amount >= 0`; `fee_amount <= amount` ([Q-09](../architecture/open-questions.md#q-09));
-- `captured_amount BETWEEN 0 AND amount`; `refunded_amount BETWEEN 0 AND captured_amount`; `refunded_fee_amount BETWEEN 0 AND fee_amount`;
-- статус и суммы согласованы:
-  - `status IN ('CAPTURED','PARTIALLY_REFUNDED','REFUNDED') = (captured_amount > 0)`;
-  - `(status = 'REFUNDED') = (captured_amount > 0 AND refunded_amount = captured_amount)`;
-  - `(status = 'PARTIALLY_REFUNDED') = (refunded_amount > 0 AND refunded_amount < captured_amount)`;
-- `customer_account_id IS NOT NULL OR status IN ('CREATED','CANCELLED')`;
-- `UNIQUE (merchant_id, idempotency_key)` (бизнес-уровень идемпотентности, ТЗ §4.5);
-- FK `(merchant_account_id, currency)` → `accounts(id, currency)`; FK `(customer_account_id, currency)` → `accounts(id, currency)` — валюта платежа = валюта обоих счетов;
-- `version BIGINT NN` — инкремент при каждом изменении.
+### `checkout_sessions` ([D-22](../architecture/decisions.md#d-22))
+
+| Колонка | Тип | Примечание |
+|---|---|---|
+| id | UUID | PK |
+| payment_id | UUID NN | FK, UNIQUE |
+| token_hash | BYTEA NN | UNIQUE; хранится только хеш токена |
+| status | TEXT NN | `ACTIVE`, `CONFIRMED`, `FAILED`, `CANCELLED`, `EXPIRED` |
+| customer_user_id | UUID | кто подтвердил |
+| expires_at | TIMESTAMPTZ NN | `created_at + 30 мин` ([D-32](../architecture/decisions.md#d-32)) |
+| created_at, confirmed_at | TIMESTAMPTZ | |
 
 ### `payment_attempts`
 
-`UNIQUE (payment_id, attempt_number)`; `UNIQUE (provider_reference) WHERE provider_reference IS NOT NULL`; `status IN ('STARTED','SUCCEEDED','FAILED','UNKNOWN')`; `finished_at` заполнен ⇔ статус не `STARTED`.
+`id, payment_id FK, attempt_number (UNIQUE с payment_id), operation (CONFIRM, CAPTURE, VOID, REFUND), status (SUCCEEDED, FAILED), error_code, actor_id, started_at, finished_at`. В MVP это история попыток обработки (ТЗ §2.4). `provider_reference` и статусы `STARTED`/`UNKNOWN` добавляются вместе с внешним провайдером.
 
 ### `payment_status_history` — append-only
 
-Пишется в той же транзакции, что и смена статуса.
-
 ### `refunds`
 
-- `amount > 0`, `fee_refund_amount >= 0`;
-- `UNIQUE (payment_id, idempotency_key)`;
-- FK `payment_id` → payments; `currency` = валюта платежа (составной FK `(payment_id, currency)` → `payments(id, currency)` + `UNIQUE (id, currency)` в payments);
-- `status IN ('PENDING','SUCCEEDED','FAILED')`; `(status = 'FAILED') = (failure_code IS NOT NULL)`.
+`id, payment_id FK (составной с currency), amount > 0, currency, status (SUCCEEDED, FAILED), failure_code (REFUND_EXCEEDS_CAPTURED, MERCHANT_INSUFFICIENT_FUNDS, INVALID_STATE, ACCOUNT_NOT_ACTIVE), reason, idempotency_key (UNIQUE с payment_id), initiated_by, created_at`. Поле `fee_refund_amount` этапа 1 убрано из MVP, потому что комиссия не возвращается ([D-09](../architecture/decisions.md#d-09)). Оно вернётся вместе со счётом 4900, если политика изменится.
 
 ## 5. Схема `transfers`
 
 ### `transfers`
 
-- `amount > 0`, `fee_amount >= 0`, `sender_account_id <> receiver_account_id`;
-- FK `(sender_account_id, currency)` и `(receiver_account_id, currency)` → `accounts(id, currency)`. Это делает перевод между валютами невозможным на уровне БД (ТЗ §4.4 п.5);
-- `UNIQUE (initiated_by, idempotency_key)`;
-- `status IN ('ON_HOLD','COMPLETED','FAILED','CANCELLED')`; `CHECK (status <> 'ON_HOLD' OR hold_id IS NOT NULL)`; `(status = 'FAILED') = (failure_code IS NOT NULL)`.
+`id, initiated_by FK, sender_account_id, receiver_account_id (оба FK (…, currency)), amount > 0, currency, fee_amount >= 0, fee_tariff_id, status (COMPLETED, FAILED), failure_code, idempotency_key (UNIQUE с initiated_by), description, created_at, completed_at`. `hold_id` и статусы `ON_HOLD`/`CANCELLED` — после MVP ([D-05](../architecture/decisions.md#d-05)).
 
-### `transfer_status_history` — append-only.
+### `transfer_status_history` — append-only. В MVP по одной строке на перевод (создание в финальном статусе).
 
-## 6. Схема `commissions`
+## 6. Схема `merchants` (выплаты)
+
+### `payouts` ([D-25](../architecture/decisions.md#d-25))
+
+`id, merchant_id FK, account_id FK (…, currency), amount > 0, currency, status (COMPLETED, FAILED), failure_code, idempotency_key (UNIQUE с merchant_id), requested_by, created_at`.
+
+## 7. Схема `simulator`
+
+### `test_topups` ([D-15](../architecture/decisions.md#d-15))
+
+`id, user_id FK, account_id FK (…, currency), amount > 0, currency, status (COMPLETED, FAILED), failure_code, idempotency_key (UNIQUE с user_id), initiated_by (клиент или ADMIN), created_at`. Только счета клиентов (`MAIN`/`SAVINGS`).
+
+## 8. Схема `limits` ([D-24](../architecture/decisions.md#d-24))
+
+### `limit_rules`
+
+`id, limit_type (MAX_SINGLE_OPERATION, DAILY_OUTGOING, DAILY_SIM_TOPUP), currency, scope (GLOBAL — в MVP), amount BIGINT > 0, valid_from, valid_to, created_by, approved_by`. Непересечение периодов — EXCLUDE, как у тарифов. Изменение пишется в аудит.
+
+### `limit_counters`
+
+| Колонка | Тип | Примечание |
+|---|---|---|
+| user_id | UUID | PK (часть) |
+| currency | CHAR(3) | PK (часть) |
+| limit_type | TEXT | PK (часть): `DAILY_OUTGOING`, `DAILY_SIM_TOPUP` |
+| period_start | DATE | PK (часть), сутки UTC |
+| used_amount | BIGINT NN | `>= 0` |
+| updated_at | TIMESTAMPTZ NN | |
+
+Строка создаётся `INSERT … ON CONFLICT DO NOTHING` в первой операции периода. Старые периоды удаляются по сроку хранения.
+
+## 9. Схема `commissions`
 
 ### `commission_tariffs`
 
-- `UNIQUE (tariff_code, version)`;
-- `rate_bp BETWEEN 0 AND 10000`; `fixed_amount >= 0`; `min_amount >= 0`; `max_amount IS NULL OR max_amount >= min_amount`;
-- `rounding_mode IN ('HALF_UP','HALF_EVEN','UP','DOWN')`;
-- `valid_to IS NULL OR valid_to > valid_from`;
-- **Непересечение периодов** (требует `btree_gist`):
+`UNIQUE (tariff_code, version)`; `operation_type (TRANSFER_P2P, TRANSFER_OWN, PAYMENT)`; `merchant_id` (NULL — базовый тариф); `currency`; `rate_bp 0…10000`; `fixed_amount`, `min_amount`, `max_amount`; `rounding_mode` (`HALF_UP`); `valid_from`, `valid_to`; `created_by`, `approved_by`.
+
+Непересечение периодов (`btree_gist`):
 
 ```sql
 EXCLUDE USING gist (
   operation_type WITH =, currency WITH =,
   coalesce(merchant_id, '00000000-0000-0000-0000-000000000000'::uuid) WITH =,
-  tstzrange(valid_from, valid_to, '[)') WITH &&
-)
+  tstzrange(valid_from, valid_to, '[)') WITH &&)
 ```
 
-- Тариф неизменяем после того, как начал действовать. Изменение — это новая версия с новым `valid_from` и закрытие `valid_to` старой (ТЗ §2.7). Изменение пишется в `audit_logs` (ТЗ §2.12 «Изменение тарифов»).
+Начавший действовать тариф неизменяем. Изменение — новая версия и аудит (ТЗ §2.7, §2.12).
 
-## 7. Схема `platform`
+## 10. Схема `platform`
 
-### `idempotency_keys`
+### `idempotency_keys` ([concurrency.md §4](concurrency.md#4-идемпотентность-http))
 
-- `UNIQUE (scope, endpoint, key)`; `request_hash BYTEA NN`;
-- `status IN ('IN_PROGRESS','COMPLETED')`; `(status = 'COMPLETED') = (response_code IS NOT NULL)`;
-- `expires_at` — TTL ([Q-10](../architecture/open-questions.md#q-10)), очистка — фоновая задача.
-- Протокол — [concurrency.md §4](concurrency.md#4-идемпотентность).
+| Колонка | Тип | Примечание |
+|---|---|---|
+| id | UUID | PK |
+| scope | TEXT NN | `user:<id>` / `merchant:<id>` |
+| endpoint | TEXT NN | метод + шаблон маршрута |
+| key | TEXT NN | 1…255 символов; `UNIQUE (scope, endpoint, key)` |
+| request_hash | BYTEA NN | SHA-256 |
+| status | TEXT NN | `IN_PROGRESS`, `COMPLETED` |
+| response_code | SMALLINT | при `COMPLETED` |
+| response_body | JSONB | при `COMPLETED`, ограничение размера |
+| resource_type, resource_id | TEXT, UUID | созданный объект |
+| created_at, completed_at, expires_at | TIMESTAMPTZ | `expires_at = created_at + 24 ч` |
 
-### `outbox_events`
+### `outbox_events` ([concurrency.md §7](concurrency.md#7-transactional-outbox-и-inbox))
 
-- Частичный индекс `ON (created_at) WHERE published_at IS NULL` для relay.
-- `aggregate_id` — ключ партиции Kafka: порядок событий одного агрегата сохраняется.
-- Опубликованные события удаляются или архивируются через N дней. Это единственная «удаляемая» таблица среди транзакционных.
+| Колонка | Тип | Примечание |
+|---|---|---|
+| id | UUID | PK = `event_id` для потребителей |
+| seq | BIGINT | `GENERATED ALWAYS AS IDENTITY`, UNIQUE; порядок |
+| aggregate_type, aggregate_id | TEXT, UUID NN | ключ порядка (и партиции Kafka) |
+| aggregate_version | BIGINT NN | версия агрегата после изменения |
+| event_type | TEXT NN | `payment.captured`, … |
+| event_version | SMALLINT NN | версия схемы payload |
+| payload, headers | JSONB | |
+| status | TEXT NN | `PENDING`, `PUBLISHED`, `DEAD` |
+| attempts | INT NN | DEFAULT 0 |
+| next_attempt_at | TIMESTAMPTZ NN | DEFAULT now() |
+| processing_until | TIMESTAMPTZ | lease |
+| lease_owner | TEXT | id экземпляра relay |
+| last_error | TEXT | |
+| created_at, published_at | TIMESTAMPTZ | |
 
 ### `inbox_messages`
 
-PK `(consumer, message_id)`. Вставка выполняется в той же транзакции, что и обработка сообщения.
+PK `(consumer, message_id)`; `received_at`, `processed_at`.
 
-## 8. Схема `audit`
+### `webhook_deliveries` (схема `merchants`)
+
+`id, endpoint_id FK, event_id, attempt, status (PENDING, DELIVERED, DEAD), next_attempt_at, processing_until, lease_owner, response_code, last_error, delivered_at`.
+
+## 11. Схема `audit`
 
 ### `audit_logs`
 
-- Append-only (как ledger, [data-integrity.md §4](data-integrity.md#4-триггеры-и-защита-неизменяемости)); отдельная роль БД для записи.
-- `seq BIGINT GENERATED ALWAYS AS IDENTITY` — порядок.
-- Опционально хеш-цепочка `hash = sha256(prev_hash || canonical(row))` ([Q-20](../architecture/open-questions.md#q-20)).
-- Отделён от технических логов (ТЗ §2.12): отдельная таблица, отдельная схема и, при необходимости, отдельная БД.
+Append-only: права `SELECT, INSERT` и триггер запрета мутаций. `seq BIGINT GENERATED ALWAYS AS IDENTITY`; актор, действие, ресурс, `before_state`, `after_state`, `ip`, `request_id`, `occurred_at`. Хеш-цепочка — [Q-20](../architecture/open-questions.md#q-20). Отделён от технических логов (ТЗ §2.12).
 
-## 9. Прочие схемы
+## 12. Прочие схемы
 
-`auth`, `merchants`, `fraud`, `notifications`, `reconciliation` описаны на уровне ER ([er-diagram.md](er-diagram.md)). Детальная проработка этих схем — следующий этап, вне фокуса финансового ядра. Обязательные ограничения:
+`auth`, `merchants` (кроме выплат), `notifications` описаны на уровне ER ([er-diagram.md](er-diagram.md)). Обязательные ограничения:
 
-- `auth.users`: `UNIQUE (lower(email))`, `status IN (...)`, `password_hash` — только Argon2id-строка (`CHECK (password_hash LIKE '$argon2id$%')`).
-- `auth.refresh_tokens`: хранится только хеш токена; `UNIQUE (token_hash)`; ротация через `replaced_by`. Повторное использование уже заменённого токена отзывает всю сессию (reuse detection).
-- `merchants.api_keys`: хранится только хеш и префикс ключа.
-- `fraud.fraud_cases`: `UNIQUE (check_id)`.
-- `reconciliation.provider_statement_lines`: `UNIQUE (run_id, provider_reference, operation)`.
+- `auth.users`: `UNIQUE (lower(email))`; `password_hash LIKE '$argon2id$%'`.
+- `auth.refresh_tokens`: хранится только хеш; ротация через `replaced_by`; повторное использование заменённого токена отзывает сессию.
+- `merchants.api_keys`: хранятся хеш и префикс ключа.
+
+Схемы `fraud` и `reconciliation` — после MVP. Их ER из этапа 1 сохранён в [er-diagram.md §5](er-diagram.md#5-после-mvp-fraud-и-сверка).
