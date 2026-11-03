@@ -385,3 +385,17 @@
 - Домен не знает про HTTP: ошибка несёт вид (`invalid`, `not_found`, `conflict`, `unprocessable` …), статус выбирает транспортный слой. Реализация — пакет `internal/platform/apperror`.
 - Поле `details` (ошибки валидации по полям) добавляется, когда появятся первые эндпоинты с телом запроса; добавление поля обратно совместимо.
 - **Альтернатива:** RFC 9457 `application/problem+json` (`type`, `title`, `status`, `detail`). Отклонена: обязательный `type`-URI без каталога документации не несёт смысла, а код всё равно пришлось бы передавать расширением. Переход возможен позже без изменения доменного слоя.
+
+### D-40
+**Владение `SECURITY DEFINER`-функциями ledger.**
+- Goose идёт от `paycore_owner` ([D-33](#d-33), [D-38](#d-38)). Функции `ledger.open_ledger_accounts`, `ledger.lock_account_balances`, `ledger.post_journal` создаются этой ролью.
+- Сразу после `CREATE`: `REVOKE EXECUTE FROM PUBLIC`; `GRANT EXECUTE` только `paycore_app` (не `paycore_readonly`).
+- Затем `ALTER FUNCTION … OWNER TO paycore_ledger`. После передачи: владелец функции — `paycore_ledger`; схемы и таблицы по-прежнему принадлежат `paycore_owner`; `paycore_ledger` остаётся `NOLOGIN`.
+- Чтобы `ALTER FUNCTION OWNER TO paycore_ledger` проходил в PostgreSQL 16 без смены четырёх ролей [D-33](#d-33), нужны оба условия каталога:
+  1. Bootstrap (суперпользователь): `GRANT paycore_ledger TO paycore_owner WITH INHERIT FALSE`. Членство нужно для смены владельца; `INHERIT FALSE` — чтобы `paycore_owner` не получал табличные права `paycore_ledger` автоматически.
+  2. Миграция функций: `GRANT CREATE ON SCHEMA ledger TO paycore_ledger`. Новый владелец функции обязан иметь `CREATE` на схеме. Прямой вход закрыт `NOLOGIN`; тела функций не выполняют DDL.
+- `search_path` функций: `pg_catalog, ledger, pg_temp`. Объекты вне `ledger` (включая `accounts.accounts`, `accounts.currencies`) — только с именем схемы.
+- У `paycore_app` нет прямого финансового DML: запись в журналы, проводки, проекции, бакеты и `holds` только через `EXECUTE` шлюза ([D-03](#d-03)).
+- Уже применённые миграции `00002`/`00003` не меняются: решение живёт в bootstrap и в миграции функций.
+- Идемпотентность журнала сериализуется `pg_advisory_xact_lock` по бизнес-ключу внутри `post_journal`, затем `UNIQUE (reference_type, reference_id, operation, operation_seq)`. `xmin` как защита не используется.
+- *Альтернативы:* создавать функции суперпользовательским bootstrap (два канала DDL); `SET ROLE paycore_ledger` внутри Goose (миграция пишет «как ledger»). Отклонены: один канал Goose от owner, модель D-33 без пятой роли.

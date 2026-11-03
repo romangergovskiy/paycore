@@ -95,6 +95,8 @@ ALTER TABLE transfers.transfers ADD CONSTRAINT fk_transfers_sender_currency
 
 Требования к функциям: `SET search_path = pg_catalog, ledger, pg_temp` (защита от подмены объектов: `pg_temp` явно последним, чтобы временная схема сессии не перекрывала `pg_catalog` и `ledger`); объекты вне схемы `ledger` (в том числе `accounts.accounts`, `accounts.currencies`) указываются только с именем схемы; `REVOKE EXECUTE … FROM PUBLIC`; `GRANT EXECUTE … TO paycore_app`. Goose создаёт функции от `paycore_owner`, затем `ALTER FUNCTION … OWNER TO paycore_ledger` — [ledger-schema-review.md §6.4](../architecture/ledger-schema-review.md#64-создание-и-владение-ledger-функциями). Тело функций проходит ревью как критичный код и покрывается интеграционными тестами из Go.
 
+Порядок создания и владения — [D-40](../architecture/decisions.md#d-40): Goose от `paycore_owner`, `REVOKE EXECUTE FROM PUBLIC`, `GRANT EXECUTE TO paycore_app`, `ALTER FUNCTION … OWNER TO paycore_ledger`. Bootstrap выдаёт `GRANT paycore_ledger TO paycore_owner WITH INHERIT FALSE`; миграция функций выдаёт `GRANT CREATE ON SCHEMA ledger TO paycore_ledger`.
+
 Почему этот механизм надёжен:
 
 | Требование этапа 2 | Как обеспечено |
@@ -213,7 +215,7 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 | Роль | LOGIN | Права |
 |---|---|---|
 | `paycore_owner` | да (только для миграций) | Владелец схем и таблиц; DDL |
-| `paycore_ledger` | **нет** | Владелец будущих ledger-функций. `SELECT, INSERT` на `journal_transactions`, `ledger_entries`, `ledger_accounts` (`open_ledger_accounts`); `SELECT, INSERT, UPDATE` на `account_balances`, `system_balance_buckets`, `holds`; `SELECT` на `chart_of_accounts`, `accounts.accounts`, `currencies`, `manual_adjustments`; колоночная привилегия `UPDATE (updated_at)` на `accounts.accounts` — только ради `SELECT … FOR SHARE NOWAIT` (шаг 3 [ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer)). **Нет** `UPDATE/DELETE/TRUNCATE` на журналах и проводках |
+| `paycore_ledger` | **нет** | Владелец ledger-функций ([D-40](../architecture/decisions.md#d-40)). `SELECT, INSERT` на `journal_transactions`, `ledger_entries`, `ledger_accounts` (`open_ledger_accounts`); `SELECT, INSERT, UPDATE` на `account_balances`, `system_balance_buckets`, `holds`; `SELECT` на `chart_of_accounts`, `accounts.accounts`, `currencies`, `manual_adjustments`; колоночная привилегия `UPDATE (updated_at)` на `accounts.accounts` — только ради `SELECT … FOR SHARE NOWAIT` (шаг 3 [ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer)). **Нет** `UPDATE/DELETE/TRUNCATE` на журналах и проводках |
 | `paycore_app` | да | `EXECUTE` на `ledger.*`-функциях; `SELECT` на ledger-таблицах; `SELECT, INSERT, UPDATE` на изменяемых бизнес-таблицах (`payments`, `transfers`, `refunds`, `payouts`, `accounts`, `limit_counters`, …); `SELECT, INSERT` на `*_status_history`, `audit.audit_logs`; `DELETE` только на `platform.outbox_events`, `platform.idempotency_keys`, `platform.inbox_messages` (очистка). `idle_in_transaction_session_timeout = 30s` |
 | `paycore_readonly` | да | `SELECT` для отчётов и Ledger Explorer |
 
@@ -223,7 +225,7 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 
 Так выполняется ТЗ §2.1: даже ADMIN приложения не может изменить баланс в обход ledger. Любое движение денег — журнал через шлюз, любая ручная корректировка — maker-checker и аудит ([D-31](../architecture/decisions.md#d-31)).
 
-На этапе 3.2 роли создаёт `migrate bootstrap` (суперпользователь, `CREATE ROLE`). Goose-миграции выполняет `paycore_owner`. Приложение и интеграционные тесты подключаются только как `paycore_app`. `paycore_ledger` — `NOLOGIN`. Этап 3.3 создаёт таблицы `accounts` и `ledger` с грантами по таблице; функций `post_journal` нет.
+На этапе 3.2 роли создаёт `migrate bootstrap` (суперпользователь, `CREATE ROLE`). С этапа 3.4 bootstrap также делает `GRANT paycore_ledger TO paycore_owner WITH INHERIT FALSE` ([D-40](../architecture/decisions.md#d-40)). Goose-миграции выполняет `paycore_owner`. Приложение и интеграционные тесты подключаются только как `paycore_app`. `paycore_ledger` — `NOLOGIN`. Этап 3.3 создаёт таблицы `accounts` и `ledger` с грантами по таблице. Этап 3.4 создаёт шлюзовые функции в `00004` и передаёт их `paycore_ledger`.
 
 Миграция `00001_platform_schema.sql` выдаёт `paycore_app` права `INSERT, UPDATE` на `platform.schema_info` и ставит `ALTER DEFAULT PRIVILEGES … ON TABLES` в схеме `platform`. Это шире целевой модели: будущие гранты — **по таблице**, без blanket `GRANT` на все таблицы схемы. План — [ledger-schema-review.md §6](../architecture/ledger-schema-review.md#6-план-грантов-будущих-таблиц). Саму миграцию 3.2 этот документ не меняет.
 
