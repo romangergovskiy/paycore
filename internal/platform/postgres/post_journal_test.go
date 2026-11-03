@@ -1063,6 +1063,20 @@ func TestPostJournalGateway(t *testing.T) {
 		})
 		requireCode(t, err, "PC409")
 		requireState(t, readState(t, ctx, app, acc.accountID), afterOther)
+
+		// adjustment_id is not persisted (00003). Replay of this REVERSAL with a
+		// different adjustment_id still matches stored identity → already_posted.
+		revReplayAdj, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "REVERSAL", referenceType: "SIM_TOPUP", referenceID: ref,
+			reversesJournalID: origJID, entries: revEntries, adjustmentID: ids.next(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !revReplayAdj[0].AlreadyPosted || revReplayAdj[0].JournalID != rev[0].JournalID {
+			t.Fatalf("reversal replay with other adjustment_id = %+v", revReplayAdj)
+		}
+		requireState(t, readState(t, ctx, app, acc.accountID), afterOther)
 	})
 
 	t.Run("hold capture release and other-account", func(t *testing.T) {
@@ -1366,6 +1380,216 @@ func TestPostJournalGateway(t *testing.T) {
 			t.Fatalf("peer after mixed ops = %d", peerAvail)
 		}
 	})
+
+	t.Run("idempotency date initiator description", func(t *testing.T) {
+		acc := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-META")
+		ref := ids.next()
+		initiator := ids.next()
+		day := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
+		e1, e2 := ids.next(), ids.next()
+		entries := []pjEntry{
+			{ID: e1, LedgerAccountID: sys1100, EntryType: "DEBIT", Amount: 80, Currency: "RUB"},
+			{ID: e2, LedgerAccountID: acc.avail, EntryType: "CREDIT", Amount: 80, Currency: "RUB"},
+		}
+		first, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ref,
+			entries: entries, description: "orig-desc", initiatedBy: initiator, accountingDate: day,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		orig := readJournal(t, ctx, app, first[0].JournalID)
+		if orig.Description != "orig-desc" || orig.InitiatedBy != initiator {
+			t.Fatalf("stored meta = %+v", orig)
+		}
+		before := readState(t, ctx, app, acc.accountID)
+
+		replayDesc, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ref,
+			entries: entries, description: "other-desc", initiatedBy: initiator, accountingDate: day,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !replayDesc[0].AlreadyPosted || replayDesc[0].JournalID != first[0].JournalID {
+			t.Fatalf("desc replay = %+v", replayDesc)
+		}
+		requireState(t, readState(t, ctx, app, acc.accountID), before)
+		requireJournal(t, readJournal(t, ctx, app, first[0].JournalID), orig)
+
+		replayInit, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ref,
+			entries: entries, description: "orig-desc", initiatedBy: ids.next(), accountingDate: day,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !replayInit[0].AlreadyPosted || replayInit[0].JournalID != first[0].JournalID {
+			t.Fatalf("initiator replay = %+v", replayInit)
+		}
+		requireState(t, readState(t, ctx, app, acc.accountID), before)
+		requireJournal(t, readJournal(t, ctx, app, first[0].JournalID), orig)
+
+		_, err = postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ref,
+			entries: entries, description: "orig-desc", initiatedBy: initiator,
+			accountingDate: day.Add(24 * time.Hour),
+		})
+		requireCode(t, err, "PC409")
+		requireState(t, readState(t, ctx, app, acc.accountID), before)
+		requireJournal(t, readJournal(t, ctx, app, first[0].JournalID), orig)
+	})
+
+	t.Run("HOLD_CAPTURE fee zero two entries", func(t *testing.T) {
+		cust := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-F0")
+		merch := seedMerchant(t, ctx, owner, app, ids, "PC-PJ-F0M")
+		topup(t, ctx, app, ids, cust, 500)
+		holdID := ids.next()
+		placeHold(t, ctx, app, ids, cust, holdID, ids.next(), 200, time.Date(2026, 12, 5, 0, 0, 0, 0, time.UTC))
+		rows, err := postJournal(ctx, app, []string{cust.accountID, merch.accountID}, postArgs{
+			journalID: ids.next(), operation: "HOLD_CAPTURE", referenceType: "HOLD", referenceID: ids.next(),
+			entries: []pjEntry{
+				{ID: ids.next(), LedgerAccountID: cust.hold, EntryType: "DEBIT", Amount: 200, Currency: "RUB"},
+				{ID: ids.next(), LedgerAccountID: merch.avail, EntryType: "CREDIT", Amount: 200, Currency: "RUB"},
+			},
+			hold: holdCapture(holdID, cust.accountID, 200),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 2 || rows[0].AlreadyPosted {
+			t.Fatalf("fee=0 capture = %+v", rows)
+		}
+		var avail, reserved, merchAvail int64
+		if err := app.QueryRow(ctx, `SELECT available_amount, reserved_amount FROM ledger.account_balances WHERE account_id = $1`, cust.accountID).Scan(&avail, &reserved); err != nil {
+			t.Fatal(err)
+		}
+		if err := app.QueryRow(ctx, `SELECT available_amount FROM ledger.account_balances WHERE account_id = $1`, merch.accountID).Scan(&merchAvail); err != nil {
+			t.Fatal(err)
+		}
+		if avail != 300 || reserved != 0 || merchAvail != 200 {
+			t.Fatalf("fee=0 capture avail=%d reserved=%d merch=%d", avail, reserved, merchAvail)
+		}
+		if got := readHold(t, ctx, app, holdID); got.Status != "CAPTURED" {
+			t.Fatalf("hold after fee=0 capture = %+v", got)
+		}
+		var n4200 int64
+		if err := app.QueryRow(ctx, `
+			SELECT count(*) FROM ledger.ledger_entries e
+			 JOIN ledger.journal_transactions j ON j.id = e.journal_transaction_id
+			 WHERE j.id = $1 AND e.ledger_account_id = $2`, rows[0].JournalID, sys4200).Scan(&n4200); err != nil {
+			t.Fatal(err)
+		}
+		if n4200 != 0 {
+			t.Fatalf("fee=0 capture wrote 4200 entries: %d", n4200)
+		}
+	})
+
+	t.Run("manual_adjustment approval", func(t *testing.T) {
+		acc := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-ADJ")
+		ref := ids.next()
+		topupRows, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "SIM_TOPUP", referenceType: "SIM_TOPUP", referenceID: ref,
+			entries: []pjEntry{
+				{ID: ids.next(), LedgerAccountID: sys1100, EntryType: "DEBIT", Amount: 400, Currency: "RUB"},
+				{ID: ids.next(), LedgerAccountID: acc.avail, EntryType: "CREDIT", Amount: 400, Currency: "RUB"},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.Exec(ctx, `UPDATE accounts.accounts SET status = 'BLOCKED', version = version + 1 WHERE id = $1`, acc.accountID); err != nil {
+			t.Fatal(err)
+		}
+		before := readState(t, ctx, app, acc.accountID)
+		revEntries := []pjEntry{
+			{ID: ids.next(), LedgerAccountID: acc.avail, EntryType: "DEBIT", Amount: 400, Currency: "RUB"},
+			{ID: ids.next(), LedgerAccountID: sys1100, EntryType: "CREDIT", Amount: 400, Currency: "RUB"},
+		}
+		_, err = postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "REVERSAL", referenceType: "SIM_TOPUP", referenceID: ref,
+			reversesJournalID: topupRows[0].JournalID, entries: revEntries,
+		})
+		requireCode(t, err, "PC403")
+		requireState(t, readState(t, ctx, app, acc.accountID), before)
+
+		draft := insertAdjustment(t, ctx, app, ids, "DRAFT")
+		_, err = postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "REVERSAL", referenceType: "SIM_TOPUP", referenceID: ref,
+			reversesJournalID: topupRows[0].JournalID, entries: revEntries, adjustmentID: draft,
+		})
+		requireCode(t, err, "PC403")
+		requireState(t, readState(t, ctx, app, acc.accountID), before)
+
+		approved := insertAdjustment(t, ctx, app, ids, "APPROVED")
+		rev, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "REVERSAL", referenceType: "SIM_TOPUP", referenceID: ref,
+			reversesJournalID: topupRows[0].JournalID, entries: revEntries, adjustmentID: approved,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rev[0].AlreadyPosted {
+			t.Fatal("approved reversal already_posted")
+		}
+		var avail int64
+		if err := app.QueryRow(ctx, `SELECT available_amount FROM ledger.account_balances WHERE account_id = $1`, acc.accountID).Scan(&avail); err != nil {
+			t.Fatal(err)
+		}
+		if avail != 0 {
+			t.Fatalf("after approved reversal avail=%d", avail)
+		}
+
+		other := insertAdjustment(t, ctx, app, ids, "APPROVED")
+		afterRev := readState(t, ctx, app, acc.accountID)
+		replay, err := postJournal(ctx, app, []string{acc.accountID}, postArgs{
+			journalID: ids.next(), operation: "REVERSAL", referenceType: "SIM_TOPUP", referenceID: ref,
+			reversesJournalID: topupRows[0].JournalID, entries: revEntries, adjustmentID: other,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !replay[0].AlreadyPosted || replay[0].JournalID != rev[0].JournalID {
+			t.Fatalf("blocked reversal replay other adjustment_id = %+v", replay)
+		}
+		requireState(t, readState(t, ctx, app, acc.accountID), afterRev)
+
+		blocked := seedCustomer(t, ctx, owner, app, ids, "PC-PJ-ADJ2")
+		if _, err := app.Exec(ctx, `UPDATE accounts.accounts SET status = 'BLOCKED', version = version + 1 WHERE id = $1`, blocked.accountID); err != nil {
+			t.Fatal(err)
+		}
+		blkBefore := readState(t, ctx, app, blocked.accountID)
+		_, err = postJournal(ctx, app, []string{blocked.accountID}, postArgs{
+			journalID: ids.next(), operation: "ADJUSTMENT", referenceType: "ADJUSTMENT", referenceID: ids.next(),
+			entries: []pjEntry{
+				{ID: ids.next(), LedgerAccountID: sys5900, EntryType: "DEBIT", Amount: 25, Currency: "RUB"},
+				{ID: ids.next(), LedgerAccountID: blocked.avail, EntryType: "CREDIT", Amount: 25, Currency: "RUB"},
+			},
+		})
+		requireCode(t, err, "PC403")
+		requireState(t, readState(t, ctx, app, blocked.accountID), blkBefore)
+
+		claim := insertAdjustment(t, ctx, app, ids, "APPROVED")
+		adj, err := postJournal(ctx, app, []string{blocked.accountID}, postArgs{
+			journalID: ids.next(), operation: "ADJUSTMENT", referenceType: "ADJUSTMENT", referenceID: claim,
+			entries: []pjEntry{
+				{ID: ids.next(), LedgerAccountID: sys5900, EntryType: "DEBIT", Amount: 25, Currency: "RUB"},
+				{ID: ids.next(), LedgerAccountID: blocked.avail, EntryType: "CREDIT", Amount: 25, Currency: "RUB"},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if adj[0].AlreadyPosted {
+			t.Fatal("approved adjustment already_posted")
+		}
+		if err := app.QueryRow(ctx, `SELECT available_amount FROM ledger.account_balances WHERE account_id = $1`, blocked.accountID).Scan(&avail); err != nil {
+			t.Fatal(err)
+		}
+		if avail != 25 {
+			t.Fatalf("after approved adjustment avail=%d", avail)
+		}
+	})
 }
 
 type seededAccount struct {
@@ -1436,6 +1660,9 @@ type postArgs struct {
 	hold              map[string]any
 	reversesJournalID string
 	adjustmentID      string
+	description       string
+	initiatedBy       string
+	accountingDate    time.Time
 }
 
 func postJournal(ctx context.Context, conn *pgx.Conn, lockIDs []string, a postArgs) ([]pjRow, error) {
@@ -1478,6 +1705,18 @@ func postJournal(ctx context.Context, conn *pgx.Conn, lockIDs []string, a postAr
 	if a.adjustmentID != "" {
 		adjustment = a.adjustmentID
 	}
+	desc := a.description
+	if desc == "" {
+		desc = "test"
+	}
+	var initiated any
+	if a.initiatedBy != "" {
+		initiated = a.initiatedBy
+	}
+	acctDate := a.accountingDate
+	if acctDate.IsZero() {
+		acctDate = time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT posted_journal_id::text, already_posted, posted_entry_id::text, posted_ledger_account_id::text,
 		       posted_entry_type, posted_amount, posted_currency::text, posted_account_version, posted_balance_after
@@ -1485,7 +1724,7 @@ func postJournal(ctx context.Context, conn *pgx.Conn, lockIDs []string, a postAr
 			$1::uuid, $2, $3, $4::uuid, $5::smallint, $6::uuid, $7::uuid,
 			$8, $9::uuid, $10::date, $11::jsonb, $12::jsonb)`,
 		a.journalID, a.operation, a.referenceType, a.referenceID, int16(1),
-		reverses, adjustment, "test", nil, time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC),
+		reverses, adjustment, desc, initiated, acctDate,
 		string(raw), hold,
 	)
 	if err != nil {
@@ -1575,6 +1814,57 @@ func requireState(t *testing.T, got, want ledgerState) {
 	if got != want {
 		t.Fatalf("ledger state = %+v want %+v", got, want)
 	}
+}
+
+type journalMeta struct {
+	Description    string
+	InitiatedBy    string
+	AccountingDate time.Time
+}
+
+func readJournal(t *testing.T, ctx context.Context, conn *pgx.Conn, journalID string) journalMeta {
+	t.Helper()
+	var m journalMeta
+	var initiated *string
+	if err := conn.QueryRow(ctx, `
+		SELECT coalesce(description, ''), initiated_by::text, accounting_date
+		  FROM ledger.journal_transactions WHERE id = $1`, journalID).Scan(
+		&m.Description, &initiated, &m.AccountingDate); err != nil {
+		t.Fatal(err)
+	}
+	if initiated != nil {
+		m.InitiatedBy = *initiated
+	}
+	return m
+}
+
+func requireJournal(t *testing.T, got, want journalMeta) {
+	t.Helper()
+	if got.Description != want.Description || got.InitiatedBy != want.InitiatedBy {
+		t.Fatalf("journal meta = %+v want %+v", got, want)
+	}
+	if !got.AccountingDate.Equal(want.AccountingDate) {
+		t.Fatalf("accounting_date = %s want %s", got.AccountingDate.Format("2006-01-02"), want.AccountingDate.Format("2006-01-02"))
+	}
+}
+
+func insertAdjustment(t *testing.T, ctx context.Context, app *pgx.Conn, ids *idgen, status string) string {
+	t.Helper()
+	id := ids.next()
+	created := ids.next()
+	var approved any
+	if status == "APPROVED" {
+		approved = ids.next()
+	}
+	if _, err := app.Exec(ctx, `
+		INSERT INTO ledger.manual_adjustments (
+			id, status, proposed_entries, reason, incident_ref, created_by, approved_by, decided_at)
+		VALUES ($1, $2, '[]'::jsonb, 'test-reason', 'INC-TEST', $3, $4,
+		        CASE WHEN $2 = 'APPROVED' THEN now() ELSE NULL END)`,
+		id, status, created, approved); err != nil {
+		t.Fatalf("insertAdjustment: %v", err)
+	}
+	return id
 }
 
 func readHold(t *testing.T, ctx context.Context, conn *pgx.Conn, holdID string) holdRow {

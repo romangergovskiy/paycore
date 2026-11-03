@@ -82,7 +82,7 @@ $$;
 
 -- Forms follow money-flows.md / ledger-model.md §6–§8. ADJUSTMENT has no
 -- single posting shape there; it may use MVP accounts only (not 2210, not
--- post-MVP CoA codes).
+-- post-MVP CoA codes). HOLD_CAPTURE n=2 is fee=0 (D-27 fee < amount).
 -- +goose StatementBegin
 CREATE FUNCTION ledger.assert_journal_form(
     p_operation text,
@@ -335,6 +335,10 @@ BEGIN
           INTO v_fee
           FROM jsonb_to_recordset(p_rows) AS x(owner_type text, account_type text, entry_type text, amount bigint)
          WHERE x.owner_type = 'SYSTEM' AND x.account_type = '4200' AND x.entry_type = 'CREDIT';
+        -- fee = 0 is allowed by D-27 (fee < amount, amount > 0). money-flows.md
+        -- payment examples use fee > 0 (3 entries). The 2-entry form is
+        -- Dt 2110 / Ct 2200 full amount, no 4200 — same pattern as TRANSFER
+        -- fee = 0 (money-flows §4.1). Not a new decision.
         IF v_n = 2 THEN
             IF v_other <> 0 OR v_debit.amount <> v_credit.amount THEN
                 RAISE EXCEPTION 'INVALID_JOURNAL: invalid HOLD_CAPTURE form'
@@ -682,6 +686,7 @@ DECLARE
     v_orig_op text;
     v_orig_ref text;
     v_stored_rev uuid;
+    v_stored_date date;
     v_acct_updated timestamptz;
 BEGIN
     IF p_journal_id IS NULL OR p_operation IS NULL OR p_reference_type IS NULL
@@ -701,11 +706,19 @@ BEGIN
         ('x' || substr(md5(concat_ws('|', p_reference_type, p_reference_id::text, p_operation, v_seq::text)), 1, 16))::bit(64)::bigint
     );
 
-    -- 1. Existing journal: identical significant fields → already_posted; else PC409.
-    -- Compares entries, reverses_journal_id, hold_action, and adjustment_id.
-    -- adjustment_id is not a journal_transactions column (00003); non-REVERSAL
-    -- extra adjustment_id is a difference. REVERSAL cannot compare it after commit.
-    SELECT j.id, j.reverses_journal_id INTO v_existing, v_stored_rev
+    -- 1. Existing journal identity. Lookup key:
+    -- (reference_type, reference_id, operation, operation_seq).
+    -- Compared (economic payload): entries, reverses_journal_id, hold_action,
+    -- accounting_date (D-29), extra adjustment_id on non-REVERSAL.
+    -- Not compared: description, initiated_by — audit metadata. Journals are
+    -- immutable, so a retry must not UPDATE them. HTTP retries may vary
+    -- commentary/actor; treating those as identity would PC409 a true replay.
+    -- adjustment_id is not a journal_transactions column (00003). A REVERSAL
+    -- replay cannot detect a different adjustment_id. Future: a later
+    -- migration (not 00003) adds the column, INSERT stores it, this step
+    -- compares it.
+    SELECT j.id, j.reverses_journal_id, j.accounting_date
+      INTO v_existing, v_stored_rev, v_stored_date
       FROM ledger.journal_transactions AS j
      WHERE j.reference_type = p_reference_type
        AND j.reference_id = p_reference_id
@@ -738,6 +751,10 @@ BEGIN
         END IF;
         IF v_stored_rev IS DISTINCT FROM p_reverses_journal_id THEN
             RAISE EXCEPTION 'CONFLICT: journal already posted with different reverses_journal_id'
+                USING ERRCODE = 'PC409';
+        END IF;
+        IF v_stored_date IS DISTINCT FROM p_accounting_date THEN
+            RAISE EXCEPTION 'CONFLICT: journal already posted with different accounting_date'
                 USING ERRCODE = 'PC409';
         END IF;
         IF p_operation <> 'REVERSAL' AND p_adjustment_id IS NOT NULL THEN

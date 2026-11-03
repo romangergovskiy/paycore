@@ -122,6 +122,8 @@
 
 `UNIQUE (reference_type, reference_id, operation, operation_seq)`.
 
+`adjustment_id` — аргумент `ledger.post_journal`, **не** колонка этой таблицы (миграция `00003` не расширяется). Сравнение на повторе `REVERSAL` и план колонки — [ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer).
+
 ### `ledger_entries` — append-only
 
 | Колонка | Тип | Ограничения |
