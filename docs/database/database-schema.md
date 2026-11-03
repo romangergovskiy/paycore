@@ -10,7 +10,7 @@
 |---|---|
 | PostgreSQL | 16+ ([D-34](../architecture/decisions.md#d-34)) |
 | Доступ | `pgx/v5`, явный SQL, без ORM (ТЗ §4). Запись в ledger — только через функции `ledger.*` ([D-03](../architecture/decisions.md#d-03)) |
-| Миграции | golang-migrate или Goose (ТЗ §7, выбор — [Q-23](../architecture/open-questions.md#q-23)); для финансовых таблиц только forward |
+| Миграции | Goose, SQL-файлы ([D-38](../architecture/decisions.md#d-38)); для финансовых таблиц только forward |
 | Схемы | По модулям ([D-18](../architecture/decisions.md#d-18)): `auth`, `merchants`, `accounts`, `ledger`, `payments`, `transfers`, `commissions`, `limits`, `simulator`, `notifications`, `audit`, `platform`. После MVP: `fraud`, `reconciliation` |
 | PK | `UUID`, значения UUIDv7 из Go ([D-14](../architecture/decisions.md#d-14)) |
 | Деньги | `BIGINT` в минорных единицах, `CHECK` на диапазон |

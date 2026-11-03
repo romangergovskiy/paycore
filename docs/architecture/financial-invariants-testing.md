@@ -1,6 +1,6 @@
 # План тестирования финансовых инвариантов
 
-Статус: **принято для MVP** (этап 2). Инварианты I-01…I-13 описаны в [ledger-model.md §12](ledger-model.md#12-финансовые-инварианты), конкурентные сценарии S-01…S-28 — в [../database/concurrency.md §9](../database/concurrency.md#9-каталог-конкурентных-сценариев). Библиотеки — предложение ([Q-27](open-questions.md#q-27)). Зависимости на этом этапе не устанавливаются.
+Статус: **принято для MVP** (этап 2). Инварианты I-01…I-13 описаны в [ledger-model.md §12](ledger-model.md#12-финансовые-инварианты), конкурентные сценарии S-01…S-28 — в [../database/concurrency.md §9](../database/concurrency.md#9-каталог-конкурентных-сценариев). Библиотеки — [D-38](decisions.md#d-38): `testing`, testcontainers-go, `pgregory.net/rapid`.
 
 ## 1. Стратегия
 
@@ -128,7 +128,7 @@
 
 ## 4. Property-based тесты
 
-Инструмент — `pgregory.net/rapid` или `testing/quick` ([Q-27](open-questions.md#q-27)).
+Инструмент — `pgregory.net/rapid` ([D-38](decisions.md#d-38)).
 
 ### 4.1. Свойства арифметики и комиссий
 
