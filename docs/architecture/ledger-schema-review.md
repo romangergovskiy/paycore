@@ -19,8 +19,10 @@
 | Индекс оборотов системного счёта по `ledger_entries.posted_at` | **Исправлено:** колонки нет; индекс по `(ledger_account_id, created_at, id)`, период — JOIN к `journal_transactions.posted_at` |
 | `REVERSAL` на `BLOCKED` требовал `reference_type = 'ADJUSTMENT'` | **Исправлено:** `reference_type` остаётся исходным; связь с заявкой — параметр `adjustment_id` |
 | Гранты `paycore_app` на `platform.schema_info` и `DEFAULT PRIVILEGES` | **Расхождение с 3.2.** План — §6. Саму миграцию `00001` здесь не меняем |
+| `search_path` у `SECURITY DEFINER` | `pg_catalog, ledger, pg_temp` (`pg_temp` последним). Вне `ledger` — только полностью квалифицированные имена |
+| Владение ledger-функциями | Goose от `paycore_owner` → `ALTER FUNCTION … OWNER TO paycore_ledger` (§6.4). Пробел прав PostgreSQL для этой передачи — §6.5, модель D-33 не меняется |
 | Q-12, Q-13(а), Q-16, Q-20, Q-30 | Не блокируют DDL таблиц Ledger; Q-13(а) — формат номера можно добавить CHECK позже |
-| Функция `post_journal`, бизнес-модули | Следующий этап, не этот PR |
+| Функция `post_journal`, бизнес-модули | Следующий этап, не этот PR. Передачу владельца функции решить до миграции функций, не до таблиц |
 
 ---
 
@@ -79,7 +81,7 @@
 - CHECK именованные (`ck_<таблица>_<правило>`).
 - FK без каскадов; составные FK по валюте обязательны.
 - Триггеры неизменяемости на журналах, проводках, историях статусов, аудите; отложенный триггер баланса на `journal_transactions`.
-- `SET search_path = pg_catalog, ledger` у функций: объекты вне `ledger` (в том числе `accounts.accounts`, `accounts.currencies`) нужно **квалифицировать схемой**. Иначе поиск остановится на `pg_catalog` + `ledger`.
+- `SET search_path = pg_catalog, ledger, pg_temp` у функций: `pg_temp` стоит явно последним, чтобы временная схема сессии не подменяла объекты `pg_catalog` и `ledger`. Обращения вне `ledger` (в том числе `accounts.accounts`, `accounts.currencies`) — только с именем схемы.
 
 Порядок L1…L8 совместим с уже существующей `platform`:
 
@@ -116,7 +118,7 @@
 | `account_balances`, `system_balance_buckets`, `holds` | `SELECT` | `SELECT, INSERT, UPDATE` | `SELECT` |
 | `ledger_accounts`, `chart_of_accounts`, `ledger_balance_snapshots` | `SELECT` | `SELECT` | `SELECT` |
 | `manual_adjustments` | `SELECT, INSERT, UPDATE` | `SELECT` | `SELECT` |
-| функции `ledger.*` | `EXECUTE` | владелец (`SECURITY DEFINER`) | — |
+| функции `ledger.*` | `EXECUTE` (после `REVOKE` у `PUBLIC`) | владелец через `ALTER FUNCTION` (§6.4) | — |
 | `accounts.accounts` | `SELECT, INSERT, UPDATE` | `SELECT` + `UPDATE (updated_at)` | `SELECT` |
 | `accounts.currencies` | `SELECT` | `SELECT` | `SELECT` |
 | `account_status_history` | `SELECT, INSERT` | — | `SELECT` |
@@ -127,7 +129,34 @@
 
 `payments`, `transfers`, `refunds`, `payouts`, `test_topups`, `limit_counters`, `commission_tariffs`, …: `SELECT, INSERT, UPDATE` приложению; `SELECT, INSERT` на `*_status_history` и `audit.audit_logs`; `SELECT` readonly. `DELETE` не выдавать, кроме трёх platform-таблиц очистки.
 
-`REVOKE EXECUTE ON FUNCTION … FROM PUBLIC` для каждой ledger-функции.
+`REVOKE EXECUTE ON FUNCTION … FROM PUBLIC` для каждой ledger-функции. `EXECUTE` выдаётся только ролям, которым он нужен (`paycore_app`); `paycore_readonly` функции не вызывает.
+
+### 6.4. Создание и владение ledger-функциями
+
+Goose идёт от `paycore_owner` ([D-33](decisions.md#d-33), [D-38](decisions.md#d-38)): схемы и таблицы создаёт эта роль, она же владелец. Функции `SECURITY DEFINER` в целевой модели принадлежат `paycore_ledger` (NOLOGIN). Порядок в будущей миграции функций, без смены четырёх ролей D-33:
+
+1. Миграция под `paycore_owner` создаёт функцию (`CREATE FUNCTION … SECURITY DEFINER` с `SET search_path = pg_catalog, ledger, pg_temp`). Владелец сразу после `CREATE` — `paycore_owner`.
+2. `REVOKE EXECUTE` у `PUBLIC`.
+3. `GRANT EXECUTE` только нужным ролям (`paycore_app`; не readonly).
+4. `ALTER FUNCTION … OWNER TO paycore_ledger`.
+5. После передачи проверить: владелец функции — `paycore_ledger`; у `PUBLIC` нет `EXECUTE`; `EXECUTE` есть у `paycore_app`; у `paycore_ledger` на таблицах — гранты §6.2 (ими работает тело `SECURITY DEFINER`); схемы и таблицы по-прежнему принадлежат `paycore_owner`; `paycore_ledger` остаётся `NOLOGIN`.
+
+ACL функции сохраняются при смене владельца, поэтому `REVOKE`/`GRANT EXECUTE` делают **до** `ALTER FUNCTION … OWNER TO`. Неподтверждённый SQL, который менял бы членство ролей или выдавал `CREATE` на схему, в этот план не входит — см. §6.5.
+
+### 6.5. Проблема передачи владельца функции
+
+`ALTER FUNCTION … OWNER TO paycore_ledger` от имени `paycore_owner` в PostgreSQL проходит, только если выполнены оба условия:
+
+- текущая роль — член новой роли-владельца;
+- новая роль имеет привилегию `CREATE` на схеме, где лежит функция.
+
+Bootstrap 3.2 и [D-33](decisions.md#d-33) этого не делают: `paycore_owner` не член `paycore_ledger`, у `paycore_ledger` на схемах только будущий `USAGE`, не `CREATE`. Это не ломает модель четырёх ролей и не мешает DDL таблиц. Это пробел **процедуры миграции функций**. Варианты закрытия (ни один здесь не принимается и в SQL не фиксируется):
+
+- выдать `paycore_ledger` `CREATE` на схему `ledger` — тогда `ALTER OWNER` проходит, но роль сможет создавать объекты в схеме (прямой вход по-прежнему закрыт `NOLOGIN`);
+- `GRANT paycore_ledger TO paycore_owner`, чтобы owner мог `ALTER OWNER` / `SET ROLE`;
+- создавать или передавать функции не из Goose, а суперпользовательским bootstrap.
+
+Решение нужно до миграции `post_journal` и соседних функций, не до создания таблиц. Модель ролей D-33 не меняется.
 
 ---
 

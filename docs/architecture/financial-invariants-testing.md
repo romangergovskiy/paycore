@@ -217,7 +217,7 @@
   - тот же бизнес-ключ с другими проводками → `PC409`;
   - `CAPTURE` резерва не в `ACTIVE` → `PC409`.
 - Нет способа добавить проводку в существующий журнал: у `paycore_app` нет `INSERT`, а функция всегда создаёт новый журнал.
-- Функции имеют `search_path = pg_catalog, ledger`; `EXECUTE` отозван у `PUBLIC`.
+- Функции имеют `search_path = pg_catalog, ledger, pg_temp`; `EXECUTE` отозван у `PUBLIC`.
 
 ### 6.2. Триггеры и ограничения
 
