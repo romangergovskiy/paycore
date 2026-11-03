@@ -102,8 +102,3 @@ GRANT SELECT ON TABLE accounts.accounts TO paycore_readonly, paycore_ledger;
 GRANT UPDATE (updated_at) ON TABLE accounts.accounts TO paycore_ledger;
 GRANT SELECT, INSERT ON TABLE accounts.account_status_history TO paycore_app;
 GRANT SELECT ON TABLE accounts.account_status_history TO paycore_readonly;
-
--- +goose Down
-DROP SCHEMA accounts CASCADE;
-DROP SCHEMA auth CASCADE;
-DROP SCHEMA merchants CASCADE;

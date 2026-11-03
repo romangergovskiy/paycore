@@ -93,7 +93,9 @@ erDiagram
         uuid ledger_account_id PK, FK
         smallint bucket_no PK "0..bucket_count-1"
         bigint balance "CHECK allow_negative OR >= 0"
-        boolean allow_negative
+        text owner_type "копия, = SYSTEM"
+        boolean allow_negative "копия"
+        smallint bucket_count "копия"
         timestamptz updated_at
     }
     journal_transactions {

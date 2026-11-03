@@ -25,7 +25,8 @@ CREATE TABLE ledger.chart_of_accounts (
             (NOT is_contra AND normal_balance = 'CREDIT')
             OR (is_contra AND normal_balance = 'DEBIT')
         ))
-    )
+    ),
+    CONSTRAINT uq_coa_attrs UNIQUE (code, account_class, normal_balance, allow_negative)
 );
 
 INSERT INTO ledger.chart_of_accounts
@@ -51,7 +52,7 @@ CREATE TABLE ledger.ledger_accounts (
     id               UUID PRIMARY KEY,
     owner_type       TEXT NOT NULL,
     account_id       UUID,
-    account_type     TEXT NOT NULL REFERENCES ledger.chart_of_accounts (code),
+    account_type     TEXT NOT NULL,
     kind             TEXT,
     system_code      TEXT,
     currency         CHAR(3) NOT NULL REFERENCES accounts.currencies (code),
@@ -94,7 +95,11 @@ CREATE TABLE ledger.ledger_accounts (
     CONSTRAINT ck_ledger_accounts_bucket_count CHECK (bucket_count BETWEEN 1 AND 256),
     CONSTRAINT ck_ledger_accounts_user_buckets CHECK (owner_type = 'SYSTEM' OR bucket_count = 1),
     CONSTRAINT ck_ledger_accounts_status CHECK (status IN ('ACTIVE', 'CLOSED')),
-    CONSTRAINT ck_ledger_accounts_user_active CHECK (owner_type = 'SYSTEM' OR status = 'ACTIVE')
+    CONSTRAINT ck_ledger_accounts_user_active CHECK (owner_type = 'SYSTEM' OR status = 'ACTIVE'),
+    CONSTRAINT uq_ledger_accounts_bucket_parent UNIQUE (id, owner_type, allow_negative, bucket_count),
+    CONSTRAINT fk_ledger_accounts_chart_attrs
+        FOREIGN KEY (account_type, account_class, normal_balance, allow_negative)
+        REFERENCES ledger.chart_of_accounts (code, account_class, normal_balance, allow_negative)
 );
 
 CREATE UNIQUE INDEX uq_ledger_accounts_business_kind
@@ -119,14 +124,24 @@ CREATE TABLE ledger.account_balances (
     CONSTRAINT ck_account_balances_version CHECK (version >= 0)
 );
 
+-- Parent attributes are copied onto the bucket row and pinned by a composite
+-- FK so allow_negative / bucket_count / SYSTEM cannot drift. bucket_no <
+-- bucket_count is a CHECK on the copy. A trigger cannot do this better:
+-- PostgreSQL FKs cannot target a partial unique index on SYSTEM ids only.
 CREATE TABLE ledger.system_balance_buckets (
-    ledger_account_id  UUID NOT NULL REFERENCES ledger.ledger_accounts (id),
+    ledger_account_id  UUID NOT NULL,
     bucket_no          SMALLINT NOT NULL,
     balance            BIGINT NOT NULL DEFAULT 0,
+    owner_type         TEXT NOT NULL,
     allow_negative     BOOLEAN NOT NULL,
+    bucket_count       SMALLINT NOT NULL,
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (ledger_account_id, bucket_no),
-    CONSTRAINT ck_system_balance_buckets_no CHECK (bucket_no >= 0),
+    CONSTRAINT fk_buckets_parent
+        FOREIGN KEY (ledger_account_id, owner_type, allow_negative, bucket_count)
+        REFERENCES ledger.ledger_accounts (id, owner_type, allow_negative, bucket_count),
+    CONSTRAINT ck_system_balance_buckets_system CHECK (owner_type = 'SYSTEM'),
+    CONSTRAINT ck_system_balance_buckets_no CHECK (bucket_no >= 0 AND bucket_no < bucket_count),
     CONSTRAINT ck_system_balance_buckets_sign CHECK (allow_negative OR balance >= 0)
 );
 
@@ -214,7 +229,7 @@ CREATE TABLE ledger.holds (
     CONSTRAINT uq_holds_reference UNIQUE (reference_type, reference_id),
     CONSTRAINT ck_holds_amount CHECK (amount > 0),
     CONSTRAINT ck_holds_status CHECK (status IN ('ACTIVE', 'CAPTURED', 'RELEASED', 'EXPIRED')),
-    CONSTRAINT ck_holds_reference_type CHECK (reference_type IN ('PAYMENT', 'TRANSFER')),
+    CONSTRAINT ck_holds_reference_type CHECK (reference_type = 'PAYMENT'),
     CONSTRAINT ck_holds_finalized CHECK (
         (status = 'ACTIVE' AND finalized_at IS NULL)
         OR (status <> 'ACTIVE' AND finalized_at IS NOT NULL)
@@ -266,8 +281,10 @@ INSERT INTO ledger.ledger_accounts (
     ('00000000-0000-4000-8000-000000005900', 'SYSTEM', NULL, '5900', NULL,
         'OPERATIONAL_LOSSES', 'RUB', 'EXPENSE', 'DEBIT', false, 1, 'ACTIVE');
 
-INSERT INTO ledger.system_balance_buckets (ledger_account_id, bucket_no, balance, allow_negative, updated_at)
-SELECT a.id, g.n, 0, a.allow_negative, now()
+INSERT INTO ledger.system_balance_buckets (
+    ledger_account_id, bucket_no, balance, owner_type, allow_negative, bucket_count, updated_at
+)
+SELECT a.id, g.n, 0, a.owner_type, a.allow_negative, a.bucket_count, now()
 FROM ledger.ledger_accounts AS a
 CROSS JOIN LATERAL generate_series(0, a.bucket_count - 1) AS g(n)
 WHERE a.owner_type = 'SYSTEM';
@@ -357,19 +374,16 @@ GRANT SELECT ON TABLE
 TO paycore_app, paycore_readonly;
 
 GRANT SELECT, INSERT ON TABLE ledger.journal_transactions, ledger.ledger_entries TO paycore_ledger;
+GRANT SELECT, INSERT ON TABLE ledger.ledger_accounts TO paycore_ledger;
 GRANT SELECT, INSERT, UPDATE ON TABLE
     ledger.account_balances,
     ledger.system_balance_buckets,
     ledger.holds
 TO paycore_ledger;
 GRANT SELECT ON TABLE
-    ledger.ledger_accounts,
     ledger.chart_of_accounts,
     ledger.ledger_balance_snapshots,
     ledger.manual_adjustments
 TO paycore_ledger;
 
 GRANT SELECT, INSERT, UPDATE ON TABLE ledger.manual_adjustments TO paycore_app;
-
--- +goose Down
-DROP SCHEMA ledger CASCADE;

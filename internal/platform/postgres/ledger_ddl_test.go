@@ -232,6 +232,65 @@ func TestLedgerDDL(t *testing.T) {
 		mustFail(t, ctx, app, `UPDATE ledger.journal_transactions SET description = 'x' WHERE id = $1`,
 			"66666666-6666-4666-8666-666666666666")
 	})
+
+	t.Run("chart attributes cannot diverge", func(t *testing.T) {
+		mustFail(t, ctx, owner, `INSERT INTO ledger.ledger_accounts (
+			id, owner_type, account_id, account_type, kind, currency, account_class, normal_balance, allow_negative, bucket_count, status)
+			VALUES ($1, 'CUSTOMER', $2, '2100', 'AVAILABLE', 'RUB', 'ASSET', 'DEBIT', false, 1, 'ACTIVE')`,
+			"ccccccc1-cccc-4ccc-8ccc-cccccccccccc", testAccID)
+		mustFail(t, ctx, owner, `INSERT INTO ledger.ledger_accounts (
+			id, owner_type, account_id, account_type, kind, currency, account_class, normal_balance, allow_negative, bucket_count, status)
+			VALUES ($1, 'CUSTOMER', $2, '2100', 'HOLD', 'RUB', 'LIABILITY', 'CREDIT', true, 1, 'ACTIVE')`,
+			"ccccccc2-cccc-4ccc-8ccc-cccccccccccc", testAccID)
+	})
+
+	t.Run("buckets match parent", func(t *testing.T) {
+		mustFail(t, ctx, owner, `INSERT INTO ledger.system_balance_buckets (
+			ledger_account_id, bucket_no, balance, owner_type, allow_negative, bucket_count)
+			VALUES ($1, 16, 0, 'SYSTEM', false, 16)`, sys1100)
+		mustFail(t, ctx, owner, `INSERT INTO ledger.system_balance_buckets (
+			ledger_account_id, bucket_no, balance, owner_type, allow_negative, bucket_count)
+			VALUES ($1, 99, 0, 'SYSTEM', true, 16)`, sys1100)
+		custLA := "dddddddd-dddd-4ddd-8ddd-dddddddd2100"
+		if _, err := owner.Exec(ctx, `INSERT INTO ledger.ledger_accounts (
+			id, owner_type, account_id, account_type, kind, currency, account_class, normal_balance, allow_negative, bucket_count, status)
+			VALUES ($1, 'CUSTOMER', $2, '2100', 'AVAILABLE', 'RUB', 'LIABILITY', 'CREDIT', false, 1, 'ACTIVE')`,
+			custLA, testAccID); err != nil {
+			t.Fatalf("customer ledger account: %v", err)
+		}
+		mustFail(t, ctx, owner, `INSERT INTO ledger.system_balance_buckets (
+			ledger_account_id, bucket_no, balance, owner_type, allow_negative, bucket_count)
+			VALUES ($1, 0, 0, 'SYSTEM', false, 1)`, custLA)
+		mustFail(t, ctx, owner, `INSERT INTO ledger.system_balance_buckets (
+			ledger_account_id, bucket_no, balance, owner_type, allow_negative, bucket_count)
+			VALUES ($1, 0, 0, 'CUSTOMER', false, 1)`, custLA)
+	})
+
+	t.Run("holds reference_type is PAYMENT in MVP", func(t *testing.T) {
+		mustFail(t, ctx, owner, `INSERT INTO ledger.holds (
+			id, account_id, currency, amount, status, reference_type, reference_id, expires_at)
+			VALUES ($1, $2, 'RUB', 1, 'ACTIVE', 'TRANSFER', $1, now())`,
+			"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1", testAccID)
+		if _, err := owner.Exec(ctx, `INSERT INTO ledger.holds (
+			id, account_id, currency, amount, status, reference_type, reference_id, expires_at)
+			VALUES ($1, $2, 'RUB', 1, 'ACTIVE', 'PAYMENT', $1, now())`,
+			"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee2", testAccID); err != nil {
+			t.Fatalf("PAYMENT hold: %v", err)
+		}
+	})
+
+	t.Run("role table privileges", func(t *testing.T) {
+		assertPrivilege(t, ctx, owner, "paycore_ledger", "ledger.ledger_accounts", "INSERT", true)
+		assertPrivilege(t, ctx, owner, "paycore_ledger", "ledger.account_balances", "UPDATE", true)
+		assertPrivilege(t, ctx, owner, "paycore_ledger", "ledger.holds", "UPDATE", true)
+		assertPrivilege(t, ctx, owner, "paycore_ledger", "ledger.journal_transactions", "INSERT", true)
+		assertPrivilege(t, ctx, owner, "paycore_ledger", "ledger.journal_transactions", "UPDATE", false)
+		assertPrivilege(t, ctx, owner, "paycore_app", "ledger.ledger_accounts", "INSERT", false)
+		assertPrivilege(t, ctx, owner, "paycore_app", "ledger.journal_transactions", "INSERT", false)
+		assertPrivilege(t, ctx, owner, "paycore_app", "ledger.account_balances", "UPDATE", false)
+		assertPrivilege(t, ctx, owner, "paycore_app", "ledger.holds", "INSERT", false)
+		assertPrivilege(t, ctx, owner, "paycore_app", "accounts.accounts", "INSERT", true)
+	})
 }
 
 func insertBalancedJournal(ctx context.Context, conn *pgx.Conn, jid, e1, e2 string) error {
@@ -273,5 +332,17 @@ func mustFail(t *testing.T, ctx context.Context, conn *pgx.Conn, sql string, arg
 		t.Fatalf("query succeeded, want error: %s", sql)
 	} else if strings.Contains(strings.ToLower(err.Error()), "cannot find") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func assertPrivilege(t *testing.T, ctx context.Context, conn *pgx.Conn, role, table, priv string, want bool) {
+	t.Helper()
+	var got bool
+	q := `SELECT has_table_privilege($1, $2, $3)`
+	if err := conn.QueryRow(ctx, q, role, table, priv).Scan(&got); err != nil {
+		t.Fatalf("has_table_privilege(%s, %s, %s): %v", role, table, priv, err)
+	}
+	if got != want {
+		t.Fatalf("has_table_privilege(%s, %s, %s) = %v, want %v", role, table, priv, got, want)
 	}
 }

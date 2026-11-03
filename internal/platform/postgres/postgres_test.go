@@ -95,29 +95,21 @@ func TestMigrationsAndRoles(t *testing.T) {
 	assertSchemaInfo(t, ctx, c.app, true)
 	assertFinancialSchemas(t, ctx, c.owner, true)
 
-	if err := Down(ctx, c.owner); err != nil {
-		t.Fatalf("down ledger: %v", err)
-	}
-	if err := Down(ctx, c.owner); err != nil {
-		t.Fatalf("down accounts: %v", err)
-	}
-	assertFinancialSchemas(t, ctx, c.owner, false)
-	assertSchemaInfo(t, ctx, c.app, true)
-
-	if err := Down(ctx, c.owner); err != nil {
-		t.Fatalf("down platform: %v", err)
-	}
-	v, err = CurrentVersion(ctx, c.owner)
-	if err != nil || v != 0 {
-		t.Fatalf("version after down = %d, %v", v, err)
-	}
-	assertNoPlatform(t, ctx, c.owner)
-
-	if err := Up(ctx, c.owner); err != nil {
-		t.Fatalf("up after down: %v", err)
-	}
-	assertSchemaInfo(t, ctx, c.app, true)
-	assertFinancialSchemas(t, ctx, c.owner, true)
+	t.Run("second clean database", func(t *testing.T) {
+		c2 := startCluster(t)
+		if err := Bootstrap(ctx, c2.admin, c2.owner, c2.app, c2.readonly); err != nil {
+			t.Fatalf("bootstrap: %v", err)
+		}
+		if err := Up(ctx, c2.owner); err != nil {
+			t.Fatalf("up: %v", err)
+		}
+		v2, err := CurrentVersion(ctx, c2.owner)
+		if err != nil || v2 != 3 {
+			t.Fatalf("version after up = %d, %v", v2, err)
+		}
+		assertSchemaInfo(t, ctx, c2.app, true)
+		assertFinancialSchemas(t, ctx, c2.owner, true)
+	})
 
 	t.Run("paycore_app session settings and grants", func(t *testing.T) {
 		conn, err := pgx.Connect(ctx, c.app)
@@ -284,6 +276,31 @@ func assertFinancialSchemas(t *testing.T, ctx context.Context, dsn string, wantA
 	if found["auth"] != wantAccountsLedger || found["merchants"] != wantAccountsLedger {
 		t.Fatalf("stub auth/merchants present=%v want=%v (found %v)", found["auth"] && found["merchants"], wantAccountsLedger, found)
 	}
+}
+
+func TestPlatformMigrationDown(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	c := startCluster(t)
+	if err := Bootstrap(ctx, c.admin, c.owner, c.app, c.readonly); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if err := UpTo(ctx, c.owner, 1); err != nil {
+		t.Fatalf("up-to 1: %v", err)
+	}
+	if err := Down(ctx, c.owner); err != nil {
+		t.Fatalf("down platform: %v", err)
+	}
+	v, err := CurrentVersion(ctx, c.owner)
+	if err != nil || v != 0 {
+		t.Fatalf("version after down = %d, %v", v, err)
+	}
+	assertNoPlatform(t, ctx, c.owner)
+	if err := UpTo(ctx, c.owner, 1); err != nil {
+		t.Fatalf("up-to 1 after down: %v", err)
+	}
+	assertSchemaInfo(t, ctx, c.app, true)
+	assertFinancialSchemas(t, ctx, c.owner, false)
 }
 
 func TestOpenEmptyDSN(t *testing.T) {
