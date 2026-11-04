@@ -14,6 +14,69 @@ import (
 	"github.com/romangergovskiy/paycore/internal/platform/apperror"
 )
 
+func TestPostEmptyResult(t *testing.T) {
+	cmd := ledger.Command{
+		JournalID:      uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+		Operation:      ledger.OpSimTopup,
+		ReferenceType:  "SIM_TOPUP",
+		ReferenceID:    uuid.MustParse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+		AccountingDate: time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC),
+		Entries: []ledger.Entry{{
+			ID:              uuid.MustParse("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+			LedgerAccountID: uuid.MustParse("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+			Type:            ledger.Debit, Amount: 1, Currency: "RUB",
+		}},
+	}
+	res, err := NewLedger(emptyQueryer{}).Post(context.Background(), cmd)
+	if err == nil {
+		t.Fatal("empty post_journal result must be an error")
+	}
+	if res.JournalID != uuid.Nil || res.AlreadyPosted || len(res.Entries) != 0 {
+		t.Fatalf("want zero Result, got %+v", res)
+	}
+	if !errors.Is(err, errEmptyJournal) {
+		t.Fatalf("want errEmptyJournal, got %v", err)
+	}
+	for _, s := range []error{
+		ledger.ErrInvalidJournal,
+		ledger.ErrInsufficientFunds,
+		ledger.ErrSystemAccountInsufficient,
+		ledger.ErrAccountNotActive,
+		ledger.ErrConflict,
+		ledger.ErrLockProtocol,
+	} {
+		if errors.Is(err, s) {
+			t.Fatalf("empty result mapped to PC sentinel %v", s)
+		}
+	}
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		t.Fatalf("empty result must not carry PgError, got %v", pe)
+	}
+	var ae *apperror.Error
+	if errors.As(err, &ae) {
+		t.Fatalf("empty result must not be apperror, got %v", ae)
+	}
+}
+
+type emptyQueryer struct{}
+
+func (emptyQueryer) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return emptyRows{}, nil
+}
+
+type emptyRows struct{}
+
+func (emptyRows) Close()                                       {}
+func (emptyRows) Err() error                                   { return nil }
+func (emptyRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (emptyRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (emptyRows) Next() bool                                   { return false }
+func (emptyRows) Scan(...any) error                            { return errors.New("scan on empty rows") }
+func (emptyRows) Values() ([]any, error)                       { return nil, errors.New("values on empty rows") }
+func (emptyRows) RawValues() [][]byte                          { return nil }
+func (emptyRows) Conn() *pgx.Conn                              { return nil }
+
 func TestMapPostJournalError(t *testing.T) {
 	ser := &pgconn.PgError{Code: "40001", Message: "could not serialize access"}
 	err := mapPostJournalError(ser)
@@ -36,6 +99,10 @@ func TestMapPostJournalError(t *testing.T) {
 	}
 	if !errors.As(pc, &pe) || pe.Code != "PC400" {
 		t.Fatalf("PC400 lost PgError: %v", pc)
+	}
+	var ae *apperror.Error
+	if !errors.As(pc, &ae) || ae.Kind != apperror.KindInvalid || ae.Code != ledger.CodeInvalidJournal {
+		t.Fatalf("PC400 missing apperror conversion: %v", pc)
 	}
 
 	sys := mapPostJournalError(&pgconn.PgError{Code: "PC402", Message: "SYSTEM_ACCOUNT_INSUFFICIENT"})
@@ -289,17 +356,21 @@ func simTopupCmd(t *testing.T, ids *idgen, acc seededAccount, sys uuid.UUID, amo
 	}
 }
 
-func requireLedgerErr(t *testing.T, err error, sentinel *apperror.Error) {
+func requireLedgerErr(t *testing.T, err error, sentinel error) {
 	t.Helper()
 	if err == nil {
-		t.Fatalf("want %s, got nil", sentinel.Code)
+		t.Fatalf("want %v, got nil", sentinel)
 	}
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("want %s, got %v", sentinel.Code, err)
+		t.Fatalf("want %v, got %v", sentinel, err)
 	}
 	var pe *pgconn.PgError
 	if !errors.As(err, &pe) {
 		t.Fatalf("missing wrapped PgError in %v", err)
+	}
+	var ae *apperror.Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("missing apperror conversion outside domain in %v", err)
 	}
 }
 

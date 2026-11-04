@@ -31,6 +31,10 @@ func NewLedger(q queryer) *Ledger {
 
 var _ ledger.Poster = (*Ledger)(nil)
 
+// errEmptyJournal is returned when post_journal yields no SQL error and no rows.
+// That is an adapter contract failure, not a PC* domain error and not success.
+var errEmptyJournal = errors.New("ledger post_journal: empty result")
+
 const postJournalSQL = `
 SELECT posted_journal_id, already_posted, posted_entry_id, posted_ledger_account_id,
        posted_entry_type, posted_amount, posted_currency::text,
@@ -122,8 +126,12 @@ func (l *Ledger) Post(ctx context.Context, cmd ledger.Command) (ledger.Result, e
 		pe.Type = ledger.EntryType(entryType)
 		out.Entries = append(out.Entries, pe)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return zero, mapPostJournalError(err)
+	}
+	if len(out.Entries) == 0 {
+		return zero, errEmptyJournal
 	}
 	return out, nil
 }
@@ -169,20 +177,26 @@ func mapPostJournalError(err error) error {
 	}
 	switch pe.Code {
 	case "PC400":
-		return apperror.Wrap(err, apperror.KindInvalid, ledger.ErrInvalidJournal.Code, pe.Message)
+		return wrapDomain(err, ledger.ErrInvalidJournal, apperror.KindInvalid, pe.Message)
 	case "PC402":
 		if pe.Message == "SYSTEM_ACCOUNT_INSUFFICIENT" {
-			return apperror.Wrap(err, apperror.KindUnprocessable, ledger.ErrSystemAccountInsufficient.Code, pe.Message)
+			return wrapDomain(err, ledger.ErrSystemAccountInsufficient, apperror.KindUnprocessable, pe.Message)
 		}
-		return apperror.Wrap(err, apperror.KindUnprocessable, ledger.ErrInsufficientFunds.Code, pe.Message)
+		return wrapDomain(err, ledger.ErrInsufficientFunds, apperror.KindUnprocessable, pe.Message)
 	case "PC403":
-		return apperror.Wrap(err, apperror.KindUnprocessable, ledger.ErrAccountNotActive.Code, pe.Message)
+		return wrapDomain(err, ledger.ErrAccountNotActive, apperror.KindUnprocessable, pe.Message)
 	case "PC409":
-		return apperror.Wrap(err, apperror.KindConflict, ledger.ErrConflict.Code, pe.Message)
+		return wrapDomain(err, ledger.ErrConflict, apperror.KindConflict, pe.Message)
 	case "PC460":
-		return apperror.Wrap(err, apperror.KindInternal, ledger.ErrLockProtocol.Code, pe.Message)
+		return wrapDomain(err, ledger.ErrLockProtocol, apperror.KindInternal, pe.Message)
 	default:
 		// connect, serialization (40001), deadlock (40P01), lock_timeout, …
 		return fmt.Errorf("ledger post_journal: %w", err)
 	}
+}
+
+// wrapDomain keeps the ledger sentinel and PgError in the chain (%w), then
+// attaches HTTP Kind outside the domain package.
+func wrapDomain(cause error, sentinel *ledger.Error, kind apperror.Kind, message string) error {
+	return apperror.Wrap(fmt.Errorf("%w: %w", sentinel, cause), kind, sentinel.Code, message)
 }

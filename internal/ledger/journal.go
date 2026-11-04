@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
-	"github.com/romangergovskiy/paycore/internal/platform/apperror"
 )
 
 type Operation string
@@ -103,18 +101,42 @@ type Poster interface {
 	Post(ctx context.Context, cmd Command) (Result, error)
 }
 
-// SQLSTATE PC400/402/403/409/460 mapped to domain codes (ledger-model.md §11.3).
+// Stable codes for SQLSTATE PC400/402/403/409/460 (ledger-model.md §11.3).
+// HTTP Kind is applied outside this package.
+const (
+	CodeInvalidJournal            = "INVALID_JOURNAL"
+	CodeInsufficientFunds         = "INSUFFICIENT_FUNDS"
+	CodeSystemAccountInsufficient = "SYSTEM_ACCOUNT_INSUFFICIENT"
+	CodeAccountNotActive          = "ACCOUNT_NOT_ACTIVE"
+	CodeConflict                  = "CONFLICT"
+	CodeLockProtocol              = "LOCK_PROTOCOL_VIOLATION"
+)
+
+// Error is a domain posting error. Compare with errors.Is against the sentinels.
+type Error struct {
+	Code    string
+	Message string
+}
+
+func (e *Error) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code + ": " + e.Message
+}
+
+func (e *Error) Is(target error) bool {
+	t, ok := target.(*Error)
+	return ok && e != nil && t.Code != "" && t.Code == e.Code
+}
+
 var (
-	ErrInvalidJournal = apperror.New(apperror.KindInvalid, "INVALID_JOURNAL",
-		"Journal is invalid.")
-	ErrInsufficientFunds = apperror.New(apperror.KindUnprocessable, "INSUFFICIENT_FUNDS",
-		"Insufficient funds.")
-	ErrSystemAccountInsufficient = apperror.New(apperror.KindUnprocessable, "SYSTEM_ACCOUNT_INSUFFICIENT",
-		"System account has insufficient funds.")
-	ErrAccountNotActive = apperror.New(apperror.KindUnprocessable, "ACCOUNT_NOT_ACTIVE",
-		"Account is not active for this operation.")
-	ErrConflict = apperror.New(apperror.KindConflict, "CONFLICT",
-		"Journal conflicts with an existing posting.")
-	ErrLockProtocol = apperror.New(apperror.KindInternal, "LOCK_PROTOCOL_VIOLATION",
-		"Caller missed L3 FOR SHARE on accounts.")
+	ErrInvalidJournal            = &Error{Code: CodeInvalidJournal, Message: "Journal is invalid."}
+	ErrInsufficientFunds         = &Error{Code: CodeInsufficientFunds, Message: "Insufficient funds."}
+	ErrSystemAccountInsufficient = &Error{
+		Code: CodeSystemAccountInsufficient, Message: "System account has insufficient funds.",
+	}
+	ErrAccountNotActive = &Error{Code: CodeAccountNotActive, Message: "Account is not active for this operation."}
+	ErrConflict         = &Error{Code: CodeConflict, Message: "Journal conflicts with an existing posting."}
+	ErrLockProtocol     = &Error{Code: CodeLockProtocol, Message: "Caller missed L3 FOR SHARE on accounts."}
 )

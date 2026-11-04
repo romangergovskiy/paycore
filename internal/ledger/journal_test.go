@@ -3,9 +3,11 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"runtime"
 	"testing"
-
-	"github.com/romangergovskiy/paycore/internal/platform/apperror"
 )
 
 func TestSentinelCodes(t *testing.T) {
@@ -13,21 +15,46 @@ func TestSentinelCodes(t *testing.T) {
 		err  error
 		code string
 	}{
-		{ErrInvalidJournal, "INVALID_JOURNAL"},
-		{ErrInsufficientFunds, "INSUFFICIENT_FUNDS"},
-		{ErrSystemAccountInsufficient, "SYSTEM_ACCOUNT_INSUFFICIENT"},
-		{ErrAccountNotActive, "ACCOUNT_NOT_ACTIVE"},
-		{ErrConflict, "CONFLICT"},
-		{ErrLockProtocol, "LOCK_PROTOCOL_VIOLATION"},
+		{ErrInvalidJournal, CodeInvalidJournal},
+		{ErrInsufficientFunds, CodeInsufficientFunds},
+		{ErrSystemAccountInsufficient, CodeSystemAccountInsufficient},
+		{ErrAccountNotActive, CodeAccountNotActive},
+		{ErrConflict, CodeConflict},
+		{ErrLockProtocol, CodeLockProtocol},
 	}
 	for _, tc := range cases {
 		wrapped := fmt.Errorf("post: %w", tc.err)
 		if !errors.Is(wrapped, tc.err) {
 			t.Fatalf("errors.Is(%v) = false", tc.err)
 		}
-		got := apperror.From(wrapped)
-		if got.Code != tc.code {
-			t.Fatalf("code = %s want %s", got.Code, tc.code)
+		var got *Error
+		if !errors.As(wrapped, &got) || got.Code != tc.code {
+			t.Fatalf("code = %v want %s", got, tc.code)
+		}
+	}
+	if errors.Is(ErrInsufficientFunds, ErrSystemAccountInsufficient) {
+		t.Fatal("PC402 codes must not match each other")
+	}
+}
+
+func TestDomainDoesNotImportAppError(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("caller")
+	}
+	dir := filepath.Dir(file)
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pkg := range pkgs {
+		for name, f := range pkg.Files {
+			for _, spec := range f.Imports {
+				if spec.Path.Value == `"github.com/romangergovskiy/paycore/internal/platform/apperror"` {
+					t.Fatalf("%s imports apperror", name)
+				}
+			}
 		}
 	}
 }
