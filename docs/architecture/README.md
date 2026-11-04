@@ -1,6 +1,6 @@
 # PayCore — архитектура финансового ядра
 
-Статус: **проект принят для MVP; идёт этап 3 (реализация)**. В коде — каркас сервиса ([D-38](decisions.md#d-38), [D-39](decisions.md#d-39)), схема `platform` (этап 3.2), DDL таблиц `accounts`/`ledger` (этап 3.3), шлюзовые функции `ledger.post_journal` / `open_ledger_accounts` / `lock_account_balances` (этап 3.4, [D-40](decisions.md#d-40)) и типизированный Go-вызов `post_journal` (этап 3.5). Domain-валидация журнала без БД, HTTP, Payments и Transfers ещё не реализованы. Ревью SQL-схемы Ledger — [ledger-schema-review.md](ledger-schema-review.md). Первоисточник требований — [../PROJECT_SPEC.md](../PROJECT_SPEC.md).
+Статус: **проект принят для MVP; идёт этап 3 (реализация)**. В коде — каркас сервиса ([D-38](decisions.md#d-38), [D-39](decisions.md#d-39)), схема `platform` (этап 3.2), DDL таблиц `accounts`/`ledger` (этап 3.3), шлюзовые функции `ledger.post_journal` / `open_ledger_accounts` / `lock_account_balances` (этап 3.4, [D-40](decisions.md#d-40)), типизированный Go-вызов `post_journal` (этап 3.5) и domain-валидация `Command` без БД (этап 3.6, до `Poster.Post`). HTTP, Payments и Transfers ещё не реализованы. Ревью SQL-схемы Ledger — [ledger-schema-review.md](ledger-schema-review.md). Первоисточник требований — [../PROJECT_SPEC.md](../PROJECT_SPEC.md).
 
 MVP работает с виртуальными деньгами: источник средств — симулятор, реальных карт и внешних провайдеров нет. Соответствие PCI DSS, банковским требованиям и KYC/AML не заявляется ([D-20](decisions.md#d-20)).
 
