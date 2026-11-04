@@ -177,18 +177,18 @@ func mapPostJournalError(err error) error {
 	}
 	switch pe.Code {
 	case "PC400":
-		return wrapDomain(err, ledger.ErrInvalidJournal, apperror.KindInvalid, pe.Message)
+		return wrapDomain(err, ledger.ErrInvalidJournal, apperror.KindInvalid)
 	case "PC402":
 		if pe.Message == "SYSTEM_ACCOUNT_INSUFFICIENT" {
-			return wrapDomain(err, ledger.ErrSystemAccountInsufficient, apperror.KindUnprocessable, pe.Message)
+			return wrapDomain(err, ledger.ErrSystemAccountInsufficient, apperror.KindUnprocessable)
 		}
-		return wrapDomain(err, ledger.ErrInsufficientFunds, apperror.KindUnprocessable, pe.Message)
+		return wrapDomain(err, ledger.ErrInsufficientFunds, apperror.KindUnprocessable)
 	case "PC403":
-		return wrapDomain(err, ledger.ErrAccountNotActive, apperror.KindUnprocessable, pe.Message)
+		return wrapDomain(err, ledger.ErrAccountNotActive, apperror.KindUnprocessable)
 	case "PC409":
-		return wrapDomain(err, ledger.ErrConflict, apperror.KindConflict, pe.Message)
+		return wrapDomain(err, ledger.ErrConflict, apperror.KindConflict)
 	case "PC460":
-		return wrapDomain(err, ledger.ErrLockProtocol, apperror.KindInternal, pe.Message)
+		return wrapDomain(err, ledger.ErrLockProtocol, apperror.KindInternal)
 	default:
 		// connect, serialization (40001), deadlock (40P01), lock_timeout, …
 		return fmt.Errorf("ledger post_journal: %w", err)
@@ -196,7 +196,8 @@ func mapPostJournalError(err error) error {
 }
 
 // wrapDomain keeps the ledger sentinel and PgError in the chain (%w), then
-// attaches HTTP Kind outside the domain package.
-func wrapDomain(cause error, sentinel *ledger.Error, kind apperror.Kind, message string) error {
-	return apperror.Wrap(fmt.Errorf("%w: %w", sentinel, cause), kind, sentinel.Code, message)
+// attaches HTTP Kind outside the domain package. The public Message is the
+// sentinel text; pe.Message stays on the wrapped cause for logs.
+func wrapDomain(cause error, sentinel *ledger.Error, kind apperror.Kind) error {
+	return apperror.Wrap(fmt.Errorf("%w: %w", sentinel, cause), kind, sentinel.Code, sentinel.Message)
 }

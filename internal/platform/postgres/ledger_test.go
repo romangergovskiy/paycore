@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,21 +94,48 @@ func TestMapPostJournalError(t *testing.T) {
 		t.Fatal("deadlock mapped to CONFLICT")
 	}
 
-	pc := mapPostJournalError(&pgconn.PgError{Code: "PC400", Message: "INVALID_JOURNAL: unbalanced"})
+	const sqlText = "INVALID_JOURNAL: unbalanced"
+	pc := mapPostJournalError(&pgconn.PgError{Code: "PC400", Message: sqlText})
 	if !errors.Is(pc, ledger.ErrInvalidJournal) {
 		t.Fatalf("PC400: %v", pc)
 	}
-	if !errors.As(pc, &pe) || pe.Code != "PC400" {
+	if !errors.As(pc, &pe) || pe.Code != "PC400" || pe.Message != sqlText {
 		t.Fatalf("PC400 lost PgError: %v", pc)
 	}
 	var ae *apperror.Error
 	if !errors.As(pc, &ae) || ae.Kind != apperror.KindInvalid || ae.Code != ledger.CodeInvalidJournal {
 		t.Fatalf("PC400 missing apperror conversion: %v", pc)
 	}
+	if ae.Message != ledger.ErrInvalidJournal.Message {
+		t.Fatalf("public Message = %q want %q", ae.Message, ledger.ErrInvalidJournal.Message)
+	}
+	if strings.Contains(ae.Message, sqlText) || strings.Contains(ae.Message, "unbalanced") {
+		t.Fatalf("SQL text leaked into Message: %q", ae.Message)
+	}
 
 	sys := mapPostJournalError(&pgconn.PgError{Code: "PC402", Message: "SYSTEM_ACCOUNT_INSUFFICIENT"})
 	if !errors.Is(sys, ledger.ErrSystemAccountInsufficient) || errors.Is(sys, ledger.ErrInsufficientFunds) {
 		t.Fatalf("system PC402: %v", sys)
+	}
+	if !errors.As(sys, &ae) || ae.Message != ledger.ErrSystemAccountInsufficient.Message {
+		t.Fatalf("system PC402 public Message = %v", sys)
+	}
+	if !errors.As(sys, &pe) || pe.Code != "PC402" {
+		t.Fatalf("system PC402 lost PgError: %v", sys)
+	}
+
+	funds := mapPostJournalError(&pgconn.PgError{Code: "PC402", Message: "INSUFFICIENT_FUNDS: available 0"})
+	if !errors.Is(funds, ledger.ErrInsufficientFunds) || errors.Is(funds, ledger.ErrSystemAccountInsufficient) {
+		t.Fatalf("funds PC402: %v", funds)
+	}
+	if !errors.As(funds, &ae) || ae.Message != ledger.ErrInsufficientFunds.Message {
+		t.Fatalf("funds PC402 public Message = %v", funds)
+	}
+	if strings.Contains(ae.Message, "available 0") {
+		t.Fatalf("SQL text leaked into funds Message: %q", ae.Message)
+	}
+	if !errors.As(funds, &pe) || pe.Code != "PC402" {
+		t.Fatalf("funds PC402 lost PgError: %v", funds)
 	}
 }
 
