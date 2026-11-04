@@ -30,6 +30,8 @@ func NewLedger(q queryer) *Ledger {
 }
 
 var _ ledger.Poster = (*Ledger)(nil)
+var _ ledger.AccountOpener = (*Ledger)(nil)
+var _ ledger.BalanceLocker = (*Ledger)(nil)
 
 // errEmptyJournal is returned when post_journal yields no SQL error and no rows.
 // That is an adapter contract failure, not a PC* domain error and not success.
@@ -165,15 +167,19 @@ func toHoldJSON(h *ledger.HoldAction) holdJSON {
 }
 
 func mapPostJournalError(err error) error {
+	return mapLedgerSQLError("post_journal", err)
+}
+
+func mapLedgerSQLError(op string, err error) error {
 	if err == nil {
 		return nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("ledger post_journal: %w", err)
+		return fmt.Errorf("ledger %s: %w", op, err)
 	}
 	var pe *pgconn.PgError
 	if !errors.As(err, &pe) {
-		return fmt.Errorf("ledger post_journal: %w", err)
+		return fmt.Errorf("ledger %s: %w", op, err)
 	}
 	switch pe.Code {
 	case "PC400":
@@ -191,7 +197,7 @@ func mapPostJournalError(err error) error {
 		return wrapDomain(err, ledger.ErrLockProtocol, apperror.KindInternal)
 	default:
 		// connect, serialization (40001), deadlock (40P01), lock_timeout, …
-		return fmt.Errorf("ledger post_journal: %w", err)
+		return fmt.Errorf("ledger %s: %w", op, err)
 	}
 }
 

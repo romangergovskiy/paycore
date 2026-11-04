@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/romangergovskiy/paycore/internal/ledger"
 )
 
 const (
@@ -1628,21 +1631,16 @@ func seedMerchant(t *testing.T, ctx context.Context, owner, app *pgx.Conn, ids *
 
 func openPair(t *testing.T, ctx context.Context, app *pgx.Conn, accountID, ownerType string) (avail, hold string) {
 	t.Helper()
-	rows, err := app.Query(ctx, `SELECT kind, ledger_account_id::text FROM ledger.open_ledger_accounts($1, $2, 'RUB')`, accountID, ownerType)
+	rows, err := NewLedger(app).Open(ctx, mustUUID(t, accountID), ledger.OwnerType(ownerType), "RUB")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var kind, id string
-		if err := rows.Scan(&kind, &id); err != nil {
-			t.Fatal(err)
-		}
-		switch kind {
-		case "AVAILABLE":
-			avail = id
-		case "HOLD":
-			hold = id
+	for _, r := range rows {
+		switch r.Kind {
+		case ledger.KindAvailable:
+			avail = r.ID.String()
+		case ledger.KindHold:
+			hold = r.ID.String()
 		}
 	}
 	if avail == "" || hold == "" {
@@ -1678,7 +1676,7 @@ func postJournal(ctx context.Context, conn *pgx.Conn, lockIDs []string, a postAr
 		if err := shareAccounts(ctx, tx, lockIDs...); err != nil {
 			return nil, err
 		}
-		if _, err := tx.Exec(ctx, `SELECT * FROM ledger.lock_account_balances($1::uuid[])`, lockIDs); err != nil {
+		if err := lockBalances(ctx, tx, lockIDs); err != nil {
 			return nil, err
 		}
 	}
@@ -1752,6 +1750,19 @@ func postJournal(ctx context.Context, conn *pgx.Conn, lockIDs []string, a postAr
 
 func shareAccounts(ctx context.Context, tx pgx.Tx, ids ...string) error {
 	_, err := tx.Exec(ctx, `SELECT id FROM accounts.accounts WHERE id = ANY($1) ORDER BY id FOR SHARE`, ids)
+	return err
+}
+
+func lockBalances(ctx context.Context, tx pgx.Tx, lockIDs []string) error {
+	ids := make([]uuid.UUID, len(lockIDs))
+	for i, s := range lockIDs {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			return err
+		}
+		ids[i] = id
+	}
+	_, err := NewLedger(tx).Lock(ctx, ids)
 	return err
 }
 
