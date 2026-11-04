@@ -224,11 +224,13 @@ HOLD_CAPTURE:  Дт A:2110              Кт MA:2200 (amount − fee) + Кт 420
 
 ## 11. Контракт проведения
 
-### 11.1. Go: `Ledger.Post` (концептуально)
+### 11.1. Go: `Validate` и `Poster.Post`
 
-1. Принимает `operation`, `reference_type/id`, проводки `(ledger_account, side, amount)`, опционально `adjustment_id` (заявка `manual_adjustments` для `REVERSAL` на `BLOCKED`) и действие над резервом (`PLACE` / `CAPTURE` / `RELEASE` / `EXPIRE` + `hold_id`, сумма, срок), описание, инициатора.
-2. Валидирует в домене те же правила, что и функция. Это нужно для понятных ошибок и unit-тестов без БД.
-3. Вызывает `ledger.post_journal` внутри транзакции use case (Unit of Work). Транзакцией владеет вызывающий use case.
+Две группы проверок. Домен **не** повторяет правила SQL.
+
+1. Принимает `Command`: `operation`, `reference_type/id`, проводки `(ledger_account, side, amount)`, опционально `adjustment_id` (заявка `manual_adjustments` для `REVERSAL` на `BLOCKED`) и действие над резервом (`PLACE` / `CAPTURE` / `RELEASE` / `EXPIRE` + `hold_id`, сумма, срок), описание, инициатора.
+2. **`ledger.Validate`** — структура команды, без состояния БД: обязательные поля; ≥ 2 проводок; стороны `DEBIT`/`CREDIT`; `0 < amount ≤ MAX`; формат валюты; уникальный `ledger_account_id`; \(\sum D = \sum C\) по каждой валюте; допустимые `operation` / `reference_type`; `hold_action` (наличие и поля). `WithValidation` запускает `Validate` **перед** `Poster.Post`. Unit-тесты этой группы не поднимают PostgreSQL.
+3. **`Poster.Post`** вызывает `ledger.post_journal` внутри транзакции use case (Unit of Work). Транзакцией владеет вызывающий. Функция проверяет счета, валюту счёта, формы операций, статусы, `holds`, остатки, блокировки и прочие DB-инварианты.
 4. Отображает SQLSTATE функции в доменные ошибки (§11.3).
 
 ### 11.2. SQL: `ledger.post_journal(...)` — `SECURITY DEFINER`

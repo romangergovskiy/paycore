@@ -51,8 +51,16 @@ func TestDomainDoesNotImportAppError(t *testing.T) {
 	for _, pkg := range pkgs {
 		for name, f := range pkg.Files {
 			for _, spec := range f.Imports {
-				if spec.Path.Value == `"github.com/romangergovskiy/paycore/internal/platform/apperror"` {
-					t.Fatalf("%s imports apperror", name)
+				path := spec.Path.Value
+				for _, banned := range []string{
+					`"github.com/romangergovskiy/paycore/internal/platform/apperror"`,
+					`"github.com/jackc/pgx/v5"`,
+					`"github.com/jackc/pgx/v5/pgconn"`,
+					`"net/http"`,
+				} {
+					if path == banned {
+						t.Fatalf("%s imports %s", name, path)
+					}
 				}
 			}
 		}

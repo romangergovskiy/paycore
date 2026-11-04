@@ -1,8 +1,8 @@
 // Package ledger is the domain contract for posting journals.
 //
-// It does not import pgx or HTTP. Accounting invariants live in
-// ledger.post_journal (SQL); this package only types the call and names
-// the SQLSTATE-mapped errors.
+// It does not import pgx or HTTP. Validate checks Command shape before
+// Poster.Post. Database invariants (accounts, forms, holds, statuses)
+// stay in ledger.post_journal.
 package ledger
 
 import (
