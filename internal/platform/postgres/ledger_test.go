@@ -355,7 +355,7 @@ func postLedger(ctx context.Context, conn *pgx.Conn, lockIDs []string, cmd ledge
 		if err := shareAccounts(ctx, tx, lockIDs...); err != nil {
 			return ledger.Result{}, err
 		}
-		if _, err := tx.Exec(ctx, `SELECT * FROM ledger.lock_account_balances($1::uuid[])`, lockIDs); err != nil {
+		if err := lockBalances(ctx, tx, lockIDs); err != nil {
 			return ledger.Result{}, err
 		}
 	}
