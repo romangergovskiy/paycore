@@ -98,7 +98,14 @@ func (s Service) ListByOwner(ctx context.Context, userID, merchantID *uuid.UUID)
 	if s.Store == nil {
 		return nil, errNotWired
 	}
-	return s.Store.ListByOwner(ctx, userID, merchantID)
+	list, err := s.Store.ListByOwner(ctx, userID, merchantID)
+	if err != nil {
+		return nil, err
+	}
+	if list == nil {
+		list = []domain.Account{}
+	}
+	return list, nil
 }
 
 func ledgerOwner(acc domain.Account) ledger.OwnerType {
