@@ -93,6 +93,67 @@ func TestAccountsStore(t *testing.T) {
 		}
 	})
 
+	t.Run("GetByNumber hit maps Account", func(t *testing.T) {
+		acc := customerAcc(t, userA, "PC-ST-N1")
+		acc.Name = "ByNumber"
+		if err := store.Create(ctx, acc); err != nil {
+			t.Fatal(err)
+		}
+		before, err := store.Get(ctx, acc.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var histBefore int
+		if err := app.QueryRow(ctx, `SELECT count(*) FROM accounts.account_status_history WHERE account_id = $1`, acc.ID).Scan(&histBefore); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.GetByNumber(ctx, acc.AccountNumber)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ID != before.ID || got.AccountNumber != before.AccountNumber || got.Status != before.Status {
+			t.Fatalf("got %+v want %+v", got, before)
+		}
+		if got.Name != "ByNumber" || got.Currency != money.RUB || got.Purpose != domain.PurposeMain {
+			t.Fatalf("mapped %+v", got)
+		}
+		if !domain.OwnerSet(got.UserID) || *got.UserID != userA || got.MerchantID != nil {
+			t.Fatalf("owner %+v", got)
+		}
+		after, err := store.Get(ctx, acc.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Version != before.Version || !after.UpdatedAt.Equal(before.UpdatedAt) {
+			t.Fatalf("write on read: before %+v after %+v", before, after)
+		}
+		var histAfter int
+		if err := app.QueryRow(ctx, `SELECT count(*) FROM accounts.account_status_history WHERE account_id = $1`, acc.ID).Scan(&histAfter); err != nil {
+			t.Fatal(err)
+		}
+		if histAfter != histBefore {
+			t.Fatalf("history wrote %d → %d", histBefore, histAfter)
+		}
+	})
+
+	t.Run("GetByNumber unknown and empty", func(t *testing.T) {
+		if _, err := store.GetByNumber(ctx, "PC-ST-NO-SUCH"); !errors.Is(err, domain.ErrAccountNotFound) {
+			t.Fatalf("unknown: %v", err)
+		}
+		if _, err := store.GetByNumber(ctx, ""); !errors.Is(err, domain.ErrInvalidAccount) {
+			t.Fatalf("empty: %v", err)
+		}
+	})
+
+	t.Run("GetByNumber canceled context", func(t *testing.T) {
+		dead, stop := context.WithCancel(ctx)
+		stop()
+		_, err := store.GetByNumber(dead, "PC-ST-N1")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v", err)
+		}
+	})
+
 	t.Run("ListByOwner isolation", func(t *testing.T) {
 		c1 := customerAcc(t, userA, "PC-ST-L-C1")
 		c2 := customerAcc(t, userA, "PC-ST-L-C2")

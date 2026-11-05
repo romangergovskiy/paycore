@@ -24,6 +24,7 @@ var (
 type Store interface {
 	Create(ctx context.Context, acc domain.Account) error
 	Get(ctx context.Context, id uuid.UUID) (domain.Account, error)
+	GetByNumber(ctx context.Context, number string) (domain.Account, error)
 	ListByOwner(ctx context.Context, userID, merchantID *uuid.UUID) ([]domain.Account, error)
 	GetForUpdate(ctx context.Context, id uuid.UUID) (domain.Account, error)
 	ApplyStatus(ctx context.Context, acc domain.Account) error
@@ -97,6 +98,16 @@ func (s Service) Get(ctx context.Context, id uuid.UUID) (domain.Account, error) 
 		return domain.Account{}, domain.ErrAccountNotFound
 	}
 	return s.Store.Get(ctx, id)
+}
+
+func (s Service) GetByNumber(ctx context.Context, number string) (domain.Account, error) {
+	if s.Store == nil {
+		return domain.Account{}, errNotWired
+	}
+	if number == "" {
+		return domain.Account{}, domain.ErrInvalidAccount
+	}
+	return s.Store.GetByNumber(ctx, number)
 }
 
 func (s Service) ListByOwner(ctx context.Context, userID, merchantID *uuid.UUID) ([]domain.Account, error) {
