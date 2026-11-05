@@ -30,7 +30,7 @@ func OpenIn(ctx context.Context, uow UnitOfWork, cmd domain.OpenCommand) (Opened
 	}
 	err := uow.Do(ctx, func(ctx context.Context, d Deps) error {
 		var err error
-		out, err = Service{Store: d.Store, Opener: d.Opener}.Open(ctx, cmd)
+		out, err = Service(d).Open(ctx, cmd)
 		return err
 	})
 	return out, err

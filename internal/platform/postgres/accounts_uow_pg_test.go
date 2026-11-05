@@ -78,7 +78,7 @@ func TestAccountUnitOfWork(t *testing.T) {
 		id := mustNewID(t)
 		forced := errors.New("forced after open")
 		err := uow.Do(ctx, func(ctx context.Context, d application.Deps) error {
-			_, err := application.Service{Store: d.Store, Opener: d.Opener}.Open(ctx, domain.OpenCommand{
+			_, err := application.Service(d).Open(ctx, domain.OpenCommand{
 				ID: id, AccountNumber: "PC-UOW-C", UserID: &user,
 				Purpose: domain.PurposeMain, Currency: money.RUB,
 			})
@@ -97,7 +97,7 @@ func TestAccountUnitOfWork(t *testing.T) {
 		id := mustNewID(t)
 		runCtx, stop := context.WithCancel(ctx)
 		err := uow.Do(runCtx, func(ctx context.Context, d application.Deps) error {
-			_, err := application.Service{Store: d.Store, Opener: d.Opener}.Open(ctx, domain.OpenCommand{
+			_, err := application.Service(d).Open(ctx, domain.OpenCommand{
 				ID: id, AccountNumber: "PC-UOW-D", UserID: &user,
 				Purpose: domain.PurposeMain, Currency: money.RUB,
 			})
@@ -116,7 +116,7 @@ func TestAccountUnitOfWork(t *testing.T) {
 	t.Run("E same Tx not only same pool", func(t *testing.T) {
 		id := mustNewID(t)
 		err := uow.Do(ctx, func(ctx context.Context, d application.Deps) error {
-			_, err := application.Service{Store: d.Store, Opener: d.Opener}.Open(ctx, domain.OpenCommand{
+			_, err := application.Service(d).Open(ctx, domain.OpenCommand{
 				ID: id, AccountNumber: "PC-UOW-E", UserID: &user,
 				Purpose: domain.PurposeMain, Currency: money.RUB,
 			})
