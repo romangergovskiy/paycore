@@ -17,8 +17,8 @@ import (
 )
 
 // execQueryer is satisfied by *pgxpool.Pool, pgx.Tx, and *pgx.Conn.
-// Accounts does not Begin: Unit of Work (or a test) owns the transaction so Create
-// and ledger.AccountOpener.Open can share one Tx.
+// Accounts does not Begin: Unit of Work (or a test) owns the transaction so
+// Create, status changes, and ledger adapters share one Tx.
 type execQueryer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -65,6 +65,18 @@ SELECT id, account_number, user_id, merchant_id, account_purpose,
  WHERE merchant_id = $1 AND user_id IS NULL
  ORDER BY created_at ASC, id ASC`
 
+const selectAccountForUpdateSQL = selectAccountSQL + ` FOR NO KEY UPDATE`
+
+const applyStatusSQL = `
+UPDATE accounts.accounts
+   SET status = $2, version = $3, updated_at = now(), closed_at = $4
+ WHERE id = $1`
+
+const insertStatusHistorySQL = `
+INSERT INTO accounts.account_status_history (
+  id, account_id, from_status, to_status, reason, changed_by
+) VALUES ($1, $2, $3, $4, $5, $6)`
+
 func (a *Accounts) Create(ctx context.Context, acc domain.Account) error {
 	if acc.ID == uuid.Nil {
 		return domain.ErrInvalidAccount
@@ -99,6 +111,44 @@ func (a *Accounts) Get(ctx context.Context, id uuid.UUID) (domain.Account, error
 		return domain.Account{}, mapAccountSQLError("get", err)
 	}
 	return acc, nil
+}
+
+func (a *Accounts) GetForUpdate(ctx context.Context, id uuid.UUID) (domain.Account, error) {
+	if id == uuid.Nil {
+		return domain.Account{}, domain.ErrAccountNotFound
+	}
+	acc, err := scanAccount(a.q.QueryRow(ctx, selectAccountForUpdateSQL, id))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Account{}, domain.ErrAccountNotFound
+		}
+		return domain.Account{}, mapAccountSQLError("get_for_update", err)
+	}
+	return acc, nil
+}
+
+func (a *Accounts) ApplyStatus(ctx context.Context, acc domain.Account) error {
+	if acc.ID == uuid.Nil {
+		return domain.ErrAccountNotFound
+	}
+	tag, err := a.q.Exec(ctx, applyStatusSQL, acc.ID, string(acc.Status), acc.Version, acc.ClosedAt)
+	if err != nil {
+		return mapAccountSQLError("apply_status", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrAccountNotFound
+	}
+	return nil
+}
+
+func (a *Accounts) AppendHistory(ctx context.Context, h domain.StatusHistory) error {
+	_, err := a.q.Exec(ctx, insertStatusHistorySQL,
+		h.ID, h.AccountID, string(h.From), string(h.To), h.Reason, h.ChangedBy,
+	)
+	if err != nil {
+		return mapAccountSQLError("append_history", err)
+	}
+	return nil
 }
 
 func (a *Accounts) ListByOwner(ctx context.Context, userID, merchantID *uuid.UUID) ([]domain.Account, error) {

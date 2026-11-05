@@ -22,7 +22,7 @@ type accountUoW struct {
 }
 
 // NewAccountUoW owns Begin/Commit/Rollback for Accounts writes.
-// Each Do starts one Tx and builds Accounts Store + Ledger opener on it.
+// Each Do starts one Tx and builds Accounts Store + Ledger (opener and locker) on it.
 func NewAccountUoW(db beginner) application.UnitOfWork {
 	return accountUoW{db: db}
 }
@@ -40,9 +40,11 @@ func (u accountUoW) Do(ctx context.Context, fn func(context.Context, application
 		return fmt.Errorf("accounts tx begin: %w", err)
 	}
 	return runTx(ctx, tx, func() error {
+		lg := NewLedger(tx)
 		return fn(ctx, application.Deps{
 			Store:  NewAccounts(tx),
-			Opener: NewLedger(tx),
+			Opener: lg,
+			Locker: lg,
 		})
 	})
 }

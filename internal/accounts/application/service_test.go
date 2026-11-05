@@ -251,8 +251,13 @@ func (s *stubOpener) Open(_ context.Context, accountID uuid.UUID, owner ledger.O
 }
 
 type memStore struct {
-	mu   sync.Mutex
-	byID map[uuid.UUID]domain.Account
+	mu          sync.Mutex
+	byID        map[uuid.UUID]domain.Account
+	history     []domain.StatusHistory
+	applyCalls  int
+	appendCalls int
+	appendErr   error
+	lastHistory domain.StatusHistory
 }
 
 func newMem() *memStore {
@@ -283,6 +288,33 @@ func (m *memStore) Get(_ context.Context, id uuid.UUID) (domain.Account, error) 
 		return domain.Account{}, domain.ErrAccountNotFound
 	}
 	return acc, nil
+}
+
+func (m *memStore) GetForUpdate(ctx context.Context, id uuid.UUID) (domain.Account, error) {
+	return m.Get(ctx, id)
+}
+
+func (m *memStore) ApplyStatus(_ context.Context, acc domain.Account) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.applyCalls++
+	if _, ok := m.byID[acc.ID]; !ok {
+		return domain.ErrAccountNotFound
+	}
+	m.byID[acc.ID] = acc
+	return nil
+}
+
+func (m *memStore) AppendHistory(_ context.Context, h domain.StatusHistory) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.appendCalls++
+	m.lastHistory = h
+	if m.appendErr != nil {
+		return m.appendErr
+	}
+	m.history = append(m.history, h)
+	return nil
 }
 
 func (m *memStore) ListByOwner(_ context.Context, userID, merchantID *uuid.UUID) ([]domain.Account, error) {
