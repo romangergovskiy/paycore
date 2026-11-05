@@ -133,6 +133,50 @@ func TestValidateOpen(t *testing.T) {
 	}
 }
 
+func TestValidateStatusCommand(t *testing.T) {
+	actor := uuid.MustParse("dddddddd-dddd-4ddd-8ddd-000000000001")
+	id := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000009")
+	ok := StatusCommand{ID: id, Reason: "review", ChangedBy: actor}
+	if err := ValidateStatusCommand(ok); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateStatusCommand(StatusCommand{ID: id, ChangedBy: actor}); !errors.Is(err, ErrInvalidAccount) {
+		t.Fatalf("empty reason: %v", err)
+	}
+	if err := ValidateStatusCommand(StatusCommand{ID: id, Reason: "review"}); !errors.Is(err, ErrInvalidAccount) {
+		t.Fatalf("nil actor: %v", err)
+	}
+}
+
+func TestValidateTransition(t *testing.T) {
+	tests := []struct {
+		from, to Status
+		want     error
+	}{
+		{StatusActive, StatusBlocked, nil},
+		{StatusBlocked, StatusActive, nil},
+		{StatusActive, StatusClosed, nil},
+		{StatusBlocked, StatusClosed, nil},
+		{StatusActive, StatusActive, ErrInvalidState},
+		{StatusBlocked, StatusBlocked, ErrInvalidState},
+		{StatusClosed, StatusActive, ErrInvalidState},
+		{StatusClosed, StatusBlocked, ErrInvalidState},
+		{StatusClosed, StatusClosed, ErrInvalidState},
+	}
+	for _, tc := range tests {
+		err := ValidateTransition(tc.from, tc.to)
+		if tc.want == nil {
+			if err != nil {
+				t.Fatalf("%s→%s: %v", tc.from, tc.to, err)
+			}
+			continue
+		}
+		if !errors.Is(err, tc.want) {
+			t.Fatalf("%s→%s got %v want %v", tc.from, tc.to, err, tc.want)
+		}
+	}
+}
+
 func TestStatusConstants(t *testing.T) {
 	for _, st := range []Status{StatusActive, StatusBlocked, StatusClosed} {
 		if st == "" {

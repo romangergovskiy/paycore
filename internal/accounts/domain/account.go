@@ -61,3 +61,21 @@ type OpenCommand struct {
 func OwnerSet(id *uuid.UUID) bool {
 	return id != nil && *id != uuid.Nil
 }
+
+// StatusCommand is Block, Unblock, or Close. ChangedBy is required (uuid.Nil
+// is missing); it is stored as-is and is not generated or replaced.
+type StatusCommand struct {
+	ID        uuid.UUID
+	Reason    string
+	ChangedBy uuid.UUID
+}
+
+// StatusHistory is one row of accounts.account_status_history.
+type StatusHistory struct {
+	ID        uuid.UUID
+	AccountID uuid.UUID
+	From      Status
+	To        Status
+	Reason    string
+	ChangedBy uuid.UUID
+}

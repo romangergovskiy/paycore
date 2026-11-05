@@ -5,6 +5,8 @@ const (
 	CodeInvalidAccount       = "INVALID_ACCOUNT"
 	CodeCurrencyNotSupported = "CURRENCY_NOT_SUPPORTED"
 	CodeAccountNotFound      = "ACCOUNT_NOT_FOUND"
+	CodeInvalidState         = "INVALID_STATE"
+	CodeAccountNotEmpty      = "ACCOUNT_NOT_EMPTY"
 )
 
 type Error struct {
@@ -30,4 +32,6 @@ var (
 		Code: CodeCurrencyNotSupported, Message: "Currency is not supported.",
 	}
 	ErrAccountNotFound = &Error{Code: CodeAccountNotFound, Message: "Account was not found."}
+	ErrInvalidState    = &Error{Code: CodeInvalidState, Message: "Account status cannot change."}
+	ErrAccountNotEmpty = &Error{Code: CodeAccountNotEmpty, Message: "Account is not empty."}
 )

@@ -6,6 +6,7 @@ package application
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -13,7 +14,10 @@ import (
 	"github.com/romangergovskiy/paycore/internal/ledger"
 )
 
-var errNotWired = errors.New("accounts: store and opener are required")
+var (
+	errNotWired      = errors.New("accounts: store and opener are required")
+	errCloseSnapshot = errors.New("accounts: close requires one balance snapshot for the account")
+)
 
 // Store persists business accounts. The implementation must not Begin
 // and must not write ledger tables (use AccountOpener).
@@ -21,11 +25,15 @@ type Store interface {
 	Create(ctx context.Context, acc domain.Account) error
 	Get(ctx context.Context, id uuid.UUID) (domain.Account, error)
 	ListByOwner(ctx context.Context, userID, merchantID *uuid.UUID) ([]domain.Account, error)
+	GetForUpdate(ctx context.Context, id uuid.UUID) (domain.Account, error)
+	ApplyStatus(ctx context.Context, acc domain.Account) error
+	AppendHistory(ctx context.Context, h domain.StatusHistory) error
 }
 
 type Service struct {
 	Store  Store
 	Opener ledger.AccountOpener
+	Locker ledger.BalanceLocker
 }
 
 type Opened struct {
@@ -106,6 +114,84 @@ func (s Service) ListByOwner(ctx context.Context, userID, merchantID *uuid.UUID)
 		list = []domain.Account{}
 	}
 	return list, nil
+}
+
+func (s Service) Block(ctx context.Context, cmd domain.StatusCommand) (domain.Account, error) {
+	return s.changeStatus(ctx, cmd, domain.StatusBlocked)
+}
+
+func (s Service) Unblock(ctx context.Context, cmd domain.StatusCommand) (domain.Account, error) {
+	return s.changeStatus(ctx, cmd, domain.StatusActive)
+}
+
+func (s Service) Close(ctx context.Context, cmd domain.StatusCommand) (domain.Account, error) {
+	return s.changeStatus(ctx, cmd, domain.StatusClosed)
+}
+
+func (s Service) changeStatus(ctx context.Context, cmd domain.StatusCommand, to domain.Status) (domain.Account, error) {
+	var zero domain.Account
+	if err := domain.ValidateStatusCommand(cmd); err != nil {
+		return zero, err
+	}
+	if s.Store == nil {
+		return zero, errNotWired
+	}
+
+	acc, err := s.Store.GetForUpdate(ctx, cmd.ID)
+	if err != nil {
+		return zero, err
+	}
+	if err := domain.ValidateTransition(acc.Status, to); err != nil {
+		return zero, err
+	}
+
+	if to == domain.StatusClosed {
+		if s.Locker == nil {
+			return zero, errNotWired
+		}
+		snaps, err := s.Locker.Lock(ctx, []uuid.UUID{acc.ID})
+		if err != nil {
+			return zero, err
+		}
+		if err := requireEmptySnapshot(acc.ID, snaps); err != nil {
+			return zero, err
+		}
+		now := time.Now().UTC()
+		acc.ClosedAt = &now
+	}
+
+	from := acc.Status
+	acc.Status = to
+	acc.Version++
+	if err := s.Store.ApplyStatus(ctx, acc); err != nil {
+		return zero, err
+	}
+
+	hid, err := uuid.NewV7()
+	if err != nil {
+		return zero, err
+	}
+	if err := s.Store.AppendHistory(ctx, domain.StatusHistory{
+		ID:        hid,
+		AccountID: acc.ID,
+		From:      from,
+		To:        to,
+		Reason:    cmd.Reason,
+		ChangedBy: cmd.ChangedBy,
+	}); err != nil {
+		return zero, err
+	}
+	return acc, nil
+}
+
+func requireEmptySnapshot(id uuid.UUID, snaps []ledger.BalanceSnapshot) error {
+	if len(snaps) != 1 || snaps[0].AccountID != id {
+		return errCloseSnapshot
+	}
+	if snaps[0].Available != 0 || snaps[0].Reserved != 0 {
+		return domain.ErrAccountNotEmpty
+	}
+	return nil
 }
 
 func ledgerOwner(acc domain.Account) ledger.OwnerType {

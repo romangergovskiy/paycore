@@ -70,9 +70,77 @@ func TestOpenInCanceledBeforeDo(t *testing.T) {
 	}
 }
 
+func TestBlockInCommits(t *testing.T) {
+	st := seededActive()
+	id := firstID(st)
+	actor := uuid.MustParse("dddddddd-dddd-4ddd-8ddd-000000000001")
+	uow := &fakeUoW{store: st, locker: panicLocker{}}
+	got, err := BlockIn(context.Background(), uow, domain.StatusCommand{ID: id, Reason: "aml", ChangedBy: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusBlocked || !uow.committed || uow.rolled {
+		t.Fatalf("got %+v commit=%v rollback=%v", got, uow.committed, uow.rolled)
+	}
+}
+
+func TestCloseInEmptyCommits(t *testing.T) {
+	st := seededActive()
+	id := firstID(st)
+	actor := uuid.MustParse("dddddddd-dddd-4ddd-8ddd-000000000001")
+	uow := &fakeUoW{
+		store:  st,
+		locker: &stubLocker{snaps: []ledger.BalanceSnapshot{{AccountID: id}}},
+	}
+	got, err := CloseIn(context.Background(), uow, domain.StatusCommand{ID: id, Reason: "done", ChangedBy: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusClosed || !uow.committed {
+		t.Fatalf("got %+v commit=%v", got, uow.committed)
+	}
+}
+
+func TestCloseInNotEmptyRollsBack(t *testing.T) {
+	st := seededActive()
+	id := firstID(st)
+	actor := uuid.MustParse("dddddddd-dddd-4ddd-8ddd-000000000001")
+	uow := &fakeUoW{
+		store:  st,
+		locker: &stubLocker{snaps: []ledger.BalanceSnapshot{{AccountID: id, Available: 5}}},
+	}
+	_, err := CloseIn(context.Background(), uow, domain.StatusCommand{ID: id, Reason: "done", ChangedBy: actor})
+	if !errors.Is(err, domain.ErrAccountNotEmpty) {
+		t.Fatalf("got %v", err)
+	}
+	if uow.committed || !uow.rolled || st.applyCalls != 0 || st.appendCalls != 0 {
+		t.Fatalf("commit=%v rollback=%v apply=%d append=%d", uow.committed, uow.rolled, st.applyCalls, st.appendCalls)
+	}
+}
+
+func TestCloseInAppendHistoryRollsBack(t *testing.T) {
+	st := seededActive()
+	want := errors.New("history insert failed")
+	st.appendErr = want
+	id := firstID(st)
+	actor := uuid.MustParse("dddddddd-dddd-4ddd-8ddd-000000000001")
+	uow := &fakeUoW{
+		store:  st,
+		locker: &stubLocker{snaps: []ledger.BalanceSnapshot{{AccountID: id}}},
+	}
+	_, err := CloseIn(context.Background(), uow, domain.StatusCommand{ID: id, Reason: "done", ChangedBy: actor})
+	if !errors.Is(err, want) {
+		t.Fatalf("got %v", err)
+	}
+	if uow.committed || !uow.rolled {
+		t.Fatalf("commit=%v rollback=%v", uow.committed, uow.rolled)
+	}
+}
+
 type fakeUoW struct {
 	store     Store
 	opener    ledger.AccountOpener
+	locker    ledger.BalanceLocker
 	committed bool
 	rolled    bool
 	calls     int
@@ -83,7 +151,7 @@ func (f *fakeUoW) Do(ctx context.Context, fn func(context.Context, Deps) error) 
 		return err
 	}
 	f.calls++
-	err := fn(ctx, Deps{Store: f.store, Opener: f.opener})
+	err := fn(ctx, Deps{Store: f.store, Opener: f.opener, Locker: f.locker})
 	if err != nil {
 		f.rolled = true
 		return err
