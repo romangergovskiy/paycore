@@ -50,21 +50,23 @@ type txFinisher interface {
 
 func finishTx(ctx context.Context, tx txFinisher, runErr error) error {
 	if runErr != nil {
-		if rbErr := tx.Rollback(ctx); rbErr != nil && !txDone(rbErr) {
-			return errors.Join(runErr, fmt.Errorf("accounts tx rollback: %w", rbErr))
-		}
-		return runErr
+		return rollbackTx(ctx, tx, runErr)
 	}
 	if err := ctx.Err(); err != nil {
-		if rbErr := tx.Rollback(ctx); rbErr != nil && !txDone(rbErr) {
-			return errors.Join(err, fmt.Errorf("accounts tx rollback: %w", rbErr))
-		}
-		return err
+		return rollbackTx(ctx, tx, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("accounts tx commit: %w", err)
 	}
 	return nil
+}
+
+func rollbackTx(ctx context.Context, tx txFinisher, cause error) error {
+	// Do not Rollback with a canceled/expired ctx: pgx can then mark the conn closed.
+	if rbErr := tx.Rollback(context.WithoutCancel(ctx)); rbErr != nil && !txDone(rbErr) {
+		return errors.Join(cause, fmt.Errorf("accounts tx rollback: %w", rbErr))
+	}
+	return cause
 }
 
 func txDone(err error) bool {

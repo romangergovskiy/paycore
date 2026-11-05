@@ -52,6 +52,9 @@ func TestFinishTxCanceledAfterSuccessRollsBack(t *testing.T) {
 	if tx.commits != 0 || tx.rollbacks != 1 {
 		t.Fatalf("commit=%d rollback=%d", tx.commits, tx.rollbacks)
 	}
+	if tx.rollbackCtx.Err() != nil {
+		t.Fatal("rollback used canceled context")
+	}
 }
 
 func TestFinishTxCommitError(t *testing.T) {
@@ -70,6 +73,7 @@ type fakeFinisher struct {
 	commits, rollbacks int
 	commitErr          error
 	rollbackErr        error
+	rollbackCtx        context.Context
 }
 
 func (f *fakeFinisher) Commit(context.Context) error {
@@ -77,7 +81,8 @@ func (f *fakeFinisher) Commit(context.Context) error {
 	return f.commitErr
 }
 
-func (f *fakeFinisher) Rollback(context.Context) error {
+func (f *fakeFinisher) Rollback(ctx context.Context) error {
 	f.rollbacks++
+	f.rollbackCtx = ctx
 	return f.rollbackErr
 }
