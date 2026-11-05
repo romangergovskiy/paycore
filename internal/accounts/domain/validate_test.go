@@ -137,14 +137,30 @@ func TestValidateStatusCommand(t *testing.T) {
 	actor := uuid.MustParse("dddddddd-dddd-4ddd-8ddd-000000000001")
 	id := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000009")
 	ok := StatusCommand{ID: id, Reason: "review", ChangedBy: actor}
-	if err := ValidateStatusCommand(ok); err != nil {
-		t.Fatal(err)
+
+	tests := []struct {
+		name string
+		cmd  StatusCommand
+		want error
+	}{
+		{name: "fully valid", cmd: ok},
+		{name: "nil ID", cmd: StatusCommand{Reason: "review", ChangedBy: actor}, want: ErrInvalidAccount},
+		{name: "valid ID empty Reason", cmd: StatusCommand{ID: id, ChangedBy: actor}, want: ErrInvalidAccount},
+		{name: "valid ID+Reason nil ChangedBy", cmd: StatusCommand{ID: id, Reason: "review"}, want: ErrInvalidAccount},
 	}
-	if err := ValidateStatusCommand(StatusCommand{ID: id, ChangedBy: actor}); !errors.Is(err, ErrInvalidAccount) {
-		t.Fatalf("empty reason: %v", err)
-	}
-	if err := ValidateStatusCommand(StatusCommand{ID: id, Reason: "review"}); !errors.Is(err, ErrInvalidAccount) {
-		t.Fatalf("nil actor: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateStatusCommand(tc.cmd)
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("ValidateStatusCommand: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("got %v want %v", err, tc.want)
+			}
+		})
 	}
 }
 

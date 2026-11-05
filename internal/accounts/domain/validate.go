@@ -30,9 +30,9 @@ func ValidateOwner(userID, merchantID *uuid.UUID) error {
 	return nil
 }
 
-// ValidateStatusCommand requires a non-empty reason and a real ChangedBy.
+// ValidateStatusCommand requires a real account ID, a non-empty reason, and a real ChangedBy.
 func ValidateStatusCommand(cmd StatusCommand) error {
-	if cmd.Reason == "" || cmd.ChangedBy == uuid.Nil {
+	if cmd.ID == uuid.Nil || cmd.Reason == "" || cmd.ChangedBy == uuid.Nil {
 		return ErrInvalidAccount
 	}
 	return nil
