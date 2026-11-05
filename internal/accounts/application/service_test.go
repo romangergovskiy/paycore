@@ -286,9 +286,12 @@ func (m *memStore) Get(_ context.Context, id uuid.UUID) (domain.Account, error) 
 }
 
 func (m *memStore) ListByOwner(_ context.Context, userID, merchantID *uuid.UUID) ([]domain.Account, error) {
+	if err := domain.ValidateOwner(userID, merchantID); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var out []domain.Account
+	out := make([]domain.Account, 0)
 	for _, acc := range m.byID {
 		if domain.OwnerSet(userID) && domain.OwnerSet(acc.UserID) && *acc.UserID == *userID {
 			out = append(out, acc)

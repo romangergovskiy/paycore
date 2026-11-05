@@ -2,7 +2,7 @@
 
 Демонстрационная платёжная инфраструктура с double-entry ledger: Go, PostgreSQL, модульный монолит. Деньги виртуальные, соответствие PCI DSS и банковским требованиям не заявляется.
 
-Статус: **этап 3.10 — домен Accounts и use case open/get/list**. Persistence-адаптер PostgreSQL — следующий этап. Payments, Transfers и HTTP money ещё не реализованы.
+Статус: **этап 3.11 — PostgreSQL Store для Accounts**. Payments, Transfers и HTTP money ещё не реализованы.
 
 ## Документация
 
@@ -51,7 +51,7 @@ internal/platform/
   logging/                log/slog
   apperror/               ошибки приложения и JSON-формат ошибок API
   httpserver/             HTTP-сервер, middleware, health
-  postgres/               пул pgx, bootstrap, миграции, вызов post_journal
+  postgres/               пул pgx, bootstrap, миграции, ledger и accounts Store
 migrations/               SQL Goose (platform, accounts, ledger, функции)
 docs/                     проектная документация
 ```
