@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -28,6 +29,8 @@ func NewAccountUoW(db beginner) application.UnitOfWork {
 
 var _ application.UnitOfWork = accountUoW{}
 
+const txCleanupTimeout = 5 * time.Second
+
 func (u accountUoW) Do(ctx context.Context, fn func(context.Context, application.Deps) error) error {
 	if fn == nil {
 		return errors.New("accounts: unit of work callback is required")
@@ -36,16 +39,30 @@ func (u accountUoW) Do(ctx context.Context, fn func(context.Context, application
 	if err != nil {
 		return fmt.Errorf("accounts tx begin: %w", err)
 	}
-	runErr := fn(ctx, application.Deps{
-		Store:  NewAccounts(tx),
-		Opener: NewLedger(tx),
+	return runTx(ctx, tx, func() error {
+		return fn(ctx, application.Deps{
+			Store:  NewAccounts(tx),
+			Opener: NewLedger(tx),
+		})
 	})
-	return finishTx(ctx, tx, runErr)
 }
 
 type txFinisher interface {
 	Commit(ctx context.Context) error
 	Rollback(ctx context.Context) error
+}
+
+func runTx(ctx context.Context, tx txFinisher, fn func() error) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			func() {
+				defer func() { _ = recover() }()
+				_ = rollbackCleanup(ctx, tx)
+			}()
+			panic(rec)
+		}
+	}()
+	return finishTx(ctx, tx, fn())
 }
 
 func finishTx(ctx context.Context, tx txFinisher, runErr error) error {
@@ -62,11 +79,23 @@ func finishTx(ctx context.Context, tx txFinisher, runErr error) error {
 }
 
 func rollbackTx(ctx context.Context, tx txFinisher, cause error) error {
-	// Do not Rollback with a canceled/expired ctx: pgx can then mark the conn closed.
-	if rbErr := tx.Rollback(context.WithoutCancel(ctx)); rbErr != nil && !txDone(rbErr) {
+	if rbErr := rollbackCleanup(ctx, tx); rbErr != nil {
 		return errors.Join(cause, fmt.Errorf("accounts tx rollback: %w", rbErr))
 	}
 	return cause
+}
+
+func rollbackCleanup(ctx context.Context, tx txFinisher) error {
+	cctx, cancel := cleanupCtx(ctx)
+	defer cancel()
+	if rbErr := tx.Rollback(cctx); rbErr != nil && !txDone(rbErr) {
+		return rbErr
+	}
+	return nil
+}
+
+func cleanupCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), txCleanupTimeout)
 }
 
 func txDone(err error) bool {
