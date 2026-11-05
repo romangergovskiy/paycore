@@ -17,7 +17,7 @@ import (
 )
 
 // execQueryer is satisfied by *pgxpool.Pool, pgx.Tx, and *pgx.Conn.
-// Accounts does not Begin: the caller owns the transaction so Create
+// Accounts does not Begin: Unit of Work (or a test) owns the transaction so Create
 // and ledger.AccountOpener.Open can share one Tx.
 type execQueryer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)

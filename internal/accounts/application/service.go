@@ -1,6 +1,6 @@
-// Package application is Accounts use cases. Persistence is a Store port;
-// there is no accounts SQL gateway yet. The postgres adapter is the next stage.
-// Caller owns the transaction so Store.Create and AccountOpener.Open are atomic.
+// Package application is Accounts use cases. Store and AccountOpener must
+// not Begin. Writes that need both ports run inside UnitOfWork.Do so
+// infrastructure owns Begin/Commit/Rollback.
 package application
 
 import (
