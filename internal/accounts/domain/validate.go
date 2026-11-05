@@ -1,0 +1,47 @@
+package domain
+
+import (
+	"github.com/google/uuid"
+
+	"github.com/romangergovskiy/paycore/pkg/money"
+)
+
+// ValidateOpen checks OpenCommand shape without database state.
+// MVP product opens only RUB (D-30); pkg/money still accepts other ISO codes.
+func ValidateOpen(cmd OpenCommand) error {
+	if _, err := money.FromMinor(0, cmd.Currency); err != nil {
+		return err
+	}
+	if cmd.Currency != money.RUB {
+		return ErrCurrencyNotSupported
+	}
+	if cmd.AccountNumber == "" {
+		return ErrInvalidAccount
+	}
+	return validateOwnerPurpose(cmd.UserID, cmd.MerchantID, cmd.Purpose)
+}
+
+// ValidateOwner requires exactly one of user_id / merchant_id (SQL CHECK).
+func ValidateOwner(userID, merchantID *uuid.UUID) error {
+	u, m := OwnerSet(userID), OwnerSet(merchantID)
+	if u == m {
+		return ErrInvalidAccount
+	}
+	return nil
+}
+
+func validateOwnerPurpose(userID, merchantID *uuid.UUID, purpose Purpose) error {
+	if err := ValidateOwner(userID, merchantID); err != nil {
+		return err
+	}
+	if OwnerSet(merchantID) {
+		if purpose != PurposeMerchantSettlement {
+			return ErrInvalidAccount
+		}
+		return nil
+	}
+	if purpose != PurposeMain && purpose != PurposeSavings {
+		return ErrInvalidAccount
+	}
+	return nil
+}
