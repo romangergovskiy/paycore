@@ -2,7 +2,7 @@
 
 Демонстрационная платёжная инфраструктура с double-entry ledger: Go, PostgreSQL, модульный монолит. Деньги виртуальные, соответствие PCI DSS и банковским требованиям не заявляется.
 
-Статус: **этап 3.8 — типизированный Go-вызов `open_ledger_accounts` и `lock_account_balances`**. Payments, Transfers и HTTP money ещё не реализованы.
+Статус: **этап 3.9 — `pkg/money` (int64, минорные единицы, без float)**. Payments, Transfers и HTTP money ещё не реализованы.
 
 ## Документация
 
@@ -43,6 +43,7 @@ make migrate-status
 cmd/api/                  HTTP API
 cmd/migrate/              bootstrap ролей и Goose
 internal/app/             сборка зависимостей и жизненный цикл
+pkg/money/                суммы в минорных единицах (int64 + валюта, без float)
 internal/ledger/          доменный контракт Poster, Validate, Open/Lock (без pgx/HTTP)
 internal/platform/
   config/                 PAYCORE_* из окружения

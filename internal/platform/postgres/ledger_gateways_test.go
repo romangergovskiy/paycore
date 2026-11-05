@@ -187,9 +187,28 @@ func TestLedgerAccountAPI(t *testing.T) {
 		if !errors.As(err, &pe) || isPaycoreSQLState(pe.Code) {
 			t.Fatalf("readonly want grant error, got %v", err)
 		}
+
+		// Lock may abort the session transaction (25P02). Open must see
+		// insufficient_privilege, not PC400 from a function that ran, and
+		// not the aborted-tx error.
+		if _, err := ro.Exec(ctx, `ROLLBACK`); err != nil {
+			t.Fatalf("rollback after readonly Lock: %v", err)
+		}
 		_, err = NewLedger(ro).Open(ctx, mustUUID(t, cust.accountID), ledger.OwnerCustomer, "RUB")
 		if err == nil {
 			t.Fatal("readonly Open succeeded")
+		}
+		if !errors.As(err, &pe) {
+			t.Fatalf("readonly Open missing PgError: %v", err)
+		}
+		if pe.Code == "25P02" {
+			t.Fatal("readonly Open saw aborted transaction")
+		}
+		if pe.Code == "PC400" || isPaycoreSQLState(pe.Code) {
+			t.Fatalf("readonly Open must not run the function, got %s %v", pe.Code, err)
+		}
+		if pe.Code != "42501" {
+			t.Fatalf("readonly Open want 42501, got %s %v", pe.Code, err)
 		}
 	})
 }
