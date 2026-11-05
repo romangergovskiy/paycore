@@ -65,6 +65,12 @@ SELECT id, account_number, user_id, merchant_id, account_purpose,
  WHERE merchant_id = $1 AND user_id IS NULL
  ORDER BY created_at ASC, id ASC`
 
+const selectAccountByNumberSQL = `
+SELECT id, account_number, user_id, merchant_id, account_purpose,
+       rtrim(currency::text), status, name, version, created_at, updated_at, closed_at
+  FROM accounts.accounts
+ WHERE account_number = $1`
+
 const selectAccountForUpdateSQL = selectAccountSQL + ` FOR NO KEY UPDATE`
 
 const applyStatusSQL = `
@@ -109,6 +115,20 @@ func (a *Accounts) Get(ctx context.Context, id uuid.UUID) (domain.Account, error
 			return domain.Account{}, domain.ErrAccountNotFound
 		}
 		return domain.Account{}, mapAccountSQLError("get", err)
+	}
+	return acc, nil
+}
+
+func (a *Accounts) GetByNumber(ctx context.Context, number string) (domain.Account, error) {
+	if number == "" {
+		return domain.Account{}, domain.ErrInvalidAccount
+	}
+	acc, err := scanAccount(a.q.QueryRow(ctx, selectAccountByNumberSQL, number))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Account{}, domain.ErrAccountNotFound
+		}
+		return domain.Account{}, mapAccountSQLError("get_by_number", err)
 	}
 	return acc, nil
 }

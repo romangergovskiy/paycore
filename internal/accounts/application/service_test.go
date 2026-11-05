@@ -201,6 +201,56 @@ func TestOpenOpenerError(t *testing.T) {
 	}
 }
 
+func TestGetByNumber(t *testing.T) {
+	ctx := context.Background()
+	user := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+	st := newMem()
+	svc := Service{Store: st, Opener: &stubOpener{}}
+	opened, err := svc.Open(ctx, domain.OpenCommand{
+		AccountNumber: "PC-NUM-1", UserID: &user, Purpose: domain.PurposeMain, Currency: money.RUB,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := svc.GetByNumber(ctx, "PC-NUM-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != opened.Account.ID || got.AccountNumber != "PC-NUM-1" || got.Status != domain.StatusActive {
+		t.Fatalf("hit %+v", got)
+	}
+	if !domain.OwnerSet(got.UserID) || *got.UserID != user || got.MerchantID != nil {
+		t.Fatalf("owner %+v", got)
+	}
+	if got.Currency != money.RUB || got.Purpose != domain.PurposeMain {
+		t.Fatalf("mapped %+v", got)
+	}
+
+	if _, err := svc.GetByNumber(ctx, "PC-UNKNOWN"); !errors.Is(err, domain.ErrAccountNotFound) {
+		t.Fatalf("unknown: %v", err)
+	}
+	if _, err := svc.GetByNumber(ctx, ""); !errors.Is(err, domain.ErrInvalidAccount) {
+		t.Fatalf("empty: %v", err)
+	}
+
+	want := errors.New("store failed")
+	st.getByNumberErr = want
+	if _, err := svc.GetByNumber(ctx, ""); !errors.Is(err, domain.ErrInvalidAccount) {
+		t.Fatalf("empty skipped store: %v", err)
+	}
+	if _, err := svc.GetByNumber(ctx, "PC-NUM-1"); !errors.Is(err, want) {
+		t.Fatalf("store err: %v", err)
+	}
+
+	dead, cancel := context.WithCancel(ctx)
+	cancel()
+	st.getByNumberErr = nil
+	if _, err := svc.GetByNumber(dead, "PC-NUM-1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled: %v", err)
+	}
+}
+
 func TestGetBlockedFromStore(t *testing.T) {
 	ctx := context.Background()
 	id := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000009")
@@ -251,13 +301,14 @@ func (s *stubOpener) Open(_ context.Context, accountID uuid.UUID, owner ledger.O
 }
 
 type memStore struct {
-	mu          sync.Mutex
-	byID        map[uuid.UUID]domain.Account
-	history     []domain.StatusHistory
-	applyCalls  int
-	appendCalls int
-	appendErr   error
-	lastHistory domain.StatusHistory
+	mu             sync.Mutex
+	byID           map[uuid.UUID]domain.Account
+	history        []domain.StatusHistory
+	applyCalls     int
+	appendCalls    int
+	appendErr      error
+	getByNumberErr error
+	lastHistory    domain.StatusHistory
 }
 
 func newMem() *memStore {
@@ -288,6 +339,26 @@ func (m *memStore) Get(_ context.Context, id uuid.UUID) (domain.Account, error) 
 		return domain.Account{}, domain.ErrAccountNotFound
 	}
 	return acc, nil
+}
+
+func (m *memStore) GetByNumber(ctx context.Context, number string) (domain.Account, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.Account{}, err
+	}
+	if number == "" {
+		return domain.Account{}, domain.ErrInvalidAccount
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getByNumberErr != nil {
+		return domain.Account{}, m.getByNumberErr
+	}
+	for _, acc := range m.byID {
+		if acc.AccountNumber == number {
+			return acc, nil
+		}
+	}
+	return domain.Account{}, domain.ErrAccountNotFound
 }
 
 func (m *memStore) GetForUpdate(ctx context.Context, id uuid.UUID) (domain.Account, error) {
