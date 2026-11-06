@@ -1,10 +1,10 @@
 # Identity и Auth — архитектура и контракты
 
-Статус: **принято для MVP** (этап 3.19, только документы). Кода, миграций и HTTP-обработчиков в этом этапе нет. Решения — [D-41](decisions.md#d-41), [D-42](decisions.md#d-42). Ошибки API — [D-39](decisions.md#d-39). Скоуп и отказ от PCI/KYC — [D-20](decisions.md#d-20). Стек без Redis — [D-38](decisions.md#d-38).
+Статус: **принято для MVP**. Контракт — этап 3.19; DDL — `migrations/00005_auth.sql` (этап 3.20). Go-модуля auth, HTTP-обработчиков и bootstrap ADMIN нет. Решения — [D-41](decisions.md#d-41), [D-42](decisions.md#d-42). Ошибки API — [D-39](decisions.md#d-39). Скоуп и отказ от PCI/KYC — [D-20](decisions.md#d-20). Стек без Redis — [D-38](decisions.md#d-38).
 
 Связанные документы: [../PROJECT_SPEC.md](../PROJECT_SPEC.md) §2.1, §5, §8; [decisions.md](decisions.md); [../database/database-schema.md](../database/database-schema.md) §12; [../database/er-diagram.md](../database/er-diagram.md) §4; [../database/data-integrity.md](../database/data-integrity.md).
 
-Текущий код: схема `auth` существует как заглушка PK (`migrations/00002_accounts.sql`) ради FK `accounts.user_id`. HTTP — `internal/platform/httpserver` (health, JSON-ошибки D-39, `Handle` без маршрутов Auth). Accounts принимает `ChangedBy uuid.UUID` как есть и не читает auth-контекст.
+Текущий код: `00002` создаёт заглушку `auth.users (id)` ради FK `accounts.user_id`; `00005` расширяет её колонками и таблицами §7 **без DROP**. HTTP — `internal/platform/httpserver` (health, JSON-ошибки D-39, `Handle` без маршрутов Auth). Accounts принимает `ChangedBy uuid.UUID` как есть и не читает auth-контекст. Первый ADMIN — будущая Go-команда migrate/bootstrap, не SQL-сид.
 
 ---
 
@@ -174,13 +174,13 @@ Logout эффективен сразу: шаг 2 отсекает JWT до ис�
 - сервер не читает заголовок «выдай мне ADMIN»;
 - единственная вставляемая роль — `CUSTOMER`.
 
-Первый ADMIN — сид миграции auth-модуля (не этот PR): email и хеш из `PAYCORE_BOOTSTRAP_ADMIN_PASSWORD` (только bootstrap/migrate, не API-процесс). Публичного «стань ADMIN» нет.
+Первый ADMIN — будущая Go-команда migrate/bootstrap (`PAYCORE_BOOTSTRAP_ADMIN_PASSWORD` только там, не в SQL и не в API-процессе). `00005` не вставляет пользователей. Публичного «стань ADMIN» нет.
 
 ---
 
-## 7. SQL-схема (дизайн; миграции нет)
+## 7. SQL-схема
 
-Существующий `CREATE TABLE auth.users (id UUID PRIMARY KEY)` **не дропается**: на него уже ссылаются счета и тесты. Следующий этап (не 3.19) делает `ALTER TABLE` и создаёт остальные таблицы. SQL ниже иллюстративен, как в [database-schema.md](../database/database-schema.md). Goose Down для этих таблиц допустим, пока в `auth.users` нет боевых строк с паролями; после появления боевых пользователей — только forward, как у финансовых таблиц.
+Существующий `CREATE TABLE auth.users (id UUID PRIMARY KEY)` **не дропается**: на него уже ссылаются счета и тесты. Миграция `00005_auth.sql` делает `ALTER TABLE` и создаёт остальные таблицы. Goose Down отказывается, если в `users` / `user_roles` / `sessions` / `refresh_tokens` / `login_attempts` / `rate_limit_counters` / `action_confirmations` есть строки; каталог `roles` на Down удаляется вместе с таблицей. После появления боевых пользователей Down не применять.
 
 ### 7.1. `auth.users`
 
@@ -195,9 +195,7 @@ Logout эффективен сразу: шаг 2 отсекает JWT до ис�
 | locked_at | TIMESTAMPTZ | NOT NULL ⇔ `LOCKED` |
 | created_at, updated_at | TIMESTAMPTZ NN | UTC ([D-29](decisions.md#d-29)) |
 
-`GRANT SELECT, INSERT, UPDATE` → `paycore_app`; `SELECT` → `paycore_readonly`. `DELETE` нет. `GRANT USAGE ON SCHEMA auth` → `paycore_app`, `paycore_readonly` (сейчас USAGE на `auth` нет — заглушка пишется ролью owner в тестах).
-
-Тестовые вставки `INSERT INTO auth.users (id)` сломаются, когда колонки станут NOT NULL: фикстуры Accounts/Ledger того этапа обязаны заполнять email/hash/status. Это цена снятия заглушки, не этого PR.
+`GRANT SELECT, INSERT, UPDATE` → `paycore_app`; `SELECT` → `paycore_readonly`. `DELETE` нет. `GRANT USAGE ON SCHEMA auth` → `paycore_app`, `paycore_readonly` (`paycore_ledger` USAGE не получает). Фикстуры тестов заполняют `email`, `password_hash` (`$argon2id$…`) и `status`; CHECK не ослабляется.
 
 ### 7.2. `auth.roles`
 
@@ -427,13 +425,12 @@ Access TTL 15 мин, refresh TTL 30 суток — §4. Max сессий на �
 
 ---
 
-## 14. Порядок реализации (не этот PR)
+## 14. Порядок реализации
 
-1. **Документы** — этап 3.19 (этот документ).
-2. **DDL** — `ALTER auth.users`, остальные таблицы, сид `roles`, гранты USAGE, сид bootstrap ADMIN. Не менять `00002` задним числом. Не этот PR.
+1. **Документы** — этап 3.19.
+2. **DDL** — этап 3.20, `00005_auth.sql`: `ALTER auth.users`, таблицы, сид `roles`, гранты. Не менять `00002`. Bootstrap ADMIN — не этот этап.
 3. **domain + application** — команды §8, без HTTP и без pgx.
-4. **postgres adapter** — SQL, UPSERT лимитов, ротация, интеграционные тесты §12.
+4. **postgres adapter** — UPSERT лимитов, ротация, интеграционные тесты §12.
 5. **HTTP** — маршруты §9, Bearer middleware, Kind 429, `PAYCORE_AUTH_JWT_SECRET`.
 6. **Связка с Accounts** — отдельный этап: Principal → `ChangedBy` / владелец. Open/Balance/Statement 3.10–3.18 не переписывать здесь.
-
-Код, `go.mod`, миграции, handlers, Accounts, Ledger — не входят в 3.19.
+7. **Bootstrap ADMIN** — будущая Go-команда, не SQL.

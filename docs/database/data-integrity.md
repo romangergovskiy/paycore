@@ -34,6 +34,11 @@
 | `payouts`, `test_topups` | `amount > 0`; статус; `FAILED` ⇔ `failure_code` |
 | `limit_counters` | `used_amount >= 0` |
 | `commission_tariffs` | `rate_bp BETWEEN 0 AND 10000`; `min <= max`; `valid_to > valid_from`; EXCLUDE на пересечение периодов |
+| `auth.users` | `email = lower(email)`; `password_hash LIKE '$argon2id$%'`; статус `ACTIVE`/`LOCKED`/`DISABLED`; `locked_at` ⇔ `LOCKED`; `failed_login_count >= 0` |
+| `auth.refresh_tokens` | `octet_length(token_hash) = 32`; `expires_at > created_at`; `used_at` ⇔ `replaced_by` |
+| `auth.login_attempts` | успех ⇔ `failure_reason IS NULL`; иначе код из закрытого перечня |
+| `auth.rate_limit_counters` | `bucket` из четырёх кодов; `count >= 0` |
+| `auth.sessions` | `revoke_reason` ⇔ `revoked_at` |
 | `manual_adjustments` | `approved_by <> created_by`; `POSTED` ⇔ `journal_transaction_id` |
 | `idempotency_keys` | `status IN ('IN_PROGRESS','COMPLETED')`; `COMPLETED` ⇔ `response_code IS NOT NULL` |
 | `outbox_events` | `status IN ('PENDING','PUBLISHED','DEAD')`; `PUBLISHED` ⇔ `published_at IS NOT NULL`; `(processing_until IS NULL) = (lease_owner IS NULL)` |
@@ -220,7 +225,7 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 |---|---|---|
 | `paycore_owner` | да (только для миграций) | Владелец схем и таблиц; DDL |
 | `paycore_ledger` | **нет** | Владелец ledger-функций ([D-40](../architecture/decisions.md#d-40)). `SELECT, INSERT` на `journal_transactions`, `ledger_entries`, `ledger_accounts` (`open_ledger_accounts`); `SELECT, INSERT, UPDATE` на `account_balances`, `system_balance_buckets`, `holds`; `SELECT` на `chart_of_accounts`, `accounts.accounts`, `currencies`, `manual_adjustments`; колоночная привилегия `UPDATE (updated_at)` на `accounts.accounts` — только ради `SELECT … FOR SHARE NOWAIT` (шаг 3 [ledger-model.md §11.2](../architecture/ledger-model.md#112-sql-ledgerpost_journal--security-definer)). **Нет** `UPDATE/DELETE/TRUNCATE` на журналах и проводках |
-| `paycore_app` | да | `EXECUTE` на `ledger.*`-функциях; `SELECT` на ledger-таблицах; `SELECT, INSERT, UPDATE` на изменяемых бизнес-таблицах (`payments`, `transfers`, `refunds`, `payouts`, `accounts`, `limit_counters`, …); `SELECT, INSERT` на `*_status_history`, `audit.audit_logs`; `DELETE` только на `platform.outbox_events`, `platform.idempotency_keys`, `platform.inbox_messages` (очистка). `idle_in_transaction_session_timeout = 30s` |
+| `paycore_app` | да | `EXECUTE` на `ledger.*`-функциях; `SELECT` на ledger-таблицах; `SELECT, INSERT, UPDATE` на изменяемых бизнес-таблицах (`payments`, `transfers`, `refunds`, `payouts`, `accounts`, `limit_counters`, `auth.users`, `auth.sessions`, …); `SELECT, INSERT` на `*_status_history`, `audit.audit_logs`, `auth.login_attempts`; `DELETE` только на `platform.outbox_events`, `platform.idempotency_keys`, `platform.inbox_messages` (очистка) и на `auth.user_roles` / `auth.refresh_tokens` (revoke и очистка токенов). Нет `DELETE` на `auth.users`. `idle_in_transaction_session_timeout = 30s` |
 | `paycore_readonly` | да | `SELECT` для отчётов и Ledger Explorer |
 
 `SELECT … FOR UPDATE` требует права `UPDATE`. Поэтому `paycore_app` не может сама заблокировать `account_balances` и делает это через `ledger.lock_account_balances`. Это ещё и гарантирует сортировку L5.

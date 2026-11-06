@@ -6,7 +6,7 @@
 
 Схемы PostgreSQL по модулям ([D-18](../architecture/decisions.md#d-18)): `auth`, `merchants`, `accounts`, `ledger`, `payments`, `transfers`, `commissions`, `limits`, `simulator`, `notifications`, `audit`, `platform` (idempotency, outbox, inbox). После MVP: `fraud`, `reconciliation`.
 
-Этап 3.3 создаёт `accounts` и `ledger` целиком. `auth.users` и `merchants.merchants` — заглушки с PK, чтобы объявить FK со счетов. Этап 3.19 описывает полный модуль auth ([../architecture/identity-auth.md](../architecture/identity-auth.md)); миграций и кода auth ещё нет. Модуль merchants и схемы payments/transfers в этой фазе не реализуются.
+Этап 3.3 создаёт `accounts` и `ledger` целиком. `auth.users` в `00002` — заглушка PK ради FK со счетов; этап 3.20 (`00005`) расширяет `auth` (users, roles, sessions, tokens, login_attempts, rate_limit_counters, action_confirmations) без DROP. `merchants.merchants` остаётся заглушкой PK. Go-модуля auth и bootstrap ADMIN нет. Схемы payments/transfers в этой фазе не реализуются. Контракт — [../architecture/identity-auth.md](../architecture/identity-auth.md).
 
 ## 1. Финансовое ядро: счета и ledger
 

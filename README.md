@@ -2,7 +2,7 @@
 
 Демонстрационная платёжная инфраструктура с double-entry ledger: Go, PostgreSQL, модульный монолит. Деньги виртуальные, соответствие PCI DSS и банковским требованиям не заявляется.
 
-Статус: **этап 3.19 — архитектура Identity/Auth (документы)**. В коде auth по-прежнему заглушка PK. Payments, Transfers и HTTP money ещё не реализованы.
+Статус: **этап 3.20 — DDL Identity/Auth**. Go-модуля auth, HTTP auth и Payments/Transfers ещё нет.
 
 ## Документация
 
@@ -52,7 +52,7 @@ internal/platform/
   apperror/               ошибки приложения и JSON-формат ошибок API
   httpserver/             HTTP-сервер, middleware, health
   postgres/               пул pgx, bootstrap, миграции, ledger, accounts Store и UoW
-migrations/               SQL Goose (platform, accounts, ledger, функции)
+migrations/               SQL Goose (platform, accounts, ledger, функции, auth)
 docs/                     проектная документация
 ```
 

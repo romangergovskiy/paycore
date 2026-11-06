@@ -98,9 +98,7 @@ func TestLedgerDDL(t *testing.T) {
 	})
 
 	t.Run("paycore_app can insert accounts", func(t *testing.T) {
-		if _, err := owner.Exec(ctx, `INSERT INTO auth.users (id) VALUES ($1)`, testUserID); err != nil {
-			t.Fatal(err)
-		}
+		insertAuthUser(t, ctx, owner, testUserID)
 		if _, err := app.Exec(ctx, `
 			INSERT INTO accounts.accounts (id, account_number, user_id, account_purpose, currency, status)
 			VALUES ($1, 'PC-TEST-1', $2, 'MAIN', 'RUB', 'ACTIVE')`, testAccID, testUserID); err != nil {

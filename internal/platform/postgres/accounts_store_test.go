@@ -355,9 +355,7 @@ func merchantAcc(t *testing.T, merchant uuid.UUID, number string) domain.Account
 func insertUser(t *testing.T, ctx context.Context, owner *pgx.Conn) uuid.UUID {
 	t.Helper()
 	id := mustNewID(t)
-	if _, err := owner.Exec(ctx, `INSERT INTO auth.users (id) VALUES ($1)`, id); err != nil {
-		t.Fatal(err)
-	}
+	insertAuthUser(t, ctx, owner, id.String())
 	return id
 }
 
