@@ -41,6 +41,7 @@ func TestStatement(t *testing.T) {
 	svc := Service{Store: st, Opener: &stubOpener{}, Statements: rd}
 	opened, err := svc.Open(ctx, domain.OpenCommand{
 		AccountNumber: "PC-STMT-1", UserID: &user, Purpose: domain.PurposeMain, Currency: money.RUB,
+		Reason: "open", ChangedBy: testOpenActor,
 	})
 	if err != nil {
 		t.Fatal(err)

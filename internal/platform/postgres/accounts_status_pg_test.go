@@ -57,8 +57,11 @@ func TestAccountStatusTransitions(t *testing.T) {
 			t.Fatalf("Get %+v %v", row, err)
 		}
 		h := history(t, ctx, app, opened.Account.ID)
-		if len(h) != 1 || h[0].from != "ACTIVE" || h[0].to != "CLOSED" || h[0].changedBy != actor {
-			t.Fatalf("history %+v", h)
+		if len(h) != 2 || h[0].from != nil || h[0].to != "ACTIVE" {
+			t.Fatalf("open history %+v", h)
+		}
+		if h[1].from == nil || *h[1].from != "ACTIVE" || h[1].to != "CLOSED" || h[1].changedBy != actor {
+			t.Fatalf("close history %+v", h)
 		}
 	})
 
@@ -79,10 +82,13 @@ func TestAccountStatusTransitions(t *testing.T) {
 			t.Fatalf("unblocked %+v", got)
 		}
 		h := history(t, ctx, app, opened.Account.ID)
-		if len(h) != 2 || h[0].to != "BLOCKED" || h[1].to != "ACTIVE" {
-			t.Fatalf("history %+v", h)
+		if len(h) != 3 || h[0].from != nil || h[0].to != "ACTIVE" {
+			t.Fatalf("open history %+v", h)
 		}
-		if h[0].changedBy != actor || h[1].changedBy != actor {
+		if h[1].to != "BLOCKED" || h[2].to != "ACTIVE" {
+			t.Fatalf("status history %+v", h)
+		}
+		if h[1].changedBy != actor || h[2].changedBy != actor {
 			t.Fatalf("changed_by %+v actor %s", h, actor)
 		}
 	})
@@ -100,8 +106,9 @@ func TestAccountStatusTransitions(t *testing.T) {
 		if err != nil || row.Status != domain.StatusActive || row.ClosedAt != nil {
 			t.Fatalf("status %+v %v", row, err)
 		}
-		if n := len(history(t, ctx, app, opened.Account.ID)); n != 0 {
-			t.Fatalf("history %d", n)
+		h := history(t, ctx, app, opened.Account.ID)
+		if len(h) != 1 || h[0].from != nil || h[0].to != "ACTIVE" {
+			t.Fatalf("history %+v", h)
 		}
 	})
 
@@ -121,8 +128,9 @@ func TestAccountStatusTransitions(t *testing.T) {
 		if err != nil || row.Status != domain.StatusActive {
 			t.Fatalf("status %+v %v", row, err)
 		}
-		if n := len(history(t, ctx, app, opened.Account.ID)); n != 0 {
-			t.Fatalf("history %d", n)
+		h := history(t, ctx, app, opened.Account.ID)
+		if len(h) != 1 || h[0].from != nil || h[0].to != "ACTIVE" {
+			t.Fatalf("history %+v", h)
 		}
 	})
 
@@ -145,8 +153,9 @@ func TestAccountStatusTransitions(t *testing.T) {
 		if err != nil || row.Status != domain.StatusActive || row.Version != 0 {
 			t.Fatalf("rolled status %+v %v", row, err)
 		}
-		if n := len(history(t, ctx, app, opened.Account.ID)); n != 0 {
-			t.Fatalf("history %d", n)
+		h := history(t, ctx, app, opened.Account.ID)
+		if len(h) != 1 || h[0].from != nil || h[0].to != "ACTIVE" {
+			t.Fatalf("history %+v", h)
 		}
 	})
 
@@ -225,6 +234,7 @@ func mustOpen(t *testing.T, ctx context.Context, uow application.UnitOfWork, use
 	opened, err := application.OpenIn(ctx, uow, domain.OpenCommand{
 		ID: mustNewID(t), AccountNumber: number, UserID: &user,
 		Purpose: domain.PurposeMain, Currency: money.RUB,
+		Reason: "open", ChangedBy: mustNewID(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +270,8 @@ func topupOpened(t *testing.T, ctx context.Context, app *pgx.Conn, opened applic
 }
 
 type histRow struct {
-	from, to  string
+	from      *string
+	to        string
 	changedBy uuid.UUID
 }
 

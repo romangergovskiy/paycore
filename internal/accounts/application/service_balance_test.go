@@ -18,6 +18,7 @@ func TestBalance(t *testing.T) {
 	svc := Service{Store: st, Opener: &stubOpener{}, Balances: &stubBalances{}}
 	opened, err := svc.Open(ctx, domain.OpenCommand{
 		AccountNumber: "PC-BAL-1", UserID: &user, Purpose: domain.PurposeMain, Currency: money.RUB,
+		Reason: "open", ChangedBy: testOpenActor,
 	})
 	if err != nil {
 		t.Fatal(err)

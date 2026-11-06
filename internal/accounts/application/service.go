@@ -126,6 +126,20 @@ func (s Service) Open(ctx context.Context, cmd domain.OpenCommand) (Opened, erro
 	if err != nil {
 		return zero, err
 	}
+
+	hid, err := uuid.NewV7()
+	if err != nil {
+		return zero, err
+	}
+	if err := s.Store.AppendHistory(ctx, domain.StatusHistory{
+		ID:        hid,
+		AccountID: acc.ID,
+		To:        domain.StatusActive,
+		Reason:    cmd.Reason,
+		ChangedBy: cmd.ChangedBy,
+	}); err != nil {
+		return zero, err
+	}
 	return Opened{Account: acc, Ledgers: ledgers}, nil
 }
 
