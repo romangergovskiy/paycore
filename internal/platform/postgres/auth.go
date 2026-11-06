@@ -194,6 +194,18 @@ SELECT COUNT(*)::int
   JOIN auth.users u ON u.id = ur.user_id
  WHERE ur.role_code = $1 AND u.status = 'ACTIVE'`
 
+// adminRoleMutationLockKey is the single bigint passed to
+// pg_advisory_xact_lock for GrantRole/RevokeRole of ADMIN.
+// Transaction-scoped: released on Commit or Rollback of this Tx.
+// Not pg_advisory_lock (session). Not a process mutex. Not FOR UPDATE
+// on auth.roles (paycore_app has SELECT only). See identity-auth.md §10.
+//
+// 0x5041590000000001 = PayCore namespace 0x504159 ("PAY") + object 1
+// (ADMIN role mutations). Do not reuse this value for other locks.
+const adminRoleMutationLockKey int64 = 0x5041590000000001
+
+const lockAdminRoleMutationsSQL = `SELECT pg_advisory_xact_lock($1)`
+
 const insertAttemptSQL = `
 INSERT INTO auth.login_attempts (
   id, email, user_id, ip, success, failure_reason, attempted_at
@@ -368,6 +380,13 @@ func (s *AuthRoles) CountActiveWithRole(ctx context.Context, role domain.Role) (
 		return 0, mapAuthSQLError("roles count active", err)
 	}
 	return n, nil
+}
+
+func (s *AuthRoles) LockAdminRoleMutations(ctx context.Context) error {
+	if _, err := s.q.Exec(ctx, lockAdminRoleMutationsSQL, adminRoleMutationLockKey); err != nil {
+		return mapAuthSQLError("roles lock admin mutations", err)
+	}
+	return nil
 }
 
 func (s *AuthAttempts) Append(ctx context.Context, a domain.LoginAttempt) error {
