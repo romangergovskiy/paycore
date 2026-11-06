@@ -13,6 +13,8 @@ import (
 	"github.com/romangergovskiy/paycore/pkg/money"
 )
 
+var testOpenActor = uuid.MustParse("dddddddd-dddd-4ddd-8ddd-000000000001")
+
 func TestOpenRUB(t *testing.T) {
 	ctx := context.Background()
 	user := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
@@ -28,6 +30,8 @@ func TestOpenRUB(t *testing.T) {
 		UserID:        &user,
 		Purpose:       domain.PurposeMain,
 		Currency:      money.RUB,
+		Reason:        "open",
+		ChangedBy:     testOpenActor,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +55,12 @@ func TestOpenRUB(t *testing.T) {
 	if err != nil || stored.AccountNumber != "PC-OPEN-1" {
 		t.Fatalf("Get: %+v %v", stored, err)
 	}
+	if st.appendCalls != 1 || st.lastHistory.To != domain.StatusActive || st.lastHistory.From != "" {
+		t.Fatalf("history calls=%d %+v", st.appendCalls, st.lastHistory)
+	}
+	if st.lastHistory.Reason != "open" || st.lastHistory.ChangedBy != testOpenActor || st.lastHistory.AccountID != got.Account.ID {
+		t.Fatalf("history %+v", st.lastHistory)
+	}
 }
 
 func TestOpenMerchant(t *testing.T) {
@@ -63,6 +73,8 @@ func TestOpenMerchant(t *testing.T) {
 		MerchantID:    &mid,
 		Purpose:       domain.PurposeMerchantSettlement,
 		Currency:      money.RUB,
+		Reason:        "open",
+		ChangedBy:     testOpenActor,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +95,13 @@ func TestOpenRejectsCurrencyAndOwner(t *testing.T) {
 		UserID:        &user,
 		Purpose:       domain.PurposeMain,
 		Currency:      money.RUB,
+		Reason:        "open",
+		ChangedBy:     testOpenActor,
 	}
+	noReason := base
+	noReason.Reason = ""
+	noActor := base
+	noActor.ChangedBy = uuid.Nil
 
 	cases := []struct {
 		name string
@@ -94,6 +112,8 @@ func TestOpenRejectsCurrencyAndOwner(t *testing.T) {
 		{name: "EUR", cmd: withCur(base, "EUR"), want: domain.ErrCurrencyNotSupported},
 		{name: "invalid", cmd: withCur(base, "rub"), want: money.ErrInvalidCurrency},
 		{name: "merchant purpose on customer", cmd: withPurpose(base, domain.PurposeMerchantSettlement), want: domain.ErrInvalidAccount},
+		{name: "empty reason", cmd: noReason, want: domain.ErrInvalidAccount},
+		{name: "nil ChangedBy", cmd: noActor, want: domain.ErrInvalidAccount},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -120,6 +140,8 @@ func TestOpenDoesNotCreateBlockedOrClosed(t *testing.T) {
 		UserID:        &user,
 		Purpose:       domain.PurposeMain,
 		Currency:      money.RUB,
+		Reason:        "open",
+		ChangedBy:     testOpenActor,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -138,18 +160,21 @@ func TestGetList(t *testing.T) {
 
 	a, err := svc.Open(ctx, domain.OpenCommand{
 		AccountNumber: "PC-A", UserID: &u1, Purpose: domain.PurposeMain, Currency: money.RUB,
+		Reason: "open", ChangedBy: testOpenActor,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, err := svc.Open(ctx, domain.OpenCommand{
 		AccountNumber: "PC-B", UserID: &u1, Purpose: domain.PurposeSavings, Currency: money.RUB,
+		Reason: "open", ChangedBy: testOpenActor,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Open(ctx, domain.OpenCommand{
 		AccountNumber: "PC-C", UserID: &u2, Purpose: domain.PurposeMain, Currency: money.RUB,
+		Reason: "open", ChangedBy: testOpenActor,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -189,14 +214,40 @@ func TestOpenOpenerError(t *testing.T) {
 	ctx := context.Background()
 	user := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
 	op := &stubOpener{err: ledger.ErrInvalidJournal}
-	svc := Service{Store: newMem(), Opener: op}
+	st := newMem()
+	svc := Service{Store: st, Opener: op}
 	_, err := svc.Open(ctx, domain.OpenCommand{
 		AccountNumber: "PC-OP",
 		UserID:        &user,
 		Purpose:       domain.PurposeMain,
 		Currency:      money.RUB,
+		Reason:        "open",
+		ChangedBy:     testOpenActor,
 	})
 	if !errors.Is(err, ledger.ErrInvalidJournal) {
+		t.Fatalf("got %v", err)
+	}
+	if st.appendCalls != 0 {
+		t.Fatalf("history on opener error: %d", st.appendCalls)
+	}
+}
+
+func TestOpenAppendHistoryError(t *testing.T) {
+	ctx := context.Background()
+	user := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+	want := errors.New("history insert failed")
+	st := newMem()
+	st.appendErr = want
+	svc := Service{Store: st, Opener: &stubOpener{}}
+	_, err := svc.Open(ctx, domain.OpenCommand{
+		AccountNumber: "PC-HIST-ERR",
+		UserID:        &user,
+		Purpose:       domain.PurposeMain,
+		Currency:      money.RUB,
+		Reason:        "open",
+		ChangedBy:     testOpenActor,
+	})
+	if !errors.Is(err, want) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -208,6 +259,7 @@ func TestGetByNumber(t *testing.T) {
 	svc := Service{Store: st, Opener: &stubOpener{}}
 	opened, err := svc.Open(ctx, domain.OpenCommand{
 		AccountNumber: "PC-NUM-1", UserID: &user, Purpose: domain.PurposeMain, Currency: money.RUB,
+		Reason: "open", ChangedBy: testOpenActor,
 	})
 	if err != nil {
 		t.Fatal(err)

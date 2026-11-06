@@ -267,6 +267,7 @@ func TestAccountsStore(t *testing.T) {
 		opened, err := svc.Open(ctx, domain.OpenCommand{
 			ID: acc.ID, AccountNumber: acc.AccountNumber, UserID: acc.UserID,
 			Purpose: acc.Purpose, Currency: acc.Currency,
+			Reason: "open", ChangedBy: mustNewID(t),
 		})
 		if err != nil {
 			_ = tx.Rollback(ctx)

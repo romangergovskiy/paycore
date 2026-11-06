@@ -18,6 +18,9 @@ func ValidateOpen(cmd OpenCommand) error {
 	if cmd.AccountNumber == "" {
 		return ErrInvalidAccount
 	}
+	if cmd.Reason == "" || cmd.ChangedBy == uuid.Nil {
+		return ErrInvalidAccount
+	}
 	return validateOwnerPurpose(cmd.UserID, cmd.MerchantID, cmd.Purpose)
 }
 

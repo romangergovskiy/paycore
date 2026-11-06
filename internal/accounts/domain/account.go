@@ -48,6 +48,8 @@ type Account struct {
 // OpenCommand is the input of opening a business account.
 // Status is not a field: Open always creates ACTIVE.
 // Account number format is Q-13 (unset); the caller supplies a non-empty number.
+// Reason and ChangedBy are required (uuid.Nil is missing); they are stored
+// as-is on opening history and are not generated or replaced.
 type OpenCommand struct {
 	ID            uuid.UUID // uuid.Nil → generate UUIDv7 (D-14)
 	AccountNumber string
@@ -56,6 +58,8 @@ type OpenCommand struct {
 	Purpose       Purpose
 	Currency      money.Currency
 	Name          string
+	Reason        string
+	ChangedBy     uuid.UUID
 }
 
 func OwnerSet(id *uuid.UUID) bool {
@@ -71,6 +75,7 @@ type StatusCommand struct {
 }
 
 // StatusHistory is one row of accounts.account_status_history.
+// From empty means SQL NULL (opening history; no previous status).
 type StatusHistory struct {
 	ID        uuid.UUID
 	AccountID uuid.UUID

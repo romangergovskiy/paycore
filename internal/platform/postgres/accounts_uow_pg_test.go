@@ -36,9 +36,11 @@ func TestAccountUnitOfWork(t *testing.T) {
 
 	t.Run("A commit OpenIn", func(t *testing.T) {
 		id := mustNewID(t)
+		actor := mustNewID(t)
 		opened, err := application.OpenIn(ctx, uow, domain.OpenCommand{
 			ID: id, AccountNumber: "PC-UOW-A", UserID: &user,
 			Purpose: domain.PurposeMain, Currency: money.RUB,
+			Reason: "open", ChangedBy: actor,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -57,6 +59,10 @@ func TestAccountUnitOfWork(t *testing.T) {
 		if n != 2 {
 			t.Fatalf("ledger_accounts = %d", n)
 		}
+		h := history(t, ctx, app, id)
+		if len(h) != 1 || h[0].from != nil || h[0].to != "ACTIVE" || h[0].changedBy != actor {
+			t.Fatalf("history %+v", h)
+		}
 	})
 
 	t.Run("B opener error rolls back account", func(t *testing.T) {
@@ -72,6 +78,13 @@ func TestAccountUnitOfWork(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 		assertGone(t, ctx, app, acc.ID)
+		var nHist int
+		if err := app.QueryRow(ctx, `SELECT count(*) FROM accounts.account_status_history WHERE account_id = $1`, acc.ID).Scan(&nHist); err != nil {
+			t.Fatal(err)
+		}
+		if nHist != 0 {
+			t.Fatalf("history %d", nHist)
+		}
 	})
 
 	t.Run("C callback error after Open rolls back both", func(t *testing.T) {
@@ -81,6 +94,7 @@ func TestAccountUnitOfWork(t *testing.T) {
 			_, err := application.Service{Store: d.Store, Opener: d.Opener}.Open(ctx, domain.OpenCommand{
 				ID: id, AccountNumber: "PC-UOW-C", UserID: &user,
 				Purpose: domain.PurposeMain, Currency: money.RUB,
+				Reason: "open", ChangedBy: mustNewID(t),
 			})
 			if err != nil {
 				return err
@@ -100,6 +114,7 @@ func TestAccountUnitOfWork(t *testing.T) {
 			_, err := application.Service{Store: d.Store, Opener: d.Opener}.Open(ctx, domain.OpenCommand{
 				ID: id, AccountNumber: "PC-UOW-D", UserID: &user,
 				Purpose: domain.PurposeMain, Currency: money.RUB,
+				Reason: "open", ChangedBy: mustNewID(t),
 			})
 			if err != nil {
 				return err
@@ -119,6 +134,7 @@ func TestAccountUnitOfWork(t *testing.T) {
 			_, err := application.Service{Store: d.Store, Opener: d.Opener}.Open(ctx, domain.OpenCommand{
 				ID: id, AccountNumber: "PC-UOW-E", UserID: &user,
 				Purpose: domain.PurposeMain, Currency: money.RUB,
+				Reason: "open", ChangedBy: mustNewID(t),
 			})
 			if err != nil {
 				return err
@@ -139,6 +155,33 @@ func TestAccountUnitOfWork(t *testing.T) {
 		got, err := NewAccounts(other).Get(ctx, id)
 		if err != nil || got.ID != id {
 			t.Fatalf("after commit: %+v %v", got, err)
+		}
+	})
+
+	t.Run("F AppendHistory error rolls back account and ledger", func(t *testing.T) {
+		id := mustNewID(t)
+		forced := errors.New("history failed")
+		err := uow.Do(ctx, func(ctx context.Context, d application.Deps) error {
+			_, err := application.Service{
+				Store:  failAppend{Store: d.Store, err: forced},
+				Opener: d.Opener,
+			}.Open(ctx, domain.OpenCommand{
+				ID: id, AccountNumber: "PC-UOW-F", UserID: &user,
+				Purpose: domain.PurposeMain, Currency: money.RUB,
+				Reason: "open", ChangedBy: mustNewID(t),
+			})
+			return err
+		})
+		if !errors.Is(err, forced) {
+			t.Fatalf("got %v", err)
+		}
+		assertGone(t, ctx, app, id)
+		var nHist int
+		if err := app.QueryRow(ctx, `SELECT count(*) FROM accounts.account_status_history WHERE account_id = $1`, id).Scan(&nHist); err != nil {
+			t.Fatal(err)
+		}
+		if nHist != 0 {
+			t.Fatalf("history %d", nHist)
 		}
 	})
 

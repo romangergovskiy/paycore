@@ -13,11 +13,14 @@ func TestValidateOpen(t *testing.T) {
 	user := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
 	merchant := uuid.MustParse("bbbbbbbb-bbbb-4bbb-8bbb-000000000002")
 
+	actor := uuid.MustParse("dddddddd-dddd-4ddd-8ddd-000000000001")
 	okCustomer := OpenCommand{
 		AccountNumber: "PC-TEST-1",
 		UserID:        &user,
 		Purpose:       PurposeMain,
 		Currency:      money.RUB,
+		Reason:        "open",
+		ChangedBy:     actor,
 	}
 	okSavings := okCustomer
 	okSavings.Purpose = PurposeSavings
@@ -26,6 +29,8 @@ func TestValidateOpen(t *testing.T) {
 		MerchantID:    &merchant,
 		Purpose:       PurposeMerchantSettlement,
 		Currency:      money.RUB,
+		Reason:        "open",
+		ChangedBy:     actor,
 	}
 
 	tests := []struct {
@@ -79,6 +84,8 @@ func TestValidateOpen(t *testing.T) {
 				MerchantID:    &merchant,
 				Purpose:       PurposeMain,
 				Currency:      money.RUB,
+				Reason:        "open",
+				ChangedBy:     actor,
 			},
 			want: ErrInvalidAccount,
 		},
@@ -88,6 +95,8 @@ func TestValidateOpen(t *testing.T) {
 				AccountNumber: "PC-NONE",
 				Purpose:       PurposeMain,
 				Currency:      money.RUB,
+				Reason:        "open",
+				ChangedBy:     actor,
 			},
 			want: ErrInvalidAccount,
 		},
@@ -98,15 +107,41 @@ func TestValidateOpen(t *testing.T) {
 				UserID:        &uuid.Nil,
 				Purpose:       PurposeMain,
 				Currency:      money.RUB,
+				Reason:        "open",
+				ChangedBy:     actor,
 			},
 			want: ErrInvalidAccount,
 		},
 		{
 			name: "empty account number",
 			cmd: OpenCommand{
-				UserID:   &user,
-				Purpose:  PurposeMain,
-				Currency: money.RUB,
+				UserID:    &user,
+				Purpose:   PurposeMain,
+				Currency:  money.RUB,
+				Reason:    "open",
+				ChangedBy: actor,
+			},
+			want: ErrInvalidAccount,
+		},
+		{
+			name: "empty reason",
+			cmd: OpenCommand{
+				AccountNumber: "PC-NOREASON",
+				UserID:        &user,
+				Purpose:       PurposeMain,
+				Currency:      money.RUB,
+				ChangedBy:     actor,
+			},
+			want: ErrInvalidAccount,
+		},
+		{
+			name: "nil ChangedBy",
+			cmd: OpenCommand{
+				AccountNumber: "PC-NOACTOR",
+				UserID:        &user,
+				Purpose:       PurposeMain,
+				Currency:      money.RUB,
+				Reason:        "open",
 			},
 			want: ErrInvalidAccount,
 		},

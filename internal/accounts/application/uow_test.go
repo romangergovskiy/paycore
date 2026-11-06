@@ -26,6 +26,8 @@ func TestOpenInSuccessCommits(t *testing.T) {
 		UserID:        &user,
 		Purpose:       domain.PurposeMain,
 		Currency:      money.RUB,
+		Reason:        "open",
+		ChangedBy:     testOpenActor,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -36,24 +38,33 @@ func TestOpenInSuccessCommits(t *testing.T) {
 	if !uow.committed || uow.rolled {
 		t.Fatalf("commit=%v rollback=%v", uow.committed, uow.rolled)
 	}
+	if st.appendCalls != 1 || st.lastHistory.To != domain.StatusActive || st.lastHistory.From != "" {
+		t.Fatalf("history calls=%d %+v", st.appendCalls, st.lastHistory)
+	}
 }
 
 func TestOpenInErrorRollsBack(t *testing.T) {
 	user := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
 	want := errors.New("opener failed")
-	uow := &fakeUoW{store: newMem(), opener: &stubOpener{err: want}}
+	st := newMem()
+	uow := &fakeUoW{store: st, opener: &stubOpener{err: want}}
 
 	_, err := OpenIn(context.Background(), uow, domain.OpenCommand{
 		AccountNumber: "PC-UOW-2",
 		UserID:        &user,
 		Purpose:       domain.PurposeMain,
 		Currency:      money.RUB,
+		Reason:        "open",
+		ChangedBy:     testOpenActor,
 	})
 	if !errors.Is(err, want) {
 		t.Fatalf("got %v want %v", err, want)
 	}
 	if uow.committed || !uow.rolled {
 		t.Fatalf("commit=%v rollback=%v", uow.committed, uow.rolled)
+	}
+	if st.appendCalls != 0 {
+		t.Fatalf("history on opener error: %d", st.appendCalls)
 	}
 }
 
@@ -115,6 +126,28 @@ func TestCloseInNotEmptyRollsBack(t *testing.T) {
 	}
 	if uow.committed || !uow.rolled || st.applyCalls != 0 || st.appendCalls != 0 {
 		t.Fatalf("commit=%v rollback=%v apply=%d append=%d", uow.committed, uow.rolled, st.applyCalls, st.appendCalls)
+	}
+}
+
+func TestOpenInAppendHistoryRollsBack(t *testing.T) {
+	user := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
+	want := errors.New("history insert failed")
+	st := newMem()
+	st.appendErr = want
+	uow := &fakeUoW{store: st, opener: &stubOpener{}}
+	_, err := OpenIn(context.Background(), uow, domain.OpenCommand{
+		AccountNumber: "PC-UOW-H",
+		UserID:        &user,
+		Purpose:       domain.PurposeMain,
+		Currency:      money.RUB,
+		Reason:        "open",
+		ChangedBy:     testOpenActor,
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("got %v", err)
+	}
+	if uow.committed || !uow.rolled {
+		t.Fatalf("commit=%v rollback=%v", uow.committed, uow.rolled)
 	}
 }
 

@@ -163,7 +163,7 @@ func (a *Accounts) ApplyStatus(ctx context.Context, acc domain.Account) error {
 
 func (a *Accounts) AppendHistory(ctx context.Context, h domain.StatusHistory) error {
 	_, err := a.q.Exec(ctx, insertStatusHistorySQL,
-		h.ID, h.AccountID, string(h.From), string(h.To), h.Reason, h.ChangedBy,
+		h.ID, h.AccountID, historyFromArg(h.From), string(h.To), h.Reason, h.ChangedBy,
 	)
 	if err != nil {
 		return mapAccountSQLError("append_history", err)
@@ -209,6 +209,13 @@ func ownerArg(id *uuid.UUID) any {
 		return nil
 	}
 	return *id
+}
+
+func historyFromArg(s domain.Status) any {
+	if s == "" {
+		return nil
+	}
+	return string(s)
 }
 
 type scanner interface {
