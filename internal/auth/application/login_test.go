@@ -13,11 +13,11 @@ import (
 func TestLoginSuccess(t *testing.T) {
 	w := newWorld()
 	svc := w.service()
-	reg, err := svc.Register(context.Background(), registerCmd("a@b.c"))
+	reg, _, err := svc.Register(context.Background(), registerCmd("a@b.c"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := svc.Login(context.Background(), loginCmd("A@B.C"))
+	got, _, err := svc.Login(context.Background(), loginCmd("A@B.C"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,13 +45,13 @@ func TestLoginSuccess(t *testing.T) {
 func TestLoginUnknownEmailSameCodeAsBadPassword(t *testing.T) {
 	w := newWorld()
 	svc := w.service()
-	if _, err := svc.Register(context.Background(), registerCmd("a@b.c")); err != nil {
+	if _, _, err := svc.Register(context.Background(), registerCmd("a@b.c")); err != nil {
 		t.Fatal(err)
 	}
-	_, unknown := svc.Login(context.Background(), loginCmd("nope@b.c"))
+	_, _, unknown := svc.Login(context.Background(), loginCmd("nope@b.c"))
 	bad := loginCmd("a@b.c")
 	bad.Password = "wrongpassword"
-	_, wrong := svc.Login(context.Background(), bad)
+	_, _, wrong := svc.Login(context.Background(), bad)
 	if !errors.Is(unknown, domain.ErrInvalidCredentials) || !errors.Is(wrong, domain.ErrInvalidCredentials) {
 		t.Fatalf("unknown=%v wrong=%v", unknown, wrong)
 	}
@@ -62,7 +62,7 @@ func TestLoginUnknownEmailSameCodeAsBadPassword(t *testing.T) {
 
 func TestLoginDummyVerifyOnUnknownEmail(t *testing.T) {
 	w := newWorld()
-	_, err := w.service().Login(context.Background(), loginCmd("ghost@b.c"))
+	_, _, err := w.service().Login(context.Background(), loginCmd("ghost@b.c"))
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
 		t.Fatalf("got %v", err)
 	}
@@ -76,8 +76,8 @@ func TestLoginLockedAndDisabled(t *testing.T) {
 	seedUser(t, w, "lock@b.c", domain.StatusLocked, domain.RoleCustomer)
 	seedUser(t, w, "off@b.c", domain.StatusDisabled, domain.RoleCustomer)
 	svc := w.service()
-	_, locked := svc.Login(context.Background(), loginCmd("lock@b.c"))
-	_, disabled := svc.Login(context.Background(), loginCmd("off@b.c"))
+	_, _, locked := svc.Login(context.Background(), loginCmd("lock@b.c"))
+	_, _, disabled := svc.Login(context.Background(), loginCmd("off@b.c"))
 	if !errors.Is(locked, domain.ErrInvalidCredentials) || !errors.Is(disabled, domain.ErrInvalidCredentials) {
 		t.Fatalf("locked=%v disabled=%v", locked, disabled)
 	}
@@ -86,18 +86,18 @@ func TestLoginLockedAndDisabled(t *testing.T) {
 func TestLoginEmailRateLimit(t *testing.T) {
 	w := newWorld()
 	svc := w.service()
-	if _, err := svc.Register(context.Background(), registerCmd("a@b.c")); err != nil {
+	if _, _, err := svc.Register(context.Background(), registerCmd("a@b.c")); err != nil {
 		t.Fatal(err)
 	}
 	bad := loginCmd("a@b.c")
 	bad.Password = "wrongpassword"
 	for i := 0; i < domain.LimitLoginEmail; i++ {
-		_, err := svc.Login(context.Background(), bad)
+		_, _, err := svc.Login(context.Background(), bad)
 		if !errors.Is(err, domain.ErrInvalidCredentials) {
 			t.Fatalf("i=%d %v", i, err)
 		}
 	}
-	_, err := svc.Login(context.Background(), bad)
+	_, _, err := svc.Login(context.Background(), bad)
 	if !errors.Is(err, domain.ErrRateLimited) {
 		t.Fatalf("6th: %v", err)
 	}
@@ -106,11 +106,11 @@ func TestLoginEmailRateLimit(t *testing.T) {
 func TestLoginLockAfterConsecutiveFailures(t *testing.T) {
 	w := newWorld()
 	svc := w.service()
-	reg, err := svc.Register(context.Background(), registerCmd("a@b.c"))
+	reg, _, err := svc.Register(context.Background(), registerCmd("a@b.c"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := svc.Login(context.Background(), loginCmd("a@b.c"))
+	first, _, err := svc.Login(context.Background(), loginCmd("a@b.c"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestLoginLockAfterConsecutiveFailures(t *testing.T) {
 		if i > 0 && i%domain.LimitLoginEmail == 0 {
 			w.clock.t = w.clock.t.Add(domain.RateWindow)
 		}
-		_, err := svc.Login(context.Background(), bad)
+		_, _, err := svc.Login(context.Background(), bad)
 		if !errors.Is(err, domain.ErrInvalidCredentials) {
 			t.Fatalf("i=%d %v", i, err)
 		}
@@ -135,7 +135,7 @@ func TestLoginLockAfterConsecutiveFailures(t *testing.T) {
 		t.Fatal("session should be revoked on lock")
 	}
 	w.clock.t = w.clock.t.Add(domain.RateWindow)
-	_, again := svc.Login(context.Background(), loginCmd("a@b.c"))
+	_, _, again := svc.Login(context.Background(), loginCmd("a@b.c"))
 	if !errors.Is(again, domain.ErrInvalidCredentials) {
 		t.Fatalf("locked login: %v", again)
 	}
@@ -144,11 +144,11 @@ func TestLoginLockAfterConsecutiveFailures(t *testing.T) {
 func TestLoginInvalidInput(t *testing.T) {
 	w := newWorld()
 	svc := w.service()
-	_, err := svc.Login(context.Background(), LoginCommand{Email: "x", Password: "twelvechars!", IP: "1.1.1.1"})
+	_, _, err := svc.Login(context.Background(), LoginCommand{Email: "x", Password: "twelvechars!", IP: "1.1.1.1"})
 	if !errors.Is(err, domain.ErrInvalidRequest) {
 		t.Fatalf("got %v", err)
 	}
-	_, err = svc.Login(context.Background(), LoginCommand{Email: "a@b.c", Password: "twelvechars!", IP: ""})
+	_, _, err = svc.Login(context.Background(), LoginCommand{Email: "a@b.c", Password: "twelvechars!", IP: ""})
 	if !errors.Is(err, domain.ErrInvalidRequest) {
 		t.Fatalf("got %v", err)
 	}
@@ -156,11 +156,11 @@ func TestLoginInvalidInput(t *testing.T) {
 
 func TestLoginHasherError(t *testing.T) {
 	w := newWorld()
-	if _, err := w.service().Register(context.Background(), registerCmd("a@b.c")); err != nil {
+	if _, _, err := w.service().Register(context.Background(), registerCmd("a@b.c")); err != nil {
 		t.Fatal(err)
 	}
 	w.hasher.failVerify = true
-	_, err := w.service().Login(context.Background(), loginCmd("a@b.c"))
+	_, _, err := w.service().Login(context.Background(), loginCmd("a@b.c"))
 	if err == nil {
 		t.Fatal("expected verify error")
 	}
@@ -169,11 +169,11 @@ func TestLoginHasherError(t *testing.T) {
 func TestLoginSignerPartial(t *testing.T) {
 	w := newWorld()
 	svc := w.service()
-	if _, err := svc.Register(context.Background(), registerCmd("a@b.c")); err != nil {
+	if _, _, err := svc.Register(context.Background(), registerCmd("a@b.c")); err != nil {
 		t.Fatal(err)
 	}
 	w.signer.fail = true
-	_, err := svc.Login(context.Background(), loginCmd("a@b.c"))
+	_, _, err := svc.Login(context.Background(), loginCmd("a@b.c"))
 	if err == nil {
 		t.Fatal("expected sign error")
 	}
@@ -185,7 +185,7 @@ func TestLoginSignerPartial(t *testing.T) {
 func TestLoginLimiterError(t *testing.T) {
 	w := newWorld()
 	w.limiter.err = errors.New("limiter down")
-	_, err := w.service().Login(context.Background(), loginCmd("a@b.c"))
+	_, _, err := w.service().Login(context.Background(), loginCmd("a@b.c"))
 	if err == nil {
 		t.Fatal("expected limiter error")
 	}
@@ -195,7 +195,7 @@ func TestLoginCanceled(t *testing.T) {
 	w := newWorld()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := w.service().Login(ctx, loginCmd("a@b.c"))
+	_, _, err := w.service().Login(ctx, loginCmd("a@b.c"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
 	}

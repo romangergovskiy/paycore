@@ -12,10 +12,10 @@ import (
 func loginOnce(t *testing.T, w *world) Credentials {
 	t.Helper()
 	svc := w.service()
-	if _, err := svc.Register(context.Background(), registerCmd("a@b.c")); err != nil {
+	if _, _, err := svc.Register(context.Background(), registerCmd("a@b.c")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := svc.Login(context.Background(), loginCmd("a@b.c"))
+	got, _, err := svc.Login(context.Background(), loginCmd("a@b.c"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func loginOnce(t *testing.T, w *world) Credentials {
 func TestRefreshRotates(t *testing.T) {
 	w := newWorld()
 	first := loginOnce(t, w)
-	got, err := w.service().Refresh(context.Background(), RefreshCommand{
+	got, _, err := w.service().Refresh(context.Background(), RefreshCommand{
 		RefreshToken: first.RefreshToken,
 		IP:           "203.0.113.10",
 	})
@@ -47,14 +47,14 @@ func TestRefreshReuseRevokesSession(t *testing.T) {
 	w := newWorld()
 	first := loginOnce(t, w)
 	svc := w.service()
-	second, err := svc.Refresh(context.Background(), RefreshCommand{
+	second, _, err := svc.Refresh(context.Background(), RefreshCommand{
 		RefreshToken: first.RefreshToken,
 		IP:           "203.0.113.10",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = svc.Refresh(context.Background(), RefreshCommand{
+	_, _, err = svc.Refresh(context.Background(), RefreshCommand{
 		RefreshToken: first.RefreshToken,
 		IP:           "203.0.113.10",
 	})
@@ -65,7 +65,7 @@ func TestRefreshReuseRevokesSession(t *testing.T) {
 	if sess.Live() || sess.RevokeReason != domain.RevokeTokenReuse {
 		t.Fatalf("session %+v", sess)
 	}
-	_, err = svc.Refresh(context.Background(), RefreshCommand{
+	_, _, err = svc.Refresh(context.Background(), RefreshCommand{
 		RefreshToken: second.RefreshToken,
 		IP:           "203.0.113.10",
 	})
@@ -78,7 +78,7 @@ func TestRefreshExpiredKeepsSession(t *testing.T) {
 	w := newWorld()
 	first := loginOnce(t, w)
 	w.clock.t = w.clock.t.Add(domain.RefreshTTL).Add(time.Second)
-	_, err := w.service().Refresh(context.Background(), RefreshCommand{
+	_, _, err := w.service().Refresh(context.Background(), RefreshCommand{
 		RefreshToken: first.RefreshToken,
 		IP:           "203.0.113.10",
 	})
@@ -94,15 +94,15 @@ func TestRefreshExpiredKeepsSession(t *testing.T) {
 func TestRefreshUnknownAndEmpty(t *testing.T) {
 	w := newWorld()
 	svc := w.service()
-	_, err := svc.Refresh(context.Background(), RefreshCommand{RefreshToken: "nope", IP: "1.1.1.1"})
+	_, _, err := svc.Refresh(context.Background(), RefreshCommand{RefreshToken: "nope", IP: "1.1.1.1"})
 	if !errors.Is(err, domain.ErrInvalidToken) {
 		t.Fatalf("unknown: %v", err)
 	}
-	_, err = svc.Refresh(context.Background(), RefreshCommand{RefreshToken: "", IP: "1.1.1.1"})
+	_, _, err = svc.Refresh(context.Background(), RefreshCommand{RefreshToken: "", IP: "1.1.1.1"})
 	if !errors.Is(err, domain.ErrInvalidRequest) {
 		t.Fatalf("empty: %v", err)
 	}
-	_, err = svc.Refresh(context.Background(), RefreshCommand{RefreshToken: "x", IP: ""})
+	_, _, err = svc.Refresh(context.Background(), RefreshCommand{RefreshToken: "x", IP: ""})
 	if !errors.Is(err, domain.ErrInvalidRequest) {
 		t.Fatalf("ip: %v", err)
 	}
@@ -111,13 +111,13 @@ func TestRefreshUnknownAndEmpty(t *testing.T) {
 func TestRefreshRevokedSession(t *testing.T) {
 	w := newWorld()
 	first := loginOnce(t, w)
-	if err := w.service().Logout(context.Background(), domain.Principal{
+	if _, err := w.service().Logout(context.Background(), domain.Principal{
 		UserID:    first.User.ID,
 		SessionID: first.SessionID,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := w.service().Refresh(context.Background(), RefreshCommand{
+	_, _, err := w.service().Refresh(context.Background(), RefreshCommand{
 		RefreshToken: first.RefreshToken,
 		IP:           "203.0.113.10",
 	})
@@ -130,7 +130,7 @@ func TestRefreshIssuerError(t *testing.T) {
 	w := newWorld()
 	first := loginOnce(t, w)
 	w.issuer.fail = true
-	_, err := w.service().Refresh(context.Background(), RefreshCommand{
+	_, _, err := w.service().Refresh(context.Background(), RefreshCommand{
 		RefreshToken: first.RefreshToken,
 		IP:           "203.0.113.10",
 	})
@@ -143,7 +143,7 @@ func TestRefreshCanceled(t *testing.T) {
 	w := newWorld()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := w.service().Refresh(ctx, RefreshCommand{RefreshToken: "x", IP: "1.1.1.1"})
+	_, _, err := w.service().Refresh(ctx, RefreshCommand{RefreshToken: "x", IP: "1.1.1.1"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
 	}
