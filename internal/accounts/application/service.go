@@ -31,10 +31,17 @@ type Store interface {
 	AppendHistory(ctx context.Context, h domain.StatusHistory) error
 }
 
+// BalanceReader reads ledger.account_balances without locking (not L5).
+// Amounts are int64 minor units, matching ledger.BalanceSnapshot fields.
+type BalanceReader interface {
+	Get(ctx context.Context, accountID uuid.UUID) (available, reserved, version int64, err error)
+}
+
 type Service struct {
-	Store  Store
-	Opener ledger.AccountOpener
-	Locker ledger.BalanceLocker
+	Store    Store
+	Opener   ledger.AccountOpener
+	Locker   ledger.BalanceLocker
+	Balances BalanceReader
 }
 
 type Opened struct {
@@ -108,6 +115,19 @@ func (s Service) GetByNumber(ctx context.Context, number string) (domain.Account
 		return domain.Account{}, domain.ErrInvalidAccount
 	}
 	return s.Store.GetByNumber(ctx, number)
+}
+
+func (s Service) Balance(ctx context.Context, id uuid.UUID) (available, reserved, version int64, err error) {
+	if s.Store == nil || s.Balances == nil {
+		return 0, 0, 0, errNotWired
+	}
+	if id == uuid.Nil {
+		return 0, 0, 0, domain.ErrAccountNotFound
+	}
+	if _, err := s.Store.Get(ctx, id); err != nil {
+		return 0, 0, 0, err
+	}
+	return s.Balances.Get(ctx, id)
 }
 
 func (s Service) ListByOwner(ctx context.Context, userID, merchantID *uuid.UUID) ([]domain.Account, error) {

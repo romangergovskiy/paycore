@@ -307,6 +307,7 @@ type memStore struct {
 	applyCalls     int
 	appendCalls    int
 	appendErr      error
+	getErr         error
 	getByNumberErr error
 	lastHistory    domain.StatusHistory
 }
@@ -331,9 +332,15 @@ func (m *memStore) Create(_ context.Context, acc domain.Account) error {
 	return nil
 }
 
-func (m *memStore) Get(_ context.Context, id uuid.UUID) (domain.Account, error) {
+func (m *memStore) Get(ctx context.Context, id uuid.UUID) (domain.Account, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.Account{}, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.getErr != nil {
+		return domain.Account{}, m.getErr
+	}
 	acc, ok := m.byID[id]
 	if !ok {
 		return domain.Account{}, domain.ErrAccountNotFound
