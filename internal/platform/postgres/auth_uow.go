@@ -14,8 +14,9 @@ type authUoW struct {
 
 // NewAuthUoW owns Begin/Commit/Rollback for Identity/Auth writes.
 // Each Do starts one pgx.Tx and builds every auth store on that Tx.
-// Commit vs rollback comes from application.Decision, not from err == nil
-// and not from error text or codes. Accounts finishTx must not be reused.
+// Commit vs rollback is an explicit match on application.Decision, not
+// err == nil and not error text or codes. An unknown Decision rolls back
+// with errUnknownAuthDecision. Accounts finishTx must not be reused.
 func NewAuthUoW(db beginner) application.UnitOfWork {
 	return authUoW{db: db}
 }
@@ -49,6 +50,12 @@ func runAuthTx(ctx context.Context, tx txFinisher, fn func() (application.Decisi
 	return finishAuthTx(ctx, tx, dec, runErr)
 }
 
+// errUnknownAuthDecision is returned when finishAuthTx sees a Decision that
+// is neither Commit nor Rollback. That is an adapter defect, not a business
+// rejection: the transaction rolls back. finishAuthTx still does not inspect
+// runErr text or codes to choose commit vs rollback.
+var errUnknownAuthDecision = errors.New("auth: unknown unit of work decision")
+
 func finishAuthTx(ctx context.Context, tx txFinisher, dec application.Decision, runErr error) error {
 	if err := ctx.Err(); err != nil {
 		cause := err
@@ -57,13 +64,21 @@ func finishAuthTx(ctx context.Context, tx txFinisher, dec application.Decision, 
 		}
 		return rollbackAuthTx(ctx, tx, cause)
 	}
-	if dec != application.Commit {
+	switch dec {
+	case application.Commit:
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("auth tx commit: %w", err)
+		}
+		return runErr
+	case application.Rollback:
 		return rollbackAuthTx(ctx, tx, runErr)
+	default:
+		cause := errUnknownAuthDecision
+		if runErr != nil {
+			cause = errors.Join(errUnknownAuthDecision, runErr)
+		}
+		return rollbackAuthTx(ctx, tx, cause)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("auth tx commit: %w", err)
-	}
-	return runErr
 }
 
 func rollbackAuthTx(ctx context.Context, tx txFinisher, cause error) error {

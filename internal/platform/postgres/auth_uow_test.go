@@ -199,6 +199,53 @@ func TestAuthUoW12DecisionNotErrNil(t *testing.T) {
 	})
 }
 
+func TestAuthUoWUnknownDecisionNilRollsBack(t *testing.T) {
+	tx := &fakeFinisher{}
+	err := finishAuthTx(context.Background(), tx, application.Decision(99), nil)
+	if !errors.Is(err, errUnknownAuthDecision) {
+		t.Fatalf("got %v", err)
+	}
+	if tx.commits != 0 || tx.rollbacks != 1 {
+		t.Fatalf("commit=%d rollback=%d", tx.commits, tx.rollbacks)
+	}
+}
+
+func TestAuthUoWUnknownDecisionJoinsBusiness(t *testing.T) {
+	tx := &fakeFinisher{}
+	err := finishAuthTx(context.Background(), tx, application.Decision(2), domain.ErrInvalidCredentials)
+	if !errors.Is(err, errUnknownAuthDecision) || !errors.Is(err, domain.ErrInvalidCredentials) {
+		t.Fatalf("got %v", err)
+	}
+	if tx.commits != 0 || tx.rollbacks != 1 {
+		t.Fatalf("commit=%d rollback=%d", tx.commits, tx.rollbacks)
+	}
+}
+
+func TestAuthUoWKnownDecisionsUnchanged(t *testing.T) {
+	t.Run("commit with business error still commits", func(t *testing.T) {
+		tx := &fakeFinisher{}
+		err := finishAuthTx(context.Background(), tx, application.Commit, domain.ErrEmailTaken)
+		if !errors.Is(err, domain.ErrEmailTaken) {
+			t.Fatalf("got %v", err)
+		}
+		if errors.Is(err, errUnknownAuthDecision) {
+			t.Fatal("sentinel on a known Decision")
+		}
+		if tx.commits != 1 || tx.rollbacks != 0 {
+			t.Fatalf("commit=%d rollback=%d", tx.commits, tx.rollbacks)
+		}
+	})
+	t.Run("rollback with nil still rolls back", func(t *testing.T) {
+		tx := &fakeFinisher{}
+		if err := finishAuthTx(context.Background(), tx, application.Rollback, nil); err != nil {
+			t.Fatal(err)
+		}
+		if tx.commits != 0 || tx.rollbacks != 1 {
+			t.Fatalf("commit=%d rollback=%d", tx.commits, tx.rollbacks)
+		}
+	})
+}
+
 type panicBeginner struct{}
 
 func (panicBeginner) Begin(context.Context) (pgx.Tx, error) {
