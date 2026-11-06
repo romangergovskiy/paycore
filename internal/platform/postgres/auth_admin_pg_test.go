@@ -43,20 +43,29 @@ func TestAuthAdminRoleSerialization(t *testing.T) {
 		if canUpdate {
 			t.Fatal("paycore_app has UPDATE on auth.roles")
 		}
-		tx, err := app.Begin(ctx)
+		denied, err := app.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer func() { _ = tx.Rollback(ctx) }()
-		_, err = tx.Exec(ctx, `SELECT code FROM auth.roles WHERE code = 'ADMIN' FOR UPDATE`)
+		_, err = denied.Exec(ctx, `SELECT code FROM auth.roles WHERE code = 'ADMIN' FOR UPDATE`)
+		_ = denied.Rollback(ctx)
 		if err == nil {
 			t.Fatal("FOR UPDATE on auth.roles succeeded")
 		}
 		if !strings.Contains(strings.ToLower(err.Error()), "permission denied") {
 			t.Fatalf("FOR UPDATE error = %v", err)
 		}
-		if _, err := tx.Exec(ctx, lockAdminRoleMutationsSQL, adminRoleMutationLockKey); err != nil {
+
+		held, err := app.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := held.Exec(ctx, lockAdminRoleMutationsSQL, adminRoleMutationLockKey); err != nil {
+			_ = held.Rollback(ctx)
 			t.Fatalf("pg_advisory_xact_lock: %v", err)
+		}
+		if err := held.Rollback(ctx); err != nil {
+			t.Fatal(err)
 		}
 	})
 
