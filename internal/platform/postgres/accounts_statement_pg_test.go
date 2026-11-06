@@ -44,7 +44,7 @@ func TestAccountStatement(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got == nil || len(got) != 0 {
+		if got.Lines == nil || len(got.Lines) != 0 || got.NextCursor != nil {
 			t.Fatalf("empty %+v", got)
 		}
 	})
@@ -59,10 +59,10 @@ func TestAccountStatement(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 1 {
+		if len(got.Lines) != 1 || got.NextCursor != nil {
 			t.Fatalf("lines = %+v", got)
 		}
-		line := got[0]
+		line := got.Lines[0]
 		if line.Kind != ledger.KindAvailable || line.Side != ledger.Credit || line.Amount != amount {
 			t.Fatalf("line %+v", line)
 		}
@@ -84,7 +84,7 @@ func TestAccountStatement(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(otherLines) != 0 {
+		if len(otherLines.Lines) != 0 || otherLines.NextCursor != nil {
 			t.Fatalf("other %+v", otherLines)
 		}
 	})
@@ -98,11 +98,11 @@ func TestAccountStatement(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 3 {
-			t.Fatalf("lines = %d %+v", len(got), got)
+		if len(got.Lines) != 3 {
+			t.Fatalf("lines = %d %+v", len(got.Lines), got)
 		}
 		var sawAvailDebit, sawHoldCredit bool
-		for _, line := range got {
+		for _, line := range got.Lines {
 			if line.Kind != ledger.KindAvailable && line.Kind != ledger.KindHold {
 				t.Fatalf("kind %+v", line)
 			}
@@ -127,23 +127,84 @@ func TestAccountStatement(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(all) != 3 || all[0].Amount != 100 || all[1].Amount != 200 || all[2].Amount != 300 {
+		if len(all.Lines) != 3 || all.Lines[0].Amount != 100 || all.Lines[1].Amount != 200 || all.Lines[2].Amount != 300 {
 			t.Fatalf("all %+v", all)
 		}
-		for i := 1; i < len(all); i++ {
-			if all[i].CreatedAt.Before(all[i-1].CreatedAt) {
-				t.Fatalf("created_at order %+v", all)
+		for i := 1; i < len(all.Lines); i++ {
+			if all.Lines[i].CreatedAt.Before(all.Lines[i-1].CreatedAt) {
+				t.Fatalf("created_at order %+v", all.Lines)
 			}
-			if all[i].CreatedAt.Equal(all[i-1].CreatedAt) && all[i].ID.String() <= all[i-1].ID.String() {
-				t.Fatalf("id tiebreak %+v", all)
+			if all.Lines[i].CreatedAt.Equal(all.Lines[i-1].CreatedAt) && all.Lines[i].ID.String() <= all.Lines[i-1].ID.String() {
+				t.Fatalf("id tiebreak %+v", all.Lines)
 			}
 		}
 		page, err := svc.Statement(ctx, opened.Account.ID, application.StatementQuery{Limit: 2})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(page) != 2 || page[0].ID != all[0].ID || page[1].ID != all[1].ID {
-			t.Fatalf("page %+v want first of %+v", page, all)
+		if len(page.Lines) != 2 || page.NextCursor == nil {
+			t.Fatalf("page %+v", page)
+		}
+		if page.Lines[0].ID != all.Lines[0].ID || page.Lines[1].ID != all.Lines[1].ID {
+			t.Fatalf("page %+v want first of %+v", page.Lines, all.Lines)
+		}
+		if page.NextCursor.ID != page.Lines[1].ID {
+			t.Fatalf("cursor from +1 row: %+v", page.NextCursor)
+		}
+		rest, err := svc.Statement(ctx, opened.Account.ID, application.StatementQuery{Limit: 2, Cursor: page.NextCursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rest.Lines) != 1 || rest.NextCursor != nil || rest.Lines[0].ID != all.Lines[2].ID {
+			t.Fatalf("rest %+v", rest)
+		}
+	})
+
+	t.Run("keyset walk no dupes or skips", func(t *testing.T) {
+		opened := mustOpen(t, ctx, uow, user, "PC-STMT-WALK")
+		for _, amount := range []int64{10, 20, 30, 40, 50} {
+			topupOpened(t, ctx, app, opened, amount)
+		}
+		full, err := svc.Statement(ctx, opened.Account.ID, application.StatementQuery{Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(full.Lines) != 5 || full.NextCursor != nil {
+			t.Fatalf("full %+v", full)
+		}
+		walked := walkAccountStatement(t, ctx, svc, opened.Account.ID, 2)
+		if len(walked) != 5 {
+			t.Fatalf("walk %d", len(walked))
+		}
+		for i := range full.Lines {
+			if walked[i].ID != full.Lines[i].ID || walked[i].Amount != full.Lines[i].Amount {
+				t.Fatalf("walk[%d]=%+v want %+v", i, walked[i], full.Lines[i])
+			}
+		}
+		exact := walkAccountStatement(t, ctx, svc, opened.Account.ID, 5)
+		if len(exact) != 5 {
+			t.Fatalf("exact %d", len(exact))
+		}
+	})
+
+	t.Run("invalid cursor is error not empty page", func(t *testing.T) {
+		opened := mustOpen(t, ctx, uow, user, "PC-STMT-CUR")
+		topupOpened(t, ctx, app, opened, 7)
+		got, err := svc.Statement(ctx, opened.Account.ID, application.StatementQuery{
+			Limit: 10, Cursor: &application.StatementCursor{CreatedAt: time.Now().UTC(), ID: uuid.Nil},
+		})
+		if !errors.Is(err, domain.ErrInvalidAccount) || len(got.Lines) != 0 {
+			t.Fatalf("nil cursor id: %+v %v", got, err)
+		}
+		got, err = svc.Statement(ctx, opened.Account.ID, application.StatementQuery{
+			Limit: 10, Cursor: &application.StatementCursor{ID: mustNewID(t)},
+		})
+		if !errors.Is(err, domain.ErrInvalidAccount) || len(got.Lines) != 0 {
+			t.Fatalf("zero time: %+v %v", got, err)
+		}
+		got, err = svc.Statement(ctx, opened.Account.ID, application.StatementQuery{Limit: 101})
+		if !errors.Is(err, domain.ErrInvalidAccount) || len(got.Lines) != 0 {
+			t.Fatalf("limit 101: %+v %v", got, err)
 		}
 	})
 
@@ -205,6 +266,41 @@ SELECT version, updated_at FROM ledger.account_balances WHERE account_id = $1`, 
 			t.Fatalf("write on read entries %d→%d journals %d→%d version %d→%d", entries, entriesAfter, journals, journalsAfter, version, versionAfter)
 		}
 	})
+}
+
+func walkAccountStatement(t *testing.T, ctx context.Context, svc application.Service, id uuid.UUID, limit int) []application.StatementLine {
+	t.Helper()
+	var (
+		all    []application.StatementLine
+		cursor *application.StatementCursor
+		seen   = map[uuid.UUID]bool{}
+	)
+	for i := 0; i < 32; i++ {
+		page, err := svc.Statement(ctx, id, application.StatementQuery{Limit: limit, Cursor: cursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range page.Lines {
+			if seen[line.ID] {
+				t.Fatalf("duplicate %s", line.ID)
+			}
+			seen[line.ID] = true
+			all = append(all, line)
+		}
+		if page.NextCursor == nil {
+			return all
+		}
+		if len(page.Lines) != limit {
+			t.Fatalf("NextCursor with short page %d", len(page.Lines))
+		}
+		last := page.Lines[len(page.Lines)-1]
+		if page.NextCursor.ID != last.ID || !page.NextCursor.CreatedAt.Equal(last.CreatedAt) {
+			t.Fatalf("NextCursor %+v last %s", page.NextCursor, last.ID)
+		}
+		cursor = page.NextCursor
+	}
+	t.Fatal("walk did not end")
+	return all
 }
 
 func ledgerID(t *testing.T, opened application.Opened, kind ledger.AccountKind) uuid.UUID {

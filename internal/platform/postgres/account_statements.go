@@ -22,6 +22,7 @@ SELECT e.id, e.journal_transaction_id, e.ledger_account_id, la.kind,
  WHERE la.account_id = $1
    AND la.kind IN ('AVAILABLE', 'HOLD')
    AND j.status = 'POSTED'
+   AND ($3::timestamptz IS NULL OR (e.created_at, e.id) > ($3::timestamptz, $4::uuid))
  ORDER BY e.created_at ASC, e.id ASC
  LIMIT $2`
 
@@ -45,7 +46,20 @@ func (s *AccountStatements) List(ctx context.Context, accountID uuid.UUID, query
 	if query.Limit < 1 || query.Limit > application.MaxStatementLimit {
 		return nil, domain.ErrInvalidAccount
 	}
-	rows, err := s.q.Query(ctx, selectAccountStatementSQL, accountID, query.Limit)
+	if query.Cursor != nil && (query.Cursor.ID == uuid.Nil || query.Cursor.CreatedAt.IsZero()) {
+		return nil, domain.ErrInvalidAccount
+	}
+
+	var (
+		cursorAt any
+		cursorID any
+	)
+	if query.Cursor != nil {
+		cursorAt = query.Cursor.CreatedAt
+		cursorID = query.Cursor.ID
+	}
+
+	rows, err := s.q.Query(ctx, selectAccountStatementSQL, accountID, query.Limit+1, cursorAt, cursorID)
 	if err != nil {
 		return nil, mapLedgerSQLError("list_statement", err)
 	}

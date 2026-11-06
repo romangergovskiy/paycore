@@ -19,6 +19,7 @@ func TestSelectAccountStatementSQLIsUnlockedRead(t *testing.T) {
 		"FLOAT",
 		"DOUBLE",
 		"NUMERIC",
+		"OFFSET",
 	} {
 		if strings.Contains(sql, banned) {
 			t.Fatalf("read SQL contains %q: %s", banned, selectAccountStatementSQL)
@@ -35,5 +36,10 @@ func TestSelectAccountStatementSQLIsUnlockedRead(t *testing.T) {
 	}
 	if !strings.Contains(sql, "ORDER BY E.CREATED_AT ASC, E.ID ASC") {
 		t.Fatalf("want created_at, id: %s", selectAccountStatementSQL)
+	}
+	postedAt := strings.Index(sql, "STATUS = 'POSTED'")
+	cursorAt := strings.Index(sql, "(E.CREATED_AT, E.ID) >")
+	if postedAt < 0 || cursorAt < 0 || postedAt > cursorAt {
+		t.Fatalf("POSTED must precede keyset: %s", selectAccountStatementSQL)
 	}
 }

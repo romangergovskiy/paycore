@@ -40,9 +40,25 @@ type BalanceReader interface {
 // MaxStatementLimit is the maximum StatementQuery.Limit.
 const MaxStatementLimit = 100
 
-// StatementQuery pages a statement. Order is created_at, id (no cursor).
+// StatementCursor is a keyset position (created_at, id). It is not a SQL
+// fragment and is not encoded by infrastructure.
+type StatementCursor struct {
+	CreatedAt time.Time
+	ID        uuid.UUID
+}
+
+// StatementQuery pages a statement. Order is created_at ASC, id ASC.
+// A nil Cursor is the first page. Limit is 1…MaxStatementLimit.
 type StatementQuery struct {
-	Limit int
+	Limit  int
+	Cursor *StatementCursor
+}
+
+// StatementPage is one page of statement lines. NextCursor is set from the
+// last returned line when another row exists; it is nil on the last page.
+type StatementPage struct {
+	Lines      []StatementLine
+	NextCursor *StatementCursor
 }
 
 // StatementLine is one POSTED ledger_entries row on this account's
@@ -176,27 +192,50 @@ func (s Service) Balance(ctx context.Context, id uuid.UUID) (available, reserved
 	return s.Balances.Get(ctx, id)
 }
 
-func (s Service) Statement(ctx context.Context, accountID uuid.UUID, query StatementQuery) ([]StatementLine, error) {
+func (s Service) Statement(ctx context.Context, accountID uuid.UUID, query StatementQuery) (StatementPage, error) {
+	var zero StatementPage
 	if s.Store == nil || s.Statements == nil {
-		return nil, errNotWired
+		return zero, errNotWired
 	}
 	if accountID == uuid.Nil {
-		return nil, domain.ErrAccountNotFound
+		return zero, domain.ErrAccountNotFound
 	}
-	if query.Limit < 1 || query.Limit > MaxStatementLimit {
-		return nil, domain.ErrInvalidAccount
+	if err := validateStatementQuery(query); err != nil {
+		return zero, err
 	}
 	if _, err := s.Store.Get(ctx, accountID); err != nil {
-		return nil, err
+		return zero, err
 	}
 	list, err := s.Statements.List(ctx, accountID, query)
 	if err != nil {
-		return nil, err
+		return zero, err
 	}
-	if list == nil {
-		list = []StatementLine{}
+	return statementPage(list, query.Limit), nil
+}
+
+func validateStatementQuery(query StatementQuery) error {
+	if query.Limit < 1 || query.Limit > MaxStatementLimit {
+		return domain.ErrInvalidAccount
 	}
-	return list, nil
+	if query.Cursor != nil && (query.Cursor.ID == uuid.Nil || query.Cursor.CreatedAt.IsZero()) {
+		return domain.ErrInvalidAccount
+	}
+	return nil
+}
+
+func statementPage(lines []StatementLine, limit int) StatementPage {
+	if lines == nil {
+		lines = []StatementLine{}
+	}
+	if len(lines) <= limit {
+		return StatementPage{Lines: lines}
+	}
+	out := append([]StatementLine(nil), lines[:limit]...)
+	last := out[len(out)-1]
+	return StatementPage{
+		Lines:      out,
+		NextCursor: &StatementCursor{CreatedAt: last.CreatedAt, ID: last.ID},
+	}
 }
 
 func (s Service) ListByOwner(ctx context.Context, userID, merchantID *uuid.UUID) ([]domain.Account, error) {
