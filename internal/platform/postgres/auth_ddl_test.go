@@ -216,14 +216,20 @@ func TestAuthDDL(t *testing.T) {
 		sid := mustNewID(t)
 		if _, err := app.Exec(ctx, `
 			INSERT INTO auth.sessions (id, user_id) VALUES ($1, $2)`, sid, u); err != nil {
-			t.Fatalf("insert session: %v", err)
+			t.Fatalf("NULL/NULL: %v", err)
 		}
 		mustFail(t, ctx, app, `
 			UPDATE auth.sessions SET revoke_reason = 'LOGOUT' WHERE id = $1`, sid)
+		mustFail(t, ctx, app, `
+			INSERT INTO auth.sessions (id, user_id, revoked_at)
+			VALUES ($1, $2, now())`, mustNewID(t), u)
 		if _, err := app.Exec(ctx, `
 			UPDATE auth.sessions SET revoked_at = now(), revoke_reason = 'LOGOUT' WHERE id = $1`, sid); err != nil {
-			t.Fatalf("revoke session: %v", err)
+			t.Fatalf("revoked+LOGOUT: %v", err)
 		}
+		mustFail(t, ctx, app, `
+			INSERT INTO auth.sessions (id, user_id, revoked_at, revoke_reason)
+			VALUES ($1, $2, now(), 'NOPE')`, mustNewID(t), u)
 		var idx int
 		if err := owner.QueryRow(ctx, `
 			SELECT count(*) FROM pg_indexes

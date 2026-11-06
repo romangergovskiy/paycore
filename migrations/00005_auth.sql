@@ -73,10 +73,14 @@ CREATE TABLE auth.sessions (
     revoke_reason TEXT,
     CONSTRAINT ck_sessions_revoke CHECK (
         (revoked_at IS NULL AND revoke_reason IS NULL)
-        OR (revoked_at IS NOT NULL AND revoke_reason IN (
-            'LOGOUT', 'LOGOUT_ALL', 'PASSWORD_CHANGED', 'TOKEN_REUSE',
-            'USER_LOCKED', 'USER_DISABLED', 'ADMIN_REVOKE'
-        ))
+        OR (
+            revoked_at IS NOT NULL
+            AND revoke_reason IS NOT NULL
+            AND revoke_reason IN (
+                'LOGOUT', 'LOGOUT_ALL', 'PASSWORD_CHANGED', 'TOKEN_REUSE',
+                'USER_LOCKED', 'USER_DISABLED', 'ADMIN_REVOKE'
+            )
+        )
     )
 );
 
