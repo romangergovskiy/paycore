@@ -189,26 +189,41 @@ func (s Service) Login(ctx context.Context, cmd LoginCommand) (Credentials, Deci
 		return zero, Rollback, err
 	}
 
-	if !found || !ok || u.Status != domain.StatusActive {
+	if !found || !ok {
 		dec, err := s.loginRejected(ctx, email, cmd.IP, u, found, now)
 		return zero, dec, err
 	}
 
-	u.FailedLoginCount = 0
-	u.LockedAt = nil
-	u.UpdatedAt = now
-	if err := s.Users.Update(ctx, u); err != nil {
+	// Re-read under row lock so a concurrent lockout is not overwritten
+	// by Update of the GetByEmail snapshot after verify.
+	fresh, err := s.Users.GetForUpdate(ctx, u.ID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			dec, rerr := s.loginRejected(ctx, email, cmd.IP, u, false, now)
+			return zero, dec, rerr
+		}
 		return zero, Rollback, err
 	}
-	roles, err := s.Roles.List(ctx, u.ID)
+	if fresh.Status != domain.StatusActive {
+		dec, err := s.rejectInactive(ctx, email, cmd.IP, fresh, now)
+		return zero, dec, err
+	}
+
+	fresh.FailedLoginCount = 0
+	fresh.LockedAt = nil
+	fresh.UpdatedAt = now
+	if err := s.Users.Update(ctx, fresh); err != nil {
+		return zero, Rollback, err
+	}
+	roles, err := s.Roles.List(ctx, fresh.ID)
 	if err != nil {
 		return zero, Rollback, err
 	}
-	cred, err := s.issueSession(ctx, u, roles, cmd.IP, cmd.UserAgent, now)
+	cred, err := s.issueSession(ctx, fresh, roles, cmd.IP, cmd.UserAgent, now)
 	if err != nil {
 		return zero, Rollback, err
 	}
-	if err := s.noteAttempt(ctx, email, &u.ID, cmd.IP, true, "", now); err != nil {
+	if err := s.noteAttempt(ctx, email, &fresh.ID, cmd.IP, true, "", now); err != nil {
 		return zero, Rollback, err
 	}
 	return cred, Commit, nil
@@ -249,14 +264,38 @@ func (s Service) loginRejected(ctx context.Context, email, ip string, u domain.U
 	return Commit, domain.ErrInvalidCredentials
 }
 
+func (s Service) rejectInactive(ctx context.Context, email, ip string, u domain.User, now time.Time) (Decision, error) {
+	n, err := s.Limiter.Hit(ctx, domain.BucketLoginEmail, email, now)
+	if err != nil {
+		return Rollback, err
+	}
+	reason := domain.FailureLocked
+	if u.Status == domain.StatusDisabled {
+		reason = domain.FailureDisabled
+	}
+	if n > domain.LimitLoginEmail {
+		if err := s.noteAttempt(ctx, email, &u.ID, ip, false, domain.FailureRateLimited, now); err != nil {
+			return Rollback, err
+		}
+		return Commit, domain.ErrRateLimited
+	}
+	if err := s.noteAttempt(ctx, email, &u.ID, ip, false, reason, now); err != nil {
+		return Rollback, err
+	}
+	return Commit, domain.ErrInvalidCredentials
+}
+
 func (s Service) bumpFailure(ctx context.Context, userID uuid.UUID, now time.Time) error {
 	u, err := s.Users.GetForUpdate(ctx, userID)
 	if err != nil {
 		return err
 	}
+	if u.Status != domain.StatusActive {
+		return nil
+	}
 	u.FailedLoginCount++
 	u.UpdatedAt = now
-	if u.FailedLoginCount >= domain.LockAfter && u.Status == domain.StatusActive {
+	if u.FailedLoginCount >= domain.LockAfter {
 		locked := now
 		u.Status = domain.StatusLocked
 		u.LockedAt = &locked

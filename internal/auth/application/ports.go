@@ -15,6 +15,8 @@ type UserStore interface {
 	Get(ctx context.Context, id uuid.UUID) (domain.User, error)
 	GetByEmail(ctx context.Context, email string) (domain.User, error)
 	// GetForUpdate locks the user row until the transaction ends (FOR UPDATE).
+	// Login re-reads with this after password verify so a concurrent lockout
+	// is not overwritten by Update of a stale GetByEmail copy.
 	GetForUpdate(ctx context.Context, id uuid.UUID) (domain.User, error)
 	Update(ctx context.Context, u domain.User) error
 }
