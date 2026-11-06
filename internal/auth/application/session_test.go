@@ -15,10 +15,10 @@ func TestLogoutAndRepeat(t *testing.T) {
 	first := loginOnce(t, w)
 	p := domain.Principal{UserID: first.User.ID, SessionID: first.SessionID}
 	svc := w.service()
-	if err := svc.Logout(context.Background(), p); err != nil {
+	if _, err := svc.Logout(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Logout(context.Background(), p); err != nil {
+	if _, err := svc.Logout(context.Background(), p); err != nil {
 		t.Fatalf("repeat logout: %v", err)
 	}
 	_, err := svc.ValidateSession(context.Background(), first.SessionID)
@@ -29,7 +29,7 @@ func TestLogoutAndRepeat(t *testing.T) {
 
 func TestLogoutUnknownSession(t *testing.T) {
 	w := newWorld()
-	err := w.service().Logout(context.Background(), domain.Principal{
+	_, err := w.service().Logout(context.Background(), domain.Principal{
 		UserID:    uuid.Must(uuid.NewV7()),
 		SessionID: uuid.Must(uuid.NewV7()),
 	})
@@ -41,7 +41,7 @@ func TestLogoutUnknownSession(t *testing.T) {
 func TestLogoutOtherUsersSession(t *testing.T) {
 	w := newWorld()
 	first := loginOnce(t, w)
-	err := w.service().Logout(context.Background(), domain.Principal{
+	_, err := w.service().Logout(context.Background(), domain.Principal{
 		UserID:    uuid.Must(uuid.NewV7()),
 		SessionID: first.SessionID,
 	})
@@ -65,7 +65,7 @@ func TestValidateSessionLive(t *testing.T) {
 func TestValidateSessionRevoked(t *testing.T) {
 	w := newWorld()
 	first := loginOnce(t, w)
-	_ = w.service().Logout(context.Background(), domain.Principal{
+	_, _ = w.service().Logout(context.Background(), domain.Principal{
 		UserID: first.User.ID, SessionID: first.SessionID,
 	})
 	_, err := w.service().ValidateSession(context.Background(), first.SessionID)
@@ -105,7 +105,7 @@ func TestLogoutCanceled(t *testing.T) {
 	w := newWorld()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := w.service().Logout(ctx, domain.Principal{SessionID: uuid.Must(uuid.NewV7())})
+	_, err := w.service().Logout(ctx, domain.Principal{SessionID: uuid.Must(uuid.NewV7())})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
 	}

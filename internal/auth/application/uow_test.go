@@ -10,7 +10,7 @@ import (
 
 func TestRegisterInCommits(t *testing.T) {
 	w := newWorld()
-	got, err := RegisterIn(context.Background(), memUoW{w: w}, w.service(), registerCmd("a@b.c"))
+	got, err := RegisterIn(context.Background(), &memUoW{w: w}, w.service(), registerCmd("a@b.c"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +21,7 @@ func TestRegisterInCommits(t *testing.T) {
 
 func TestLoginInAndRefreshIn(t *testing.T) {
 	w := newWorld()
-	uow := memUoW{w: w}
+	uow := &memUoW{w: w}
 	svc := w.service()
 	if _, err := RegisterIn(context.Background(), uow, svc, registerCmd("a@b.c")); err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestUoWCanceledBeforeDo(t *testing.T) {
 	w := newWorld()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := RegisterIn(ctx, memUoW{w: w}, w.service(), registerCmd("a@b.c"))
+	_, err := RegisterIn(ctx, &memUoW{w: w}, w.service(), registerCmd("a@b.c"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
 	}
@@ -75,7 +75,7 @@ func TestUoWCanceledBeforeDo(t *testing.T) {
 
 func TestGrantRevokeIn(t *testing.T) {
 	w := newWorld()
-	uow := memUoW{w: w}
+	uow := &memUoW{w: w}
 	svc := w.service()
 	reg, err := RegisterIn(context.Background(), uow, svc, registerCmd("c@b.c"))
 	if err != nil {

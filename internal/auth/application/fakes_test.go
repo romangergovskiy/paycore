@@ -515,6 +515,7 @@ func (s *memAttempts) Append(ctx context.Context, a domain.LoginAttempt) error {
 }
 
 type world struct {
+	txMu     sync.Mutex
 	users    *memUsers
 	sessions *memSessions
 	tokens   *memTokens
@@ -525,6 +526,16 @@ type world struct {
 	issuer   *memIssuer
 	signer   *memSigner
 	clock    *frozenClock
+}
+
+type worldSnap struct {
+	users    map[uuid.UUID]domain.User
+	sessions map[uuid.UUID]domain.Session
+	tokens   map[uuid.UUID]domain.RefreshToken
+	roles    map[uuid.UUID][]domain.UserRole
+	attempts []domain.LoginAttempt
+	limiter  map[string]int
+	issuerN  int
 }
 
 func newWorld() *world {
@@ -571,13 +582,147 @@ func (w *world) deps() Deps {
 	}
 }
 
-type memUoW struct{ w *world }
+type memUoW struct {
+	w         *world
+	committed bool
+	rolled    bool
+}
 
-func (u memUoW) Do(ctx context.Context, fn func(context.Context, Deps) error) error {
+func (u *memUoW) Do(ctx context.Context, fn func(context.Context, Deps) (Decision, error)) error {
+	u.committed = false
+	u.rolled = false
 	if err := ctx.Err(); err != nil {
+		u.rolled = true
 		return err
 	}
-	return fn(ctx, u.w.deps())
+	u.w.txMu.Lock()
+	defer u.w.txMu.Unlock()
+	snap := u.w.snapshot()
+	dec, err := fn(ctx, u.w.deps())
+	if ctx.Err() != nil {
+		u.w.restore(snap)
+		u.rolled = true
+		return ctx.Err()
+	}
+	if dec != Commit {
+		u.w.restore(snap)
+		u.rolled = true
+		return err
+	}
+	u.committed = true
+	return err
+}
+
+func (w *world) snapshot() worldSnap {
+	w.users.mu.Lock()
+	users := make(map[uuid.UUID]domain.User, len(w.users.byID))
+	for k, v := range w.users.byID {
+		users[k] = cloneUser(v)
+	}
+	w.users.mu.Unlock()
+
+	w.sessions.mu.Lock()
+	sessions := make(map[uuid.UUID]domain.Session, len(w.sessions.byID))
+	for k, v := range w.sessions.byID {
+		sessions[k] = cloneSession(v)
+	}
+	w.sessions.mu.Unlock()
+
+	w.tokens.mu.Lock()
+	tokens := make(map[uuid.UUID]domain.RefreshToken, len(w.tokens.byID))
+	for k, v := range w.tokens.byID {
+		tokens[k] = cloneToken(v)
+	}
+	w.tokens.mu.Unlock()
+
+	w.roles.mu.Lock()
+	roles := make(map[uuid.UUID][]domain.UserRole, len(w.roles.byUser))
+	for k, v := range w.roles.byUser {
+		roles[k] = append([]domain.UserRole(nil), v...)
+	}
+	w.roles.mu.Unlock()
+
+	w.attempts.mu.Lock()
+	attempts := append([]domain.LoginAttempt(nil), w.attempts.all...)
+	w.attempts.mu.Unlock()
+
+	w.limiter.mu.Lock()
+	limiter := make(map[string]int, len(w.limiter.n))
+	for k, v := range w.limiter.n {
+		limiter[k] = v
+	}
+	w.limiter.mu.Unlock()
+
+	return worldSnap{
+		users:    users,
+		sessions: sessions,
+		tokens:   tokens,
+		roles:    roles,
+		attempts: attempts,
+		limiter:  limiter,
+		issuerN:  w.issuer.n,
+	}
+}
+
+func (w *world) restore(s worldSnap) {
+	w.users.mu.Lock()
+	w.users.byID = s.users
+	w.users.mu.Unlock()
+
+	w.sessions.mu.Lock()
+	w.sessions.byID = s.sessions
+	w.sessions.mu.Unlock()
+
+	w.tokens.mu.Lock()
+	w.tokens.byID = s.tokens
+	w.tokens.mu.Unlock()
+
+	w.roles.mu.Lock()
+	w.roles.byUser = s.roles
+	w.roles.mu.Unlock()
+
+	w.attempts.mu.Lock()
+	w.attempts.all = s.attempts
+	w.attempts.mu.Unlock()
+
+	w.limiter.mu.Lock()
+	w.limiter.n = s.limiter
+	w.limiter.mu.Unlock()
+
+	w.issuer.n = s.issuerN
+}
+
+func cloneUser(u domain.User) domain.User {
+	if u.LockedAt != nil {
+		t := *u.LockedAt
+		u.LockedAt = &t
+	}
+	return u
+}
+
+func cloneSession(s domain.Session) domain.Session {
+	if s.RevokedAt != nil {
+		t := *s.RevokedAt
+		s.RevokedAt = &t
+	}
+	return s
+}
+
+func cloneToken(tok domain.RefreshToken) domain.RefreshToken {
+	tok.Hash = copyHash(tok.Hash)
+	if tok.ReplacedBy != nil {
+		id := *tok.ReplacedBy
+		tok.ReplacedBy = &id
+	}
+	if tok.UsedAt != nil {
+		t := *tok.UsedAt
+		tok.UsedAt = &t
+	}
+	if tok.RevokedAt != nil {
+		t := *tok.RevokedAt
+		tok.RevokedAt = &t
+	}
+	return tok
 }
 
 func registerCmd(email string) RegisterCommand {

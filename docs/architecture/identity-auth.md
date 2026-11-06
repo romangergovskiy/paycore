@@ -1,6 +1,6 @@
 # Identity и Auth — архитектура и контракты
 
-Статус: **принято для MVP**. Контракт — этап 3.19; DDL — `migrations/00005_auth.sql` (этап 3.20); domain и application — `internal/auth` (этап 3.21). PostgreSQL-адаптера, HTTP-обработчиков и bootstrap ADMIN нет. Решения — [D-41](decisions.md#d-41), [D-42](decisions.md#d-42). Ошибки API — [D-39](decisions.md#d-39). Скоуп и отказ от PCI/KYC — [D-20](decisions.md#d-20). Стек без Redis — [D-38](decisions.md#d-38).
+Статус: **принято для MVP**. Контракт — этап 3.19; DDL — `migrations/00005_auth.sql` (этап 3.20); domain и application — `internal/auth` (этап 3.21); семантика транзакций — `Decision` Commit/Rollback (этап 3.21.1). PostgreSQL-адаптера, HTTP-обработчиков и bootstrap ADMIN нет. Решения — [D-41](decisions.md#d-41), [D-42](decisions.md#d-42). Ошибки API — [D-39](decisions.md#d-39). Скоуп и отказ от PCI/KYC — [D-20](decisions.md#d-20). Стек без Redis — [D-38](decisions.md#d-38).
 
 Связанные документы: [../PROJECT_SPEC.md](../PROJECT_SPEC.md) §2.1, §5, §8; [decisions.md](decisions.md); [../database/database-schema.md](../database/database-schema.md) §12; [../database/er-diagram.md](../database/er-diagram.md) §4; [../database/data-integrity.md](../database/data-integrity.md).
 
@@ -107,7 +107,7 @@ Claims:
 | `iss` | `paycore` |
 | `sub` | `user_id` (UUID) |
 | `sid` | `session_id` (UUID) |
-| `roles` | массив кодов на момент выдачи (кэш; источник истины — `user_roles` при refresh и при grant, см. ниже) |
+| `roles` | кэш на TTL access (15 мин). Источник истины — `user_roles`, читаемый `ValidateSession` |
 | `iat`, `nbf`, `exp` | UTC |
 | `jti` | UUID токена; в БД не хранится |
 
@@ -116,7 +116,7 @@ Claims:
 1. Подпись и `exp`/`nbf`/`iss`.
 2. `SELECT` сессии по `sid`: не найдена или `revoked_at IS NOT NULL` → `UNAUTHORIZED` / `INVALID_TOKEN`.
 3. Пользователь `ACTIVE`. Иначе `INVALID_TOKEN` (не светить `ACCOUNT_LOCKED` на каждом API-вызове).
-4. В контекст кладётся `Principal{UserID, SessionID, Roles}` — роли из claims. После grant/revoke новые права действуют на следующем access (не дольше 15 минут) или сразу после refresh.
+4. `ValidateSession` проверяет живую сессию и `ACTIVE` пользователя и **читает роли из `user_roles`**, не из JWT claims (вариант A). В контекст кладётся `Principal{UserID, SessionID, Roles}` с текущими ролями. JWT `roles` — кэш не дольше 15 минут. **Grant/Revoke не отзывают сессии:** новые права видны на следующем `ValidateSession` или после refresh. HTTP middleware (следующий этап) после проверки подписи вызывает `ValidateSession`.
 
 Logout эффективен сразу: шаг 2 отсекает JWT до истечения `exp`. Отдельного denylist `jti` нет.
 
@@ -341,13 +341,15 @@ Kind `too_many_requests` → 429 добавляется в `apperror`/`httpserve
 
 READ COMMITTED, как приложение ([D-04](decisions.md#d-04)). Одна короткая транзакция на use case. Begin делает инфраструктура auth (по аналогии с Accounts UoW), use case транзакцию не открывает сам.
 
-**Register:** rate limit REGISTER_IP → insert users → insert user_roles CUSTOMER → audit. При конфликте email — rollback insert, `EMAIL_TAKEN` (после commit счётчика, см. ниже).
+Use case возвращает явное `Decision` (`Commit` / `Rollback`). Адаптер **не** выбирает commit по тексту или коду ошибки. `Commit` при успехе и при бизнес-отказе, чьи побочные записи должны остаться (лимит, attempt, lockout, reuse). `Rollback` — инфраструктура, отмена context, валидация без security-записей.
 
-**Login:** UPSERT LOGIN_IP; найти user; dummy или verify; при неуспехе UPSERT LOGIN_EMAIL, `failed_login_count+1`, при `>= 10` → `LOCKED` и revoke сессий, insert attempt, commit, `INVALID_CREDENTIALS`. При успехе: сброс `failed_login_count`, insert session + refresh, attempt success, audit, commit.
+**Register:** rate limit REGISTER_IP → insert users → insert user_roles CUSTOMER → audit. `EMAIL_TAKEN` и `AUTH_RATE_LIMITED` → `Commit` счётчика, без второй строки user. Ошибка hasher/store → `Rollback`.
 
-**Refresh:** `SELECT … FOR UPDATE` строки refresh по `token_hash`; reuse → revoke session + все токены сессии, commit, `TOKEN_REUSED`. Успех — ротация в той же TX.
+**Login:** UPSERT LOGIN_IP; найти user; dummy или verify; при неуспехе UPSERT LOGIN_EMAIL, `failed_login_count+1` на строке `GetForUpdate`, при `>= 10` → `LOCKED` и revoke сессий (`USER_LOCKED`), insert attempt, `Commit`, `INVALID_CREDENTIALS`. При успехе: сброс `failed_login_count`, insert session + refresh, attempt success, audit, `Commit`. Ошибка Append attempt — `Rollback` (ошибка не глотается).
 
-**Rate limit:** инкремент **коммитится всегда**, в том числе когда запрос отвергнут. Иначе лимит не держится. Практический приём: отдельная короткая TX на UPSERT счётчика, затем бизнес-TX; либо одно TX, которое коммитится и при бизнес-ошибке (ошибка тогда не через rollback). Реализация выбирает второй вариант только если все побочные записи (attempt, lock) должны сохраниться — для login это как раз так.
+**Refresh:** `SELECT … FOR UPDATE` строки refresh по `token_hash` до конца TX; два параллельных вызова не должны оба увидеть unused. Reuse → revoke session + все refresh сессии, `Commit`, `TOKEN_REUSED`. Истёкший unused → `TOKEN_EXPIRED`, сессия жива, `Commit`. Неизвестный токен → `INVALID_TOKEN`, чужие сессии не трогать, `Commit` счётчика. Unit-тест сериализует фейковую TX и **не** заменяет проверку изоляции PostgreSQL.
+
+**Rate limit:** инкремент входит в ту же TX и коммитится вместе с `Decision=Commit` на бизнес-отказе. Иначе лимит не держится.
 
 Не брать блокировки финансовых таблиц. Не вызывать `post_journal`, `open_ledger_accounts`, `lock_account_balances`.
 

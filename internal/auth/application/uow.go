@@ -20,9 +20,12 @@ type Deps struct {
 }
 
 // UnitOfWork runs fn in one transaction. Begin/Commit/Rollback belong to
-// infrastructure, matching Accounts.
+// infrastructure. The adapter commits when fn returns Commit, including
+// when err != nil (business rejection that must persist). It rolls back on
+// Rollback, on a cancelled context after fn, and on panic. It does not
+// choose commit vs rollback by reading the error.
 type UnitOfWork interface {
-	Do(ctx context.Context, fn func(ctx context.Context, d Deps) error) error
+	Do(ctx context.Context, fn func(ctx context.Context, d Deps) (Decision, error)) error
 }
 
 func (s Service) withDeps(d Deps) Service {
@@ -41,10 +44,11 @@ func RegisterIn(ctx context.Context, uow UnitOfWork, s Service, cmd RegisterComm
 	if uow == nil {
 		return out, errNotWired
 	}
-	err := uow.Do(ctx, func(ctx context.Context, d Deps) error {
+	err := uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+		var dec Decision
 		var err error
-		out, err = s.withDeps(d).Register(ctx, cmd)
-		return err
+		out, dec, err = s.withDeps(d).Register(ctx, cmd)
+		return dec, err
 	})
 	return out, err
 }
@@ -54,10 +58,11 @@ func LoginIn(ctx context.Context, uow UnitOfWork, s Service, cmd LoginCommand) (
 	if uow == nil {
 		return out, errNotWired
 	}
-	err := uow.Do(ctx, func(ctx context.Context, d Deps) error {
+	err := uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+		var dec Decision
 		var err error
-		out, err = s.withDeps(d).Login(ctx, cmd)
-		return err
+		out, dec, err = s.withDeps(d).Login(ctx, cmd)
+		return dec, err
 	})
 	return out, err
 }
@@ -67,10 +72,11 @@ func RefreshIn(ctx context.Context, uow UnitOfWork, s Service, cmd RefreshComman
 	if uow == nil {
 		return out, errNotWired
 	}
-	err := uow.Do(ctx, func(ctx context.Context, d Deps) error {
+	err := uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+		var dec Decision
 		var err error
-		out, err = s.withDeps(d).Refresh(ctx, cmd)
-		return err
+		out, dec, err = s.withDeps(d).Refresh(ctx, cmd)
+		return dec, err
 	})
 	return out, err
 }
@@ -79,7 +85,7 @@ func LogoutIn(ctx context.Context, uow UnitOfWork, s Service, p domain.Principal
 	if uow == nil {
 		return errNotWired
 	}
-	return uow.Do(ctx, func(ctx context.Context, d Deps) error {
+	return uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
 		return s.withDeps(d).Logout(ctx, p)
 	})
 }
@@ -88,7 +94,7 @@ func GrantRoleIn(ctx context.Context, uow UnitOfWork, s Service, actor domain.Pr
 	if uow == nil {
 		return errNotWired
 	}
-	return uow.Do(ctx, func(ctx context.Context, d Deps) error {
+	return uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
 		return s.withDeps(d).GrantRole(ctx, actor, userID, role)
 	})
 }
@@ -97,7 +103,7 @@ func RevokeRoleIn(ctx context.Context, uow UnitOfWork, s Service, actor domain.P
 	if uow == nil {
 		return errNotWired
 	}
-	return uow.Do(ctx, func(ctx context.Context, d Deps) error {
+	return uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
 		return s.withDeps(d).RevokeRole(ctx, actor, userID, role)
 	})
 }
