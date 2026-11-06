@@ -262,7 +262,7 @@ func TestAuthDDL(t *testing.T) {
 		}
 		if _, err := app.Exec(ctx, `
 			INSERT INTO auth.refresh_tokens (id, session_id, token_hash, expires_at)
-			VALUES ($1, $2, $3, now() + interval '30 days')`, tid, sid, hash32); err != nil {
+			VALUES ($1, $2, $3, now() + interval '30 days')`, tid, sid, bytes.Repeat([]byte{0x14}, 32)); err != nil {
 			t.Fatal(err)
 		}
 		mustFail(t, ctx, app, `UPDATE auth.refresh_tokens SET token_hash = $1 WHERE id = $2`,
@@ -300,10 +300,10 @@ func TestAuthDDL(t *testing.T) {
 		}
 		mustFail(t, ctx, app, `
 			INSERT INTO auth.refresh_tokens (id, session_id, token_hash, expires_at, created_at)
-			VALUES ($1, $2, $3, now(), now() + interval '1 hour')`, mustNewID(t), sid, hash32)
+			VALUES ($1, $2, $3, now(), now() + interval '1 hour')`, mustNewID(t), sid, bytes.Repeat([]byte{0x16}, 32))
 		mustFail(t, ctx, app, `
 			INSERT INTO auth.refresh_tokens (id, session_id, token_hash, expires_at, used_at)
-			VALUES ($1, $2, $3, now() + interval '30 days', now())`, mustNewID(t), sid, hash32)
+			VALUES ($1, $2, $3, now() + interval '30 days', now())`, mustNewID(t), sid, bytes.Repeat([]byte{0x17}, 32))
 	})
 
 	t.Run("17. login_attempts append-only", func(t *testing.T) {
