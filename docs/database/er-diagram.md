@@ -6,7 +6,7 @@
 
 Схемы PostgreSQL по модулям ([D-18](../architecture/decisions.md#d-18)): `auth`, `merchants`, `accounts`, `ledger`, `payments`, `transfers`, `commissions`, `limits`, `simulator`, `notifications`, `audit`, `platform` (idempotency, outbox, inbox). После MVP: `fraud`, `reconciliation`.
 
-Этап 3.3 создаёт `accounts` и `ledger` целиком. `auth.users` и `merchants.merchants` — заглушки с PK, чтобы объявить FK со счетов; модули auth/merchants и схемы payments/transfers в этой фазе не реализуются.
+Этап 3.3 создаёт `accounts` и `ledger` целиком. `auth.users` и `merchants.merchants` — заглушки с PK, чтобы объявить FK со счетов. Этап 3.19 описывает полный модуль auth ([../architecture/identity-auth.md](../architecture/identity-auth.md)); миграций и кода auth ещё нет. Модуль merchants и схемы payments/transfers в этой фазе не реализуются.
 
 ## 1. Финансовое ядро: счета и ledger
 
@@ -360,6 +360,7 @@ erDiagram
     refresh_tokens |o--o| refresh_tokens : "replaced_by"
     users |o--o{ login_attempts : "попытки"
     users ||--o{ action_confirmations : "подтверждения"
+    users |o--o{ rate_limit_counters : "окна лимитов (логически)"
     merchants ||--o{ merchant_members : "участники"
     users ||--o{ merchant_members : ""
     merchants ||--o{ stores : ""
@@ -424,6 +425,13 @@ erDiagram
         int attempts_left
         timestamptz expires_at
         timestamptz confirmed_at
+    }
+    rate_limit_counters {
+        text bucket PK "LOGIN_EMAIL, LOGIN_IP, REGISTER_IP, REFRESH_IP"
+        text counter_key PK
+        timestamptz window_start PK "15 мин UTC"
+        int count "CHECK >= 0"
+        timestamptz updated_at
     }
     merchants {
         uuid id PK

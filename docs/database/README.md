@@ -11,4 +11,4 @@
 
 Ревью готовности схемы к реализации — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
 
-Финансовая модель — [../architecture/ledger-model.md](../architecture/ledger-model.md). Решения — [../architecture/decisions.md](../architecture/decisions.md), открытые вопросы — [../architecture/open-questions.md](../architecture/open-questions.md).
+Финансовая модель — [../architecture/ledger-model.md](../architecture/ledger-model.md). Identity/Auth (дизайн таблиц `auth.*`, токены, RBAC) — [../architecture/identity-auth.md](../architecture/identity-auth.md); в коде схема `auth` пока заглушка PK. Решения — [../architecture/decisions.md](../architecture/decisions.md), открытые вопросы — [../architecture/open-questions.md](../architecture/open-questions.md).

@@ -384,6 +384,7 @@
 - `Content-Type: application/json`. Один и тот же формат у всех ответов `4xx`/`5xx`, включая 404/405 маршрутизатора и перехваченные паники.
 - Домен не знает про HTTP: ошибка несёт вид (`invalid`, `not_found`, `conflict`, `unprocessable` …), статус выбирает транспортный слой. Реализация — пакет `internal/platform/apperror`.
 - Поле `details` (ошибки валидации по полям) добавляется, когда появятся первые эндпоинты с телом запроса; добавление поля обратно совместимо.
+- Код `AUTH_RATE_LIMITED` (Identity, [identity-auth.md](identity-auth.md) §9) использует Kind `too_many_requests` и HTTP 429. Тело то же. Kind появляется в `apperror` на этапе реализации Identity; перечисленные выше коды и статусы не меняются.
 - **Альтернатива:** RFC 9457 `application/problem+json` (`type`, `title`, `status`, `detail`). Отклонена: обязательный `type`-URI без каталога документации не несёт смысла, а код всё равно пришлось бы передавать расширением. Переход возможен позже без изменения доменного слоя.
 
 ### D-40
@@ -399,3 +400,20 @@
 - Уже применённые миграции `00002`/`00003` не меняются: решение живёт в bootstrap и в миграции функций.
 - Идемпотентность журнала сериализуется `pg_advisory_xact_lock` по бизнес-ключу внутри `post_journal`, затем `UNIQUE (reference_type, reference_id, operation, operation_seq)`. `xmin` как защита не используется.
 - *Альтернативы:* создавать функции суперпользовательским bootstrap (два канала DDL); `SET ROLE paycore_ledger` внутри Goose (миграция пишет «как ledger»). Отклонены: один канал Goose от owner, модель D-33 без пятой роли.
+
+### D-41
+**Токены MVP: JWT access + opaque refresh.**
+- Access — JWT HS256, TTL 15 минут, claims `iss=paycore`, `sub`, `sid`, `roles`, `iat`/`nbf`/`exp`, `jti`. Секрет `PAYCORE_AUTH_JWT_SECRET` ≥ 32 байт.
+- На каждом защищённом запросе: подпись и срок, затем сессия `sid` должна быть живой (`revoked_at IS NULL`) и пользователь `ACTIVE`. Logout действует сразу, denylist `jti` нет.
+- Refresh — 32 случайных байта, в БД только SHA-256 (`token_hash`), TTL 30 суток, одноразовая ротация через `replaced_by`. Повтор использованного токена отзывает всю сессию (`TOKEN_REUSED`).
+- Redis нет ([D-38](#d-38)). Подробности — [identity-auth.md §4](identity-auth.md#4-токены-одна-стратегия-mvp).
+- **Альтернативы:** opaque access (тот же lookup сессии, но ТЗ §9 называет JWT); JWT без проверки сессии (logout ждёт `exp` — отклонено); JWT refresh (reuse не поймать без хранения — отклонено).
+
+### D-42
+**Прикладные роли и деньги.**
+- Роли ТЗ §2.1 (`CUSTOMER` … `ADMIN`) — не роли БД [D-33](#d-33). Приложение всегда ходит как `paycore_app`.
+- Регистрация выдаёт только `CUSTOMER`. Тело с `roles` — `INVALID_REQUEST`. Первый ADMIN — сид migrate/bootstrap, не публичный API.
+- Grant/revoke привилегий — только действующий ADMIN. Денежные операции требуют роли владельца ресурса (`CUSTOMER` / `MERCHANT`) и проверки владения; роль `ADMIN` этих операций не открывает.
+- ADMIN утверждает корректировку, не создаёт её ([D-31](#d-31)), и не пишет в ledger в обход шлюза ([D-03](#d-03), [D-40](#d-40)).
+- Rate limit login/register/refresh — счётчики в PostgreSQL с явными окнами ([identity-auth.md §13](identity-auth.md#13-лимиты-mvp-явные)), не Redis.
+- **Альтернативы:** самоназначение роли из тела регистрации — отклонено; ADMIN с правом transfer/topup «для поддержки» — отклонено ТЗ §2.1.

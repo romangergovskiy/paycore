@@ -78,6 +78,9 @@ ALTER TABLE transfers.transfers ADD CONSTRAINT fk_transfers_sender_currency
 | `limit_counters PK (user_id, currency, limit_type, period_start)` | Два счётчика на период |
 | `inbox_messages PK (consumer, message_id)` | Повторная обработка события |
 | `ledger_accounts UNIQUE (account_id, kind)`, `UNIQUE (system_code, currency)` | Дубли ledger-счетов |
+| `auth.users UNIQUE (email)` | Две учётки на один канонический email |
+| `auth.refresh_tokens UNIQUE (token_hash)` | Коллизия opaque refresh |
+| `auth.rate_limit_counters PK (bucket, counter_key, window_start)` | Два счётчика на одно окно |
 
 ## 4. Неизменяемость ledger
 
@@ -208,7 +211,8 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 | `webhook_deliveries (next_attempt_at) WHERE status = 'PENDING'` | worker доставки |
 | `audit_logs (resource_type, resource_id, occurred_at DESC)`, `(actor_id, occurred_at DESC)`, BRIN `(occurred_at)` | поиск в аудите |
 | `commission_tariffs` GiST (EXCLUDE) | действующий тариф |
-| `login_attempts (email, attempted_at DESC)`, `(ip, attempted_at DESC)` | rate limiting |
+| `login_attempts (email, attempted_at DESC)`, `(ip, attempted_at DESC)` | разбор попыток входа |
+| `auth.rate_limit_counters` PK | окна login/register/refresh (15 мин, без Redis) |
 
 ## 6. Роли и права БД
 
