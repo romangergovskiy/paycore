@@ -69,6 +69,17 @@ func TestAuthAdminRoleSerialization(t *testing.T) {
 		}
 	})
 
+	t.Run("try lock false until rollback", func(t *testing.T) {
+		assertAdminLockHeldUntil(t, ctx, app, connB, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.Rollback(ctx)
+		})
+	})
+	t.Run("try lock false until commit", func(t *testing.T) {
+		assertAdminLockHeldUntil(t, ctx, app, connB, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.Commit(ctx)
+		})
+	})
+
 	t.Run("cycle revoke keeps at least one ACTIVE ADMIN", func(t *testing.T) {
 		a := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "aa"))
 		b := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "ab"))
@@ -159,6 +170,49 @@ func countActiveAdmins(t *testing.T, ctx context.Context, conn *pgx.Conn) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+func assertAdminLockHeldUntil(t *testing.T, ctx context.Context, holder, waiter *pgx.Conn, end func(context.Context, pgx.Tx) error) {
+	t.Helper()
+	tx1, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := false
+	defer func() {
+		if !done {
+			_ = tx1.Rollback(ctx)
+		}
+	}()
+	if err := NewAuthRoles(tx1).LockAdminRoleMutations(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	tx2, err := waiter.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx2.Rollback(ctx) }()
+
+	if tryAdminAdvisoryLock(t, ctx, tx2) {
+		t.Fatal("pg_try_advisory_xact_lock succeeded while holder Tx is open")
+	}
+	if err := end(ctx, tx1); err != nil {
+		t.Fatal(err)
+	}
+	done = true
+	if !tryAdminAdvisoryLock(t, ctx, tx2) {
+		t.Fatal("pg_try_advisory_xact_lock still false after holder Tx ended")
+	}
+}
+
+func tryAdminAdvisoryLock(t *testing.T, ctx context.Context, tx pgx.Tx) bool {
+	t.Helper()
+	var ok bool
+	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, adminRoleMutationLockKey).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	return ok
 }
 
 func TestAdminRoleMutationLockKeyStable(t *testing.T) {
