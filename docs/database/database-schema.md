@@ -318,10 +318,11 @@ Append-only: права `SELECT, INSERT` и триггер запрета мут
 
 ## 12. Прочие схемы
 
-`auth`, `merchants` (кроме выплат), `notifications` описаны на уровне ER ([er-diagram.md](er-diagram.md)). Обязательные ограничения:
+`auth` в коде — заглушка PK (`00002`). Полный дизайн таблиц, токенов и лимитов — [../architecture/identity-auth.md](../architecture/identity-auth.md) (этап 3.19). Обязательные ограничения, когда DDL появится:
 
-- `auth.users`: `UNIQUE (lower(email))`; `password_hash LIKE '$argon2id$%'`.
-- `auth.refresh_tokens`: хранится только хеш; ротация через `replaced_by`; повторное использование заменённого токена отзывает сессию.
-- `merchants.api_keys`: хранятся хеш и префикс ключа.
+- `auth.users`: email канонический lowercase, `UNIQUE (email)`; `password_hash LIKE '$argon2id$%'`; статус `ACTIVE`/`LOCKED`/`DISABLED`.
+- `auth.refresh_tokens`: хранится только SHA-256; ротация через `replaced_by`; повторное использование заменённого токена отзывает сессию.
+- `auth.rate_limit_counters`: PK `(bucket, counter_key, window_start)`; окна 15 минут, без Redis.
+- `merchants.api_keys`: хранятся хеш и префикс ключа. `merchants` (кроме выплат) и `notifications` по-прежнему на уровне ER ([er-diagram.md](er-diagram.md)).
 
 Схемы `fraud` и `reconciliation` — после MVP. Их ER из этапа 1 сохранён в [er-diagram.md §5](er-diagram.md#5-после-mvp-fraud-и-сверка).
