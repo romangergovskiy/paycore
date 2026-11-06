@@ -1,6 +1,6 @@
 # Схема базы данных PostgreSQL
 
-Статус: **принято для MVP** (этап 2). SQL-фрагменты иллюстративны. В коде миграции `00002_accounts.sql` и `00003_ledger.sql` создают таблицы `accounts` и `ledger` (этап 3.3); `00004_ledger_functions.sql` создаёт шлюзовые функции (этап 3.4, [D-40](../architecture/decisions.md#d-40)). У финансовых миграций нет Goose Down ([D-38](../architecture/decisions.md#d-38)). Ревью схемы — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
+Статус: **принято для MVP** (этап 2). SQL-фрагменты иллюстративны. В коде миграции `00002_accounts.sql` и `00003_ledger.sql` создают таблицы `accounts` и `ledger` (этап 3.3); `00004_ledger_functions.sql` создаёт шлюзовые функции (этап 3.4, [D-40](../architecture/decisions.md#d-40)); `00005_auth.sql` расширяет `auth` (этап 3.20). У финансовых миграций нет Goose Down ([D-38](../architecture/decisions.md#d-38)). Ревью схемы — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
 
 Связанные документы: [er-diagram.md](er-diagram.md), [data-integrity.md](data-integrity.md) (CHECK, FK, индексы, права), [concurrency.md](concurrency.md), [../architecture/ledger-model.md](../architecture/ledger-model.md), [../architecture/decisions.md](../architecture/decisions.md).
 
@@ -318,11 +318,18 @@ Append-only: права `SELECT, INSERT` и триггер запрета мут
 
 ## 12. Прочие схемы
 
-`auth` в коде — заглушка PK (`00002`). Полный дизайн таблиц, токенов и лимитов — [../architecture/identity-auth.md](../architecture/identity-auth.md) (этап 3.19). Обязательные ограничения, когда DDL появится:
+`auth`: заглушка PK в `00002`; полное DDL — `00005_auth.sql` (`ALTER auth.users`, без DROP). Контракт — [../architecture/identity-auth.md](../architecture/identity-auth.md).
 
-- `auth.users`: email канонический lowercase, `UNIQUE (email)`; `password_hash LIKE '$argon2id$%'`; статус `ACTIVE`/`LOCKED`/`DISABLED`.
-- `auth.refresh_tokens`: хранится только SHA-256; ротация через `replaced_by`; повторное использование заменённого токена отзывает сессию.
-- `auth.rate_limit_counters`: PK `(bucket, counter_key, window_start)`; окна 15 минут, без Redis.
+- `auth.users`: email канонический lowercase (`CHECK email = lower(email)`), `UNIQUE (email)`; `password_hash LIKE '$argon2id$%'`; статус `ACTIVE`/`LOCKED`/`DISABLED`; `locked_at` ⇔ `LOCKED`; `failed_login_count >= 0`. Нет `DELETE` у `paycore_app`.
+- `auth.roles`: сид шести кодов ТЗ §2.1, `ON CONFLICT DO NOTHING`. Нет пользовательского сида и нет ADMIN с паролем.
+- `auth.user_roles`: PK `(user_id, role_code)`; `paycore_app` — `SELECT, INSERT, DELETE`.
+- `auth.sessions`: живые — `revoked_at IS NULL`; индекс `(user_id) WHERE revoked_at IS NULL`.
+- `auth.refresh_tokens`: только SHA-256, `octet_length(token_hash) = 32`, UNIQUE; `token_hash` неизменяем (триггер); `used_at` ⇔ `replaced_by`; `expires_at > created_at`.
+- `auth.login_attempts`: append-only (триггер UPDATE/DELETE/TRUNCATE).
+- `auth.rate_limit_counters`: PK `(bucket, counter_key, window_start)`; `bucket` ∈ `LOGIN_EMAIL`/`LOGIN_IP`/`REGISTER_IP`/`REFRESH_IP`; окна 15 минут, без Redis.
+- `auth.action_confirmations`: таблица есть, в MVP пустая; `code_hash` 32 байта.
 - `merchants.api_keys`: хранятся хеш и префикс ключа. `merchants` (кроме выплат) и `notifications` по-прежнему на уровне ER ([er-diagram.md](er-diagram.md)).
+
+Bootstrap первого ADMIN — будущая Go-команда, не эта миграция.
 
 Схемы `fraud` и `reconciliation` — после MVP. Их ER из этапа 1 сохранён в [er-diagram.md §5](er-diagram.md#5-после-mvp-fraud-и-сверка).

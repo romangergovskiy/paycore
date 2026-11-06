@@ -251,9 +251,7 @@ func insertBusinessAccount(t *testing.T, ctx context.Context, owner, app *pgx.Co
 	out := seededAccount{userID: ids.next(), accountID: ids.next()}
 	switch ownerType {
 	case ledger.OwnerCustomer:
-		if _, err := owner.Exec(ctx, `INSERT INTO auth.users (id) VALUES ($1)`, out.userID); err != nil {
-			t.Fatal(err)
-		}
+		insertAuthUser(t, ctx, owner, out.userID)
 		if _, err := app.Exec(ctx, `
 			INSERT INTO accounts.accounts (id, account_number, user_id, account_purpose, currency, status)
 			VALUES ($1, $2, $3, 'MAIN', 'RUB', 'ACTIVE')`, out.accountID, number, out.userID); err != nil {

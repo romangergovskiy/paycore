@@ -19,7 +19,21 @@ const (
 	ownerPassword = "owner-pass"
 	appPassword   = "app-pass"
 	roPassword    = "ro-pass"
+	// testArgon2idPHC satisfies ck_users_password_hash. It is not a login password.
+	testArgon2idPHC = "$argon2id$v=19$m=19456,t=2,p=1$Zml4dHVyZXNhbHQxMjM0$Zml4dHVyZWhhc2hmaXh0dXJlaGFzaGZpeHR1cmVoYXNo"
 )
+
+// insertAuthUser inserts a fixture row that meets auth.users CHECKs.
+// Email is derived from id (lowercase). The hash is not a real password.
+func insertAuthUser(t *testing.T, ctx context.Context, conn *pgx.Conn, id string) {
+	t.Helper()
+	email := strings.ToLower(id) + "@users.test"
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO auth.users (id, email, password_hash, status)
+		VALUES ($1::uuid, $2, $3, 'ACTIVE')`, id, email, testArgon2idPHC); err != nil {
+		t.Fatal(err)
+	}
+}
 
 type testCluster struct {
 	admin, owner, app, readonly string
@@ -89,7 +103,7 @@ func TestMigrationsAndRoles(t *testing.T) {
 		t.Fatalf("up: %v", err)
 	}
 	v, err := CurrentVersion(ctx, c.owner)
-	if err != nil || v != 4 {
+	if err != nil || v != 5 {
 		t.Fatalf("version after up = %d, %v", v, err)
 	}
 	assertSchemaInfo(t, ctx, c.app, true)
@@ -104,7 +118,7 @@ func TestMigrationsAndRoles(t *testing.T) {
 			t.Fatalf("up: %v", err)
 		}
 		v2, err := CurrentVersion(ctx, c2.owner)
-		if err != nil || v2 != 4 {
+		if err != nil || v2 != 5 {
 			t.Fatalf("version after up = %d, %v", v2, err)
 		}
 		assertSchemaInfo(t, ctx, c2.app, true)

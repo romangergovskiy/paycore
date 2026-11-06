@@ -1,6 +1,6 @@
 # PayCore — модель данных PostgreSQL
 
-Статус: **принято для MVP**. SQL-фрагменты в этих документах иллюстративны. В коде: `migrations/00001_platform_schema.sql` (схема `platform`), `00002_accounts.sql`, `00003_ledger.sql` (таблицы счетов и ledger), `00004_ledger_functions.sql` (шлюзовые `SECURITY DEFINER`-функции, [D-40](../architecture/decisions.md#d-40)). Роли создаёт `cmd/migrate bootstrap` под суперпользователем; Goose идёт от `paycore_owner` ([D-33](../architecture/decisions.md#d-33), [D-38](../architecture/decisions.md#d-38)).
+Статус: **принято для MVP**. SQL-фрагменты в этих документах иллюстративны. В коде: `migrations/00001_platform_schema.sql` (схема `platform`), `00002_accounts.sql`, `00003_ledger.sql` (таблицы счетов и ledger), `00004_ledger_functions.sql` (шлюзовые `SECURITY DEFINER`-функции, [D-40](../architecture/decisions.md#d-40)), `00005_auth.sql` (`ALTER auth.users` и таблицы identity, без DROP заглушки). Роли создаёт `cmd/migrate bootstrap` под суперпользователем; Goose идёт от `paycore_owner` ([D-33](../architecture/decisions.md#d-33), [D-38](../architecture/decisions.md#d-38)).
 
 | Документ | Содержание |
 |---|---|
@@ -11,4 +11,4 @@
 
 Ревью готовности схемы к реализации — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
 
-Финансовая модель — [../architecture/ledger-model.md](../architecture/ledger-model.md). Identity/Auth (дизайн таблиц `auth.*`, токены, RBAC) — [../architecture/identity-auth.md](../architecture/identity-auth.md); в коде схема `auth` пока заглушка PK. Решения — [../architecture/decisions.md](../architecture/decisions.md), открытые вопросы — [../architecture/open-questions.md](../architecture/open-questions.md).
+Финансовая модель — [../architecture/ledger-model.md](../architecture/ledger-model.md). Identity/Auth (таблицы `auth.*`, токены, RBAC) — [../architecture/identity-auth.md](../architecture/identity-auth.md); DDL — `00005_auth.sql`. Решения — [../architecture/decisions.md](../architecture/decisions.md), открытые вопросы — [../architecture/open-questions.md](../architecture/open-questions.md).
