@@ -37,11 +37,43 @@ type BalanceReader interface {
 	Get(ctx context.Context, accountID uuid.UUID) (available, reserved, version int64, err error)
 }
 
+// MaxStatementLimit is the maximum StatementQuery.Limit.
+const MaxStatementLimit = 100
+
+// StatementQuery pages a statement. Order is created_at, id (no cursor).
+type StatementQuery struct {
+	Limit int
+}
+
+// StatementLine is one POSTED ledger_entries row on this account's
+// AVAILABLE or HOLD ledger account. Amount is a positive int64; Side is
+// the stored DEBIT/CREDIT (ТЗ §4.4). BalanceAfter is nil on system rows.
+type StatementLine struct {
+	ID              uuid.UUID
+	JournalID       uuid.UUID
+	LedgerAccountID uuid.UUID
+	Kind            ledger.AccountKind
+	Side            ledger.EntryType
+	Amount          int64
+	Currency        string
+	AccountVersion  *int64
+	BalanceAfter    *int64
+	CreatedAt       time.Time
+	PostedAt        time.Time
+}
+
+// StatementReader lists POSTED ledger_entries for a business account.
+// The implementation must not Begin and must not lock.
+type StatementReader interface {
+	List(ctx context.Context, accountID uuid.UUID, query StatementQuery) ([]StatementLine, error)
+}
+
 type Service struct {
-	Store    Store
-	Opener   ledger.AccountOpener
-	Locker   ledger.BalanceLocker
-	Balances BalanceReader
+	Store      Store
+	Opener     ledger.AccountOpener
+	Locker     ledger.BalanceLocker
+	Balances   BalanceReader
+	Statements StatementReader
 }
 
 type Opened struct {
@@ -128,6 +160,29 @@ func (s Service) Balance(ctx context.Context, id uuid.UUID) (available, reserved
 		return 0, 0, 0, err
 	}
 	return s.Balances.Get(ctx, id)
+}
+
+func (s Service) Statement(ctx context.Context, accountID uuid.UUID, query StatementQuery) ([]StatementLine, error) {
+	if s.Store == nil || s.Statements == nil {
+		return nil, errNotWired
+	}
+	if accountID == uuid.Nil {
+		return nil, domain.ErrAccountNotFound
+	}
+	if query.Limit < 1 || query.Limit > MaxStatementLimit {
+		return nil, domain.ErrInvalidAccount
+	}
+	if _, err := s.Store.Get(ctx, accountID); err != nil {
+		return nil, err
+	}
+	list, err := s.Statements.List(ctx, accountID, query)
+	if err != nil {
+		return nil, err
+	}
+	if list == nil {
+		list = []StatementLine{}
+	}
+	return list, nil
 }
 
 func (s Service) ListByOwner(ctx context.Context, userID, merchantID *uuid.UUID) ([]domain.Account, error) {
