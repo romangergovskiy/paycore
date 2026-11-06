@@ -317,6 +317,26 @@ func TestAuthDDL(t *testing.T) {
 		mustFail(t, ctx, owner, `DELETE FROM auth.login_attempts WHERE id = $1`, id)
 		mustFail(t, ctx, app, `DELETE FROM auth.login_attempts WHERE id = $1`, id)
 		mustFail(t, ctx, owner, `TRUNCATE auth.login_attempts`)
+
+		if _, err := app.Exec(ctx, `
+			INSERT INTO auth.login_attempts (id, email, success, failure_reason)
+			VALUES ($1, 'ok@users.test', true, NULL)`, mustNewID(t)); err != nil {
+			t.Fatalf("success+NULL: %v", err)
+		}
+		mustFail(t, ctx, app, `
+			INSERT INTO auth.login_attempts (id, email, success, failure_reason)
+			VALUES ($1, 'ok-reason@users.test', true, 'INVALID_CREDENTIALS')`, mustNewID(t))
+		mustFail(t, ctx, app, `
+			INSERT INTO auth.login_attempts (id, email, success, failure_reason)
+			VALUES ($1, 'fail-null@users.test', false, NULL)`, mustNewID(t))
+		if _, err := app.Exec(ctx, `
+			INSERT INTO auth.login_attempts (id, email, success, failure_reason)
+			VALUES ($1, 'fail-ok@users.test', false, 'RATE_LIMITED')`, mustNewID(t)); err != nil {
+			t.Fatalf("fail+valid reason: %v", err)
+		}
+		mustFail(t, ctx, app, `
+			INSERT INTO auth.login_attempts (id, email, success, failure_reason)
+			VALUES ($1, 'fail-unknown@users.test', false, 'NOPE')`, mustNewID(t))
 	})
 
 	t.Run("18. rate_limit_counters", func(t *testing.T) {

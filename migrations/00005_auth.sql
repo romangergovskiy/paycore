@@ -115,9 +115,13 @@ CREATE TABLE auth.login_attempts (
     attempted_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT ck_login_attempts_failure CHECK (
         (success AND failure_reason IS NULL)
-        OR (NOT success AND failure_reason IN (
-            'INVALID_CREDENTIALS', 'RATE_LIMITED', 'LOCKED', 'DISABLED', 'INVALID_REQUEST'
-        ))
+        OR (
+            NOT success
+            AND failure_reason IS NOT NULL
+            AND failure_reason IN (
+                'INVALID_CREDENTIALS', 'RATE_LIMITED', 'LOCKED', 'DISABLED', 'INVALID_REQUEST'
+            )
+        )
     )
 );
 
