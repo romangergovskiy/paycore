@@ -238,17 +238,20 @@ func (s Service) loginRejected(ctx context.Context, email, ip string, u domain.U
 	reason := domain.FailureInvalidCredentials
 	var uid *uuid.UUID
 	if found {
-		uid = &u.ID
-		switch u.Status {
-		case domain.StatusLocked:
-			reason = domain.FailureLocked
-		case domain.StatusDisabled:
-			reason = domain.FailureDisabled
-		}
-		if u.Status == domain.StatusActive {
-			if err := s.bumpFailure(ctx, u.ID, now); err != nil {
+		fresh, err := s.Users.GetForUpdate(ctx, u.ID)
+		if err != nil {
+			if !errors.Is(err, domain.ErrNotFound) {
 				return Rollback, err
 			}
+		} else {
+			uid = &fresh.ID
+			if fresh.Status == domain.StatusActive {
+				fresh, err = s.applyActiveFailure(ctx, fresh, now)
+				if err != nil {
+					return Rollback, err
+				}
+			}
+			reason = failureReason(fresh.Status)
 		}
 	}
 
@@ -285,14 +288,20 @@ func (s Service) rejectInactive(ctx context.Context, email, ip string, u domain.
 	return Commit, domain.ErrInvalidCredentials
 }
 
-func (s Service) bumpFailure(ctx context.Context, userID uuid.UUID, now time.Time) error {
-	u, err := s.Users.GetForUpdate(ctx, userID)
-	if err != nil {
-		return err
+func failureReason(st domain.Status) domain.FailureReason {
+	switch st {
+	case domain.StatusLocked:
+		return domain.FailureLocked
+	case domain.StatusDisabled:
+		return domain.FailureDisabled
+	default:
+		return domain.FailureInvalidCredentials
 	}
-	if u.Status != domain.StatusActive {
-		return nil
-	}
+}
+
+// applyActiveFailure increments the locked ACTIVE row. LOCKED/DISABLED
+// callers must not invoke it. One failed login does not GetForUpdate again.
+func (s Service) applyActiveFailure(ctx context.Context, u domain.User, now time.Time) (domain.User, error) {
 	u.FailedLoginCount++
 	u.UpdatedAt = now
 	if u.FailedLoginCount >= domain.LockAfter {
@@ -300,14 +309,20 @@ func (s Service) bumpFailure(ctx context.Context, userID uuid.UUID, now time.Tim
 		u.Status = domain.StatusLocked
 		u.LockedAt = &locked
 		if err := s.Users.Update(ctx, u); err != nil {
-			return err
+			return u, err
 		}
-		if err := s.Sessions.RevokeAllForUser(ctx, userID, domain.RevokeUserLocked, now); err != nil {
-			return err
+		if err := s.Sessions.RevokeAllForUser(ctx, u.ID, domain.RevokeUserLocked, now); err != nil {
+			return u, err
 		}
-		return s.Tokens.RevokeAllForUser(ctx, userID, now)
+		if err := s.Tokens.RevokeAllForUser(ctx, u.ID, now); err != nil {
+			return u, err
+		}
+		return u, nil
 	}
-	return s.Users.Update(ctx, u)
+	if err := s.Users.Update(ctx, u); err != nil {
+		return u, err
+	}
+	return u, nil
 }
 
 func (s Service) issueSession(ctx context.Context, u domain.User, roles []domain.Role, ip, ua string, now time.Time) (Credentials, error) {

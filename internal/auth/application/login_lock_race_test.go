@@ -15,9 +15,10 @@ import (
 type hookUsers struct {
 	UserStore
 	afterGetByEmail func()
+	getForUpdateN   int
 }
 
-func (h hookUsers) GetByEmail(ctx context.Context, email string) (domain.User, error) {
+func (h *hookUsers) GetByEmail(ctx context.Context, email string) (domain.User, error) {
 	u, err := h.UserStore.GetByEmail(ctx, email)
 	if err == nil && h.afterGetByEmail != nil {
 		h.afterGetByEmail()
@@ -25,10 +26,30 @@ func (h hookUsers) GetByEmail(ctx context.Context, email string) (domain.User, e
 	return u, err
 }
 
-func serviceWithUserHook(w *world, after func()) Service {
+func (h *hookUsers) GetForUpdate(ctx context.Context, id uuid.UUID) (domain.User, error) {
+	h.getForUpdateN++
+	return h.UserStore.GetForUpdate(ctx, id)
+}
+
+func serviceWithUserHook(w *world, after func()) (Service, *hookUsers) {
+	h := &hookUsers{UserStore: w.users, afterGetByEmail: after}
 	svc := w.service()
-	svc.Users = hookUsers{UserStore: w.users, afterGetByEmail: after}
-	return svc
+	svc.Users = h
+	return svc, h
+}
+
+func lastAttempt(t *testing.T, w *world) domain.LoginAttempt {
+	t.Helper()
+	if len(w.attempts.all) == 0 {
+		t.Fatal("no login attempts")
+	}
+	return w.attempts.all[len(w.attempts.all)-1]
+}
+
+func wrongPassword(email string) LoginCommand {
+	cmd := loginCmd(email)
+	cmd.Password = "wrongpassword"
+	return cmd
 }
 
 func lockStoredUser(t *testing.T, w *world, email string, status domain.Status, failures int) {
@@ -56,7 +77,7 @@ func TestLogin1PasswordOkThenLockedNoSession(t *testing.T) {
 	if _, _, err := w.service().Register(context.Background(), registerCmd("a@b.c")); err != nil {
 		t.Fatal(err)
 	}
-	svc := serviceWithUserHook(w, func() {
+	svc, _ := serviceWithUserHook(w, func() {
 		lockStoredUser(t, w, "a@b.c", domain.StatusLocked, 10)
 	})
 	cred, dec, err := svc.Login(context.Background(), loginCmd("a@b.c"))
@@ -83,7 +104,7 @@ func TestLogin2PasswordOkThenDisabledNoSession(t *testing.T) {
 	if _, _, err := w.service().Register(context.Background(), registerCmd("a@b.c")); err != nil {
 		t.Fatal(err)
 	}
-	svc := serviceWithUserHook(w, func() {
+	svc, _ := serviceWithUserHook(w, func() {
 		lockStoredUser(t, w, "a@b.c", domain.StatusDisabled, 3)
 	})
 	_, dec, err := svc.Login(context.Background(), loginCmd("a@b.c"))
@@ -111,7 +132,7 @@ func TestLogin3PasswordOkStillActiveResetsFromLockedRow(t *testing.T) {
 	u, _ := w.users.Get(context.Background(), reg.ID)
 	u.FailedLoginCount = 4
 	_ = w.users.Update(context.Background(), u)
-	svc := serviceWithUserHook(w, func() {
+	svc, _ := serviceWithUserHook(w, func() {
 		cur, _ := w.users.Get(context.Background(), reg.ID)
 		if cur.FailedLoginCount != 4 {
 			t.Fatalf("hook saw count %d", cur.FailedLoginCount)
@@ -135,12 +156,10 @@ func TestLogin4WrongPasswordThenLockedDoesNotIncrement(t *testing.T) {
 	if _, _, err := w.service().Register(context.Background(), registerCmd("a@b.c")); err != nil {
 		t.Fatal(err)
 	}
-	svc := serviceWithUserHook(w, func() {
+	svc, hooks := serviceWithUserHook(w, func() {
 		lockStoredUser(t, w, "a@b.c", domain.StatusLocked, 10)
 	})
-	bad := loginCmd("a@b.c")
-	bad.Password = "wrongpassword"
-	_, dec, err := svc.Login(context.Background(), bad)
+	_, dec, err := svc.Login(context.Background(), wrongPassword("a@b.c"))
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
 		t.Fatalf("got %v", err)
 	}
@@ -151,6 +170,12 @@ func TestLogin4WrongPasswordThenLockedDoesNotIncrement(t *testing.T) {
 	if u.Status != domain.StatusLocked || u.FailedLoginCount != 10 {
 		t.Fatalf("LOCKED count bumped: %+v", u)
 	}
+	if lastAttempt(t, w).FailureReason != domain.FailureLocked {
+		t.Fatalf("reason %s", lastAttempt(t, w).FailureReason)
+	}
+	if hooks.getForUpdateN != 1 {
+		t.Fatalf("GetForUpdate %d want 1", hooks.getForUpdateN)
+	}
 }
 
 func TestLogin5WrongPasswordThenDisabledDoesNotIncrement(t *testing.T) {
@@ -158,12 +183,10 @@ func TestLogin5WrongPasswordThenDisabledDoesNotIncrement(t *testing.T) {
 	if _, _, err := w.service().Register(context.Background(), registerCmd("a@b.c")); err != nil {
 		t.Fatal(err)
 	}
-	svc := serviceWithUserHook(w, func() {
+	svc, hooks := serviceWithUserHook(w, func() {
 		lockStoredUser(t, w, "a@b.c", domain.StatusDisabled, 2)
 	})
-	bad := loginCmd("a@b.c")
-	bad.Password = "wrongpassword"
-	_, dec, err := svc.Login(context.Background(), bad)
+	_, dec, err := svc.Login(context.Background(), wrongPassword("a@b.c"))
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
 		t.Fatalf("got %v", err)
 	}
@@ -174,16 +197,68 @@ func TestLogin5WrongPasswordThenDisabledDoesNotIncrement(t *testing.T) {
 	if u.Status != domain.StatusDisabled || u.FailedLoginCount != 2 {
 		t.Fatalf("DISABLED mutated: %+v", u)
 	}
+	if lastAttempt(t, w).FailureReason != domain.FailureDisabled {
+		t.Fatalf("reason %s", lastAttempt(t, w).FailureReason)
+	}
+	if hooks.getForUpdateN != 1 {
+		t.Fatalf("GetForUpdate %d want 1", hooks.getForUpdateN)
+	}
+}
+
+func TestLoginLockedThenActiveIncrements(t *testing.T) {
+	w := newWorld()
+	if _, _, err := w.service().Register(context.Background(), registerCmd("a@b.c")); err != nil {
+		t.Fatal(err)
+	}
+	lockStoredUser(t, w, "a@b.c", domain.StatusLocked, 2)
+	svc, hooks := serviceWithUserHook(w, func() {
+		lockStoredUser(t, w, "a@b.c", domain.StatusActive, 2)
+	})
+	_, dec, err := svc.Login(context.Background(), wrongPassword("a@b.c"))
+	if !errors.Is(err, domain.ErrInvalidCredentials) || dec != Commit {
+		t.Fatalf("err=%v dec=%v", err, dec)
+	}
+	u, _ := w.users.GetByEmail(context.Background(), "a@b.c")
+	if u.Status != domain.StatusActive || u.FailedLoginCount != 3 {
+		t.Fatalf("want ACTIVE count 3: %+v", u)
+	}
+	if lastAttempt(t, w).FailureReason != domain.FailureInvalidCredentials {
+		t.Fatalf("reason %s", lastAttempt(t, w).FailureReason)
+	}
+	if hooks.getForUpdateN != 1 {
+		t.Fatalf("GetForUpdate %d want 1", hooks.getForUpdateN)
+	}
+}
+
+func TestLoginOrdinaryActiveFail(t *testing.T) {
+	w := newWorld()
+	if _, _, err := w.service().Register(context.Background(), registerCmd("a@b.c")); err != nil {
+		t.Fatal(err)
+	}
+	svc, hooks := serviceWithUserHook(w, nil)
+	_, dec, err := svc.Login(context.Background(), wrongPassword("a@b.c"))
+	if !errors.Is(err, domain.ErrInvalidCredentials) || dec != Commit {
+		t.Fatalf("err=%v dec=%v", err, dec)
+	}
+	u, _ := w.users.GetByEmail(context.Background(), "a@b.c")
+	if u.Status != domain.StatusActive || u.FailedLoginCount != 1 {
+		t.Fatalf("%+v", u)
+	}
+	if lastAttempt(t, w).FailureReason != domain.FailureInvalidCredentials {
+		t.Fatalf("reason %s", lastAttempt(t, w).FailureReason)
+	}
+	if hooks.getForUpdateN != 1 {
+		t.Fatalf("GetForUpdate %d want 1", hooks.getForUpdateN)
+	}
 }
 
 func TestLogin6TenthFailureLocksFromRow(t *testing.T) {
 	w := newWorld()
-	svc := w.service()
-	reg, _, err := svc.Register(context.Background(), registerCmd("a@b.c"))
+	reg, _, err := w.service().Register(context.Background(), registerCmd("a@b.c"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, _, err := svc.Login(context.Background(), loginCmd("a@b.c"))
+	first, _, err := w.service().Login(context.Background(), loginCmd("a@b.c"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,9 +266,9 @@ func TestLogin6TenthFailureLocksFromRow(t *testing.T) {
 	u.FailedLoginCount = domain.LockAfter - 1
 	_ = w.users.Update(context.Background(), u)
 
-	bad := loginCmd("a@b.c")
+	svc, hooks := serviceWithUserHook(w, nil)
+	bad := wrongPassword("a@b.c")
 	bad.IP = "198.51.100.9"
-	bad.Password = "wrongpassword"
 	_, dec, err := svc.Login(context.Background(), bad)
 	if !errors.Is(err, domain.ErrInvalidCredentials) || dec != Commit {
 		t.Fatalf("err=%v dec=%v", err, dec)
@@ -205,5 +280,11 @@ func TestLogin6TenthFailureLocksFromRow(t *testing.T) {
 	sess, _ := w.sessions.Get(context.Background(), first.SessionID)
 	if sess.Live() || sess.RevokeReason != domain.RevokeUserLocked {
 		t.Fatalf("session %+v", sess)
+	}
+	if lastAttempt(t, w).FailureReason != domain.FailureLocked {
+		t.Fatalf("reason %s", lastAttempt(t, w).FailureReason)
+	}
+	if hooks.getForUpdateN != 1 {
+		t.Fatalf("GetForUpdate %d want 1", hooks.getForUpdateN)
 	}
 }
