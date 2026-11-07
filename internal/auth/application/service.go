@@ -623,6 +623,11 @@ func (s Service) GrantRole(ctx context.Context, actor domain.Principal, userID u
 	if actor.UserID == userID && role != domain.RoleCustomer {
 		return Rollback, domain.ErrForbidden
 	}
+	if role == domain.RoleAdmin {
+		if err := s.lockAndRequireActiveAdmin(ctx, actor.UserID); err != nil {
+			return Rollback, err
+		}
+	}
 	if _, err := s.Users.Get(ctx, userID); err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return Rollback, err
@@ -665,6 +670,11 @@ func (s Service) RevokeRole(ctx context.Context, actor domain.Principal, userID 
 	if actor.UserID == userID && role == domain.RoleAdmin {
 		return Rollback, domain.ErrForbidden
 	}
+	if role == domain.RoleAdmin {
+		if err := s.lockAndRequireActiveAdmin(ctx, actor.UserID); err != nil {
+			return Rollback, err
+		}
+	}
 	u, err := s.Users.Get(ctx, userID)
 	if err != nil {
 		return Rollback, err
@@ -692,4 +702,31 @@ func (s Service) RevokeRole(ctx context.Context, actor domain.Principal, userID 
 		return Rollback, err
 	}
 	return Commit, nil
+}
+
+// lockAndRequireActiveAdmin takes the ADMIN-mutation lock in this Tx, then
+// re-reads the initiator. A stale Principal that still Has(ADMIN) is
+// Forbidden when the store row is not ACTIVE with role ADMIN.
+func (s Service) lockAndRequireActiveAdmin(ctx context.Context, actorID uuid.UUID) error {
+	if err := s.Roles.LockAdminRoleMutations(ctx); err != nil {
+		return err
+	}
+	u, err := s.Users.Get(ctx, actorID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return domain.ErrForbidden
+		}
+		return err
+	}
+	if u.Status != domain.StatusActive {
+		return domain.ErrForbidden
+	}
+	has, err := s.Roles.Has(ctx, actorID, domain.RoleAdmin)
+	if err != nil {
+		return err
+	}
+	if !has {
+		return domain.ErrForbidden
+	}
+	return nil
 }

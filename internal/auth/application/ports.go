@@ -52,6 +52,10 @@ type RoleStore interface {
 	List(ctx context.Context, userID uuid.UUID) ([]domain.Role, error)
 	Has(ctx context.Context, userID uuid.UUID, role domain.Role) (bool, error)
 	CountActiveWithRole(ctx context.Context, role domain.Role) (int, error)
+	// LockAdminRoleMutations serializes Grant/Revoke of ADMIN in this
+	// transaction (pg_advisory_xact_lock, not a session lock). Count and
+	// the initiator re-check run after the lock is held.
+	LockAdminRoleMutations(ctx context.Context) error
 }
 
 // AttemptStore appends auth.login_attempts.

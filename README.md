@@ -2,7 +2,7 @@
 
 Демонстрационная платёжная инфраструктура с double-entry ledger: Go, PostgreSQL, модульный монолит. Деньги виртуальные, соответствие PCI DSS и банковским требованиям не заявляется.
 
-Статус: **этап 3.22 — PostgreSQL-адаптеры Identity/Auth**. HTTP auth, bootstrap ADMIN и Payments/Transfers ещё нет.
+Статус: **этап 3.23 — сериализация Grant/Revoke ADMIN**. HTTP auth, bootstrap ADMIN и Payments/Transfers ещё нет.
 
 ## Документация
 

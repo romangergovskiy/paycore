@@ -398,10 +398,29 @@ func (s *memTokens) RevokeAllForUser(ctx context.Context, userID uuid.UUID, at t
 }
 
 type memRoles struct {
-	mu     sync.Mutex
-	byUser map[uuid.UUID][]domain.UserRole
-	users  *memUsers
-	grant  error
+	mu      sync.Mutex
+	byUser  map[uuid.UUID][]domain.UserRole
+	users   *memUsers
+	grant   error
+	lockErr error
+	calls   []string
+}
+
+func (s *memRoles) note(op string) {
+	s.mu.Lock()
+	s.calls = append(s.calls, op)
+	s.mu.Unlock()
+}
+
+func (s *memRoles) LockAdminRoleMutations(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.lockErr != nil {
+		return s.lockErr
+	}
+	s.note("lock")
+	return nil
 }
 
 func (s *memRoles) Grant(ctx context.Context, ur domain.UserRole) error {
@@ -413,6 +432,7 @@ func (s *memRoles) Grant(ctx context.Context, ur domain.UserRole) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls = append(s.calls, "grant")
 	if s.byUser == nil {
 		s.byUser = map[uuid.UUID][]domain.UserRole{}
 	}
@@ -431,6 +451,7 @@ func (s *memRoles) Revoke(ctx context.Context, userID uuid.UUID, role domain.Rol
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls = append(s.calls, "revoke")
 	keep := s.byUser[userID][:0]
 	for _, ur := range s.byUser[userID] {
 		if ur.Role != role {
@@ -471,6 +492,7 @@ func (s *memRoles) CountActiveWithRole(ctx context.Context, role domain.Role) (i
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	s.note("count")
 	s.mu.Lock()
 	ids := make([]uuid.UUID, 0)
 	for uid, urs := range s.byUser {
