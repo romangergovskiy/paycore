@@ -128,6 +128,7 @@ type memUsers struct {
 	byID   map[uuid.UUID]domain.User
 	create error
 	update error
+	trace  func(string)
 }
 
 func (s *memUsers) Create(ctx context.Context, u domain.User) error {
@@ -179,6 +180,9 @@ func (s *memUsers) GetByEmail(ctx context.Context, email string) (domain.User, e
 }
 
 func (s *memUsers) GetForUpdate(ctx context.Context, id uuid.UUID) (domain.User, error) {
+	if s.trace != nil {
+		s.trace("for-update")
+	}
 	return s.Get(ctx, id)
 }
 
@@ -404,12 +408,16 @@ type memRoles struct {
 	grant   error
 	lockErr error
 	calls   []string
+	trace   func(string)
 }
 
 func (s *memRoles) note(op string) {
 	s.mu.Lock()
 	s.calls = append(s.calls, op)
 	s.mu.Unlock()
+	if s.trace != nil {
+		s.trace(op)
+	}
 }
 
 func (s *memRoles) LockAdminRoleMutations(ctx context.Context) error {
@@ -538,6 +546,8 @@ func (s *memAttempts) Append(ctx context.Context, a domain.LoginAttempt) error {
 
 type world struct {
 	txMu     sync.Mutex
+	callMu   sync.Mutex
+	calls    []string
 	users    *memUsers
 	sessions *memSessions
 	tokens   *memTokens
@@ -548,6 +558,18 @@ type world struct {
 	issuer   *memIssuer
 	signer   *memSigner
 	clock    *frozenClock
+}
+
+func (w *world) trace(op string) {
+	w.callMu.Lock()
+	w.calls = append(w.calls, op)
+	w.callMu.Unlock()
+}
+
+func (w *world) callIndex(op string) int {
+	w.callMu.Lock()
+	defer w.callMu.Unlock()
+	return callIndex(w.calls, op)
 }
 
 type worldSnap struct {
@@ -564,7 +586,7 @@ func newWorld() *world {
 	users := &memUsers{byID: map[uuid.UUID]domain.User{}}
 	roles := &memRoles{byUser: map[uuid.UUID][]domain.UserRole{}, users: users}
 	sessions := &memSessions{byID: map[uuid.UUID]domain.Session{}}
-	return &world{
+	w := &world{
 		users:    users,
 		sessions: sessions,
 		tokens:   &memTokens{byID: map[uuid.UUID]domain.RefreshToken{}, sessions: sessions},
@@ -576,6 +598,9 @@ func newWorld() *world {
 		signer:   &memSigner{},
 		clock:    &frozenClock{t: time.Date(2026, 11, 6, 8, 0, 0, 0, time.UTC)},
 	}
+	w.users.trace = w.trace
+	w.roles.trace = w.trace
+	return w
 }
 
 func (w *world) service() Service {

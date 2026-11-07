@@ -107,3 +107,30 @@ func RevokeRoleIn(ctx context.Context, uow UnitOfWork, s Service, actor domain.P
 		return s.withDeps(d).RevokeRole(ctx, actor, userID, role)
 	})
 }
+
+func LockUserIn(ctx context.Context, uow UnitOfWork, s Service, cmd StatusCommand) error {
+	if uow == nil {
+		return errNotWired
+	}
+	return uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+		return s.withDeps(d).LockUser(ctx, cmd)
+	})
+}
+
+func UnlockUserIn(ctx context.Context, uow UnitOfWork, s Service, cmd StatusCommand) error {
+	if uow == nil {
+		return errNotWired
+	}
+	return uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+		return s.withDeps(d).UnlockUser(ctx, cmd)
+	})
+}
+
+func DisableUserIn(ctx context.Context, uow UnitOfWork, s Service, cmd StatusCommand) error {
+	if uow == nil {
+		return errNotWired
+	}
+	return uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+		return s.withDeps(d).DisableUser(ctx, cmd)
+	})
+}

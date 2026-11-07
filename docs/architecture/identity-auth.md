@@ -1,10 +1,10 @@
 # Identity и Auth — архитектура и контракты
 
-Статус: **принято для MVP**. Контракт — этап 3.19; DDL — `migrations/00005_auth.sql` (этап 3.20); domain и application — `internal/auth` (этап 3.21); семантика транзакций — `Decision` Commit/Rollback (этап 3.21.1); PostgreSQL-адаптеры портов — `internal/platform/postgres` (этап 3.22); сериализация Grant/Revoke ADMIN — `pg_advisory_xact_lock(0x5041590000000001)` (этап 3.23). HTTP-обработчиков и bootstrap ADMIN нет. Решения — [D-41](decisions.md#d-41), [D-42](decisions.md#d-42). Ошибки API — [D-39](decisions.md#d-39). Скоуп и отказ от PCI/KYC — [D-20](decisions.md#d-20). Стек без Redis — [D-38](decisions.md#d-38).
+Статус: **принято для MVP**. Контракт — этап 3.19; DDL — `migrations/00005_auth.sql` (этап 3.20); domain и application — `internal/auth` (этап 3.21); семантика транзакций — `Decision` Commit/Rollback (этап 3.21.1); PostgreSQL-адаптеры портов — `internal/platform/postgres` (этап 3.22); сериализация Grant/Revoke ADMIN — `pg_advisory_xact_lock(0x5041590000000001)` (этап 3.23); Lock/Unlock/DisableUser и last-ADMIN lockout — этап 3.24. HTTP-обработчиков и bootstrap ADMIN нет. Решения — [D-41](decisions.md#d-41), [D-42](decisions.md#d-42). Ошибки API — [D-39](decisions.md#d-39). Скоуп и отказ от PCI/KYC — [D-20](decisions.md#d-20). Стек без Redis — [D-38](decisions.md#d-38).
 
 Связанные документы: [../PROJECT_SPEC.md](../PROJECT_SPEC.md) §2.1, §5, §8; [decisions.md](decisions.md); [../database/database-schema.md](../database/database-schema.md) §12; [../database/er-diagram.md](../database/er-diagram.md) §4; [../database/data-integrity.md](../database/data-integrity.md).
 
-Текущий код: `00002` создаёт заглушку `auth.users (id)` ради FK `accounts.user_id`; `00005` расширяет её колонками и таблицами §7 **без DROP**. Domain и application — `internal/auth/{domain,application}` (без pgx и HTTP). PostgreSQL-адаптеры портов и Auth UoW — `internal/platform/postgres` (один `pgx.Tx` на `Do`, `Decision` решает Commit). Grant/Revoke роли ADMIN: `RoleStore.LockAdminRoleMutations` → `pg_advisory_xact_lock(0x5041590000000001)` в той же Tx, затем re-check инициатора ACTIVE+ADMIN, затем count/revoke. HTTP — `internal/platform/httpserver` (health, JSON-ошибки D-39, `Handle` без маршрутов Auth). Accounts принимает `ChangedBy uuid.UUID` как есть и не читает auth-контекст. Первый ADMIN — будущая Go-команда migrate/bootstrap, не SQL-сид.
+Текущий код: `00002` создаёт заглушку `auth.users (id)` ради FK `accounts.user_id`; `00005` расширяет её колонками и таблицами §7 **без DROP**. Domain и application — `internal/auth/{domain,application}` (без pgx и HTTP). PostgreSQL-адаптеры портов и Auth UoW — `internal/platform/postgres` (один `pgx.Tx` на `Do`, `Decision` решает Commit). Grant/Revoke роли ADMIN и мутации статуса, которые меняют число ACTIVE ADMIN: `RoleStore.LockAdminRoleMutations` → `pg_advisory_xact_lock(0x5041590000000001)` в той же Tx **до** `GetForUpdate` строки user, затем re-check инициатора ACTIVE+ADMIN, затем count/status. HTTP — `internal/platform/httpserver` (health, JSON-ошибки D-39, `Handle` без маршрутов Auth). Accounts принимает `ChangedBy uuid.UUID` как есть и не читает auth-контекст. Первый ADMIN — будущая Go-команда migrate/bootstrap, не SQL-сид.
 
 ---
 
@@ -61,6 +61,8 @@ DISABLED → ACTIVE   (только ADMIN)
 
 `DISABLED` и `LOCKED` не входят. Регистрация не создаёт `PENDING_VERIFICATION`: подтверждения email в MVP нет.
 
+Последний ACTIVE ADMIN нельзя перевести в LOCKED или DISABLED: `LockUser` / `DisableUser` → `ErrLastAdmin`, Rollback, статус не меняется. Авто-lockout после 10 неуспехов того же пользователя тоже не ставит LOCKED, если это последний ACTIVE ADMIN (fail count и attempt коммитятся, ответ login — `INVALID_CREDENTIALS`). `UnlockUser` — только `LOCKED` → `ACTIVE` (сброс `failed_login_count`); `DISABLED` → `ACTIVE` этим use case не выполняется.
+
 Удаления пользователей нет: статус, не `DELETE`. FK со счетов без каскада.
 
 ### 3.2. Сессия
@@ -83,7 +85,7 @@ logout / revoke session / reuse refresh / DISABLE|LOCK user → revoked_at = now
 
 ### 3.4. Роль
 
-Регистрация всегда вставляет ровно одну строку `user_roles (CUSTOMER)` с `granted_by IS NULL`. Дальше только `GrantRole` / `RevokeRole` от ADMIN, не от самого пользователя. Снять себе `ADMIN` нельзя. Снять последнюю ACTIVE `ADMIN` нельзя (проверка count после lock). Два параллельных Revoke ADMIN сериализуются advisory-блокировкой §10, не `FOR UPDATE` на `auth.roles`.
+Регистрация всегда вставляет ровно одну строку `user_roles (CUSTOMER)` с `granted_by IS NULL`. Дальше только `GrantRole` / `RevokeRole` от ADMIN, не от самого пользователя. Снять себе `ADMIN` нельзя. Снять последнюю ACTIVE `ADMIN` нельзя (проверка count после lock). Lock/Disable последней ACTIVE `ADMIN` — та же ошибка. Два параллельных Revoke/Lock/Disable/lockout ADMIN сериализуются advisory-блокировкой §10, не `FOR UPDATE` на `auth.roles`.
 
 ---
 
@@ -273,7 +275,7 @@ func (p Principal) IsActiveCustomer() bool // Has(CUSTOMER) — для дене�
 | ChangePassword | Principal, Old, New | void (все сессии отозваны) | `INVALID_CREDENTIALS`, `INVALID_REQUEST` |
 | GrantRole | Actor Principal, UserID, Role | void | `FORBIDDEN`, `NOT_FOUND`, `INVALID_REQUEST` |
 | RevokeRole | как Grant | void | плюс «последний ADMIN» |
-| Lock/Unlock/DisableUser | Actor ADMIN, UserID, Reason | void | `FORBIDDEN`; lock отзывает сессии |
+| Lock/Unlock/DisableUser | Actor ADMIN, UserID, Reason | void | `FORBIDDEN`, `NOT_FOUND`, `INVALID_REQUEST`; last ACTIVE ADMIN — `ErrLastAdmin`; lock/disable отзывают сессии |
 
 `Idempotency-Key` на auth-POST **не требуется** ([D-07](decisions.md#d-07) — денежные объекты). Дубль email — `EMAIL_TAKEN`.
 
@@ -345,15 +347,17 @@ Use case возвращает явное `Decision` (`Commit` / `Rollback`). А�
 
 **Register:** rate limit REGISTER_IP → insert users → insert user_roles CUSTOMER → audit. `EMAIL_TAKEN` и `AUTH_RATE_LIMITED` → `Commit` счётчика, без второй строки user. Ошибка hasher/store → `Rollback`.
 
-**Login:** UPSERT LOGIN_IP; найти user; dummy или verify; при неуспехе UPSERT LOGIN_EMAIL, `failed_login_count+1` на строке `GetForUpdate`, при `>= 10` → `LOCKED` и revoke сессий (`USER_LOCKED`), insert attempt, `Commit`, `INVALID_CREDENTIALS`. При успехе: сброс `failed_login_count`, insert session + refresh, attempt success, audit, `Commit`. Ошибка Append attempt — `Rollback` (ошибка не глотается).
+**Login:** UPSERT LOGIN_IP; найти user; dummy или verify; при неуспехе UPSERT LOGIN_EMAIL. Если у найденного пользователя есть роль ADMIN — сначала `LockAdminRoleMutations`, потом `GetForUpdate`; без роли ADMIN advisory не берётся. На ACTIVE: `failed_login_count+1`; при `>= 10` → `LOCKED` и revoke сессий (`USER_LOCKED`), **кроме** последнего ACTIVE ADMIN (строка остаётся ACTIVE, count и attempt всё равно пишутся). Уже не ACTIVE — повторный `Update` не делается. Insert attempt, `Commit`, `INVALID_CREDENTIALS`. При успехе: сброс `failed_login_count`, insert session + refresh, attempt success, audit, `Commit`. Ошибка Append attempt — `Rollback` (ошибка не глотается).
 
 **Refresh:** `SELECT … FOR UPDATE` строки refresh по `token_hash` до конца TX; два параллельных вызова не должны оба увидеть unused. Reuse → revoke session + все refresh сессии, `Commit`, `TOKEN_REUSED`. Истёкший unused → `TOKEN_EXPIRED`, сессия жива, `Commit`. Неизвестный токен → `INVALID_TOKEN`, чужие сессии не трогать, `Commit` счётчика. Unit-тест сериализует фейковую TX и **не** заменяет проверку изоляции PostgreSQL.
 
 **Rate limit:** инкремент входит в ту же TX и коммитится вместе с `Decision=Commit` на бизнес-отказе. Иначе лимит не держится.
 
-**ADMIN Grant/Revoke:** в той же Tx сначала `SELECT pg_advisory_xact_lock(0x5041590000000001)` (`RoleStore.LockAdminRoleMutations`). Ключ стабильный: namespace `0x504159` («PAY») + объект `1` (ADMIN mutations). Это **transaction** lock (`pg_advisory_xact_lock`), не `pg_advisory_lock` (session) и не mutex процесса. `paycore_app` имеет на `auth.roles` только `SELECT`, поэтому не `FOR UPDATE` каталога. После lock — re-read инициатора: не ACTIVE+ADMIN → `FORBIDDEN`. CountActiveWithRole(ADMIN) только после lock. Другие роли этот lock не берут.
+**ADMIN Grant/Revoke и статус:** в той же Tx сначала `SELECT pg_advisory_xact_lock(0x5041590000000001)` (`RoleStore.LockAdminRoleMutations`). Ключ стабильный: namespace `0x504159` («PAY») + объект `1` (ADMIN mutations). Это **transaction** lock (`pg_advisory_xact_lock`), не `pg_advisory_lock` (session) и не mutex процесса. `paycore_app` имеет на `auth.roles` только `SELECT`, поэтому не `FOR UPDATE` каталога. Порядок: advisory → при необходимости `SELECT … FOR UPDATE` на `auth.users` → остальные записи. После lock на мутации, инициированные ADMIN, — re-read инициатора: не ACTIVE+ADMIN → `FORBIDDEN`. CountActiveWithRole(ADMIN) только после lock. Другие роли и login без роли ADMIN этот lock не берут.
 
-Число ACTIVE ADMIN без этого lock сейчас меняют: login lockout (`ACTIVE`→`LOCKED` у пользователя с ролью ADMIN), прямой `UserStore.Update` статуса, прямой `RoleStore.Grant/Revoke` в обход use case (сид/будущий bootstrap), будущие Lock/Unlock/DisableUser. Этот этап их не расширяет.
+**Lock/Unlock/DisableUser:** actor ADMIN; reason не пустой. Если target имеет роль ADMIN — тот же advisory, re-check инициатора, затем `GetForUpdate` target. Last ACTIVE ADMIN: Lock/Disable → `ErrLastAdmin`, Rollback. Already LOCKED / already DISABLED / already ACTIVE (Unlock) — Commit, без смены статуса. Unlock `DISABLED` — `INVALID_REQUEST` (не перескок машины статусов). Unlock `LOCKED` → `ACTIVE` сбрасывает `failed_login_count` и `locked_at`. Lock и Disable отзывают сессии (`USER_LOCKED` / `USER_DISABLED`) и refresh в той же Tx.
+
+Прямой `UserStore.Update` статуса и прямой `RoleStore.Grant/Revoke` в обход use case (сид/будущий bootstrap) по-прежнему могут обойти инвариант; адаптер это не запрещает. SQL CHECK «≥1 ADMIN» нет (ломает пустую БД до bootstrap). Второй advisory-ключ не вводим.
 
 Не брать блокировки финансовых таблиц. Не вызывать `post_journal`, `open_ledger_accounts`, `lock_account_balances`.
 

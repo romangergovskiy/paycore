@@ -386,3 +386,20 @@ func TestTxFakeDoesNotCommitOnRollback(t *testing.T) {
 		t.Fatal("partial register must not survive rollback")
 	}
 }
+
+func TestTxLockLastAdminRollsBack(t *testing.T) {
+	w := newWorld()
+	uow := &memUoW{w: w}
+	admin := seedUser(t, w, "a@b.c", domain.StatusActive, domain.RoleAdmin)
+	err := LockUserIn(context.Background(), uow, w.service(), statusCmd(adminPrincipal(admin), admin.ID))
+	if !errors.Is(err, domain.ErrLastAdmin) {
+		t.Fatalf("got %v", err)
+	}
+	if uow.committed || !uow.rolled {
+		t.Fatalf("commit=%v rollback=%v", uow.committed, uow.rolled)
+	}
+	got, _ := w.users.Get(context.Background(), admin.ID)
+	if got.Status != domain.StatusActive {
+		t.Fatalf("status %+v", got)
+	}
+}
