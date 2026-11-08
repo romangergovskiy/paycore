@@ -1,6 +1,7 @@
 // Package config loads the service configuration from PAYCORE_* environment
-// variables. Every variable is optional and has a default; invalid values and
-// unknown PAYCORE_* names are reported together and wrap ErrInvalid.
+// variables. Most variables are optional and have a default. PAYCORE_AUTH_JWT_SECRET
+// is required (≥ 32 bytes). Invalid values and unknown PAYCORE_* names are
+// reported together and wrap ErrInvalid.
 package config
 
 import (
@@ -40,7 +41,14 @@ type Config struct {
 	HTTP            HTTP
 	Log             Log
 	Postgres        Postgres
+	Auth            Auth
 	ShutdownTimeout time.Duration
+}
+
+// Auth holds Identity/Auth runtime settings. Issuer and token TTLs are
+// D-41 constants in authcrypto/domain, not environment variables.
+type Auth struct {
+	JWTSecret string
 }
 
 // Postgres holds pool and DSN settings. The API uses DSN (paycore_app).
@@ -97,14 +105,17 @@ const (
 	varPostgresIdle     = prefix + "POSTGRES_MAX_CONN_IDLE_TIME"
 	varPostgresLock     = prefix + "POSTGRES_LOCK_TIMEOUT"
 	varPostgresStmt     = prefix + "POSTGRES_STATEMENT_TIMEOUT"
+	varAuthJWTSecret    = prefix + "AUTH_JWT_SECRET"
 )
+
+const jwtSecretMinBytes = 32
 
 var known = []string{
 	varEnv, varHTTPAddr, varHTTPReadHeader, varHTTPRead, varHTTPWrite, varHTTPIdle,
 	varHTTPRequest, varHTTPMaxBodyBytes, varShutdownTimeout, varLogLevel, varLogFormat,
 	varPostgresDSN, varPostgresMigrate, varPostgresAdmin, varPostgresReadonly,
 	varPostgresMaxConns, varPostgresMinConns, varPostgresLifetime, varPostgresIdle,
-	varPostgresLock, varPostgresStmt,
+	varPostgresLock, varPostgresStmt, varAuthJWTSecret,
 }
 
 // Load builds a Config from environ, given in the os.Environ "KEY=value" form.
@@ -170,6 +181,11 @@ func Load(environ []string) (Config, error) {
 	}
 	if cfg.Postgres.MinConns > cfg.Postgres.MaxConns {
 		p.fail(varPostgresMinConns, "must be less than or equal to "+varPostgresMaxConns)
+	}
+
+	cfg.Auth.JWTSecret = p.str(varAuthJWTSecret, "")
+	if len(cfg.Auth.JWTSecret) < jwtSecretMinBytes {
+		p.fail(varAuthJWTSecret, fmt.Sprintf("must be at least %d bytes", jwtSecretMinBytes))
 	}
 
 	var unknown []string

@@ -35,6 +35,7 @@ const (
 	KindTooLarge
 	KindUnprocessable
 	KindUnavailable
+	KindTooManyRequests
 )
 
 func (k Kind) String() string {
@@ -57,6 +58,8 @@ func (k Kind) String() string {
 		return "unprocessable"
 	case KindUnavailable:
 		return "unavailable"
+	case KindTooManyRequests:
+		return "too_many_requests"
 	default:
 		return "internal"
 	}

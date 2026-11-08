@@ -20,8 +20,20 @@ func TestRunInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestRunShortJWTSecret(t *testing.T) {
+	err := Run(context.Background(), []string{
+		"PAYCORE_AUTH_JWT_SECRET=0123456789abcdef0123456789abcde",
+	}, io.Discard)
+	if !errors.Is(err, config.ErrInvalid) {
+		t.Fatalf("Run = %v, want config.ErrInvalid", err)
+	}
+}
+
 func TestRunListenError(t *testing.T) {
-	err := Run(context.Background(), []string{"PAYCORE_HTTP_ADDR=127.0.0.1:-1"}, io.Discard)
+	err := Run(context.Background(), []string{
+		"PAYCORE_HTTP_ADDR=127.0.0.1:-1",
+		"PAYCORE_AUTH_JWT_SECRET=0123456789abcdef0123456789abcdef",
+	}, io.Discard)
 	if err == nil || errors.Is(err, config.ErrInvalid) {
 		t.Fatalf("Run = %v, want listen error", err)
 	}
@@ -38,6 +50,7 @@ func TestRunServesAndShutsDown(t *testing.T) {
 			"PAYCORE_ENV=test",
 			"PAYCORE_HTTP_ADDR=127.0.0.1:0",
 			"PAYCORE_SHUTDOWN_TIMEOUT=2s",
+			"PAYCORE_AUTH_JWT_SECRET=0123456789abcdef0123456789abcdef",
 		}, logW)
 		logW.Close()
 	}()
