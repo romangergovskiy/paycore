@@ -225,6 +225,10 @@ func TestLockUserCustomerDoesNotTakeAdminLock(t *testing.T) {
 	if _, err := svc.LockUser(context.Background(), statusCmd(adminPrincipal(admin), cust.ID)); err != nil {
 		t.Fatal(err)
 	}
+	got, _ := w.users.Get(context.Background(), cust.ID)
+	if got.Status != domain.StatusLocked {
+		t.Fatalf("status %+v", got)
+	}
 	if callIndex(w.roles.calls, "lock") != -1 {
 		t.Fatalf("customer lock took ADMIN advisory: %v", w.roles.calls)
 	}
@@ -269,5 +273,40 @@ func TestLockUserCanceled(t *testing.T) {
 	_, err := w.service().LockUser(ctx, statusCmd(domain.Principal{Roles: []domain.Role{domain.RoleAdmin}}, uuid.Must(uuid.NewV7())))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLockUserAdminLockError(t *testing.T) {
+	w := newWorld()
+	svc := w.service()
+	a1 := seedUser(t, w, "a1@b.c", domain.StatusActive, domain.RoleAdmin)
+	a2 := seedUser(t, w, "a2@b.c", domain.StatusActive, domain.RoleAdmin)
+	w.roles.lockErr = errors.New("lock failed")
+	dec, err := svc.LockUser(context.Background(), statusCmd(adminPrincipal(a1), a2.ID))
+	if dec != Rollback || !errors.Is(err, w.roles.lockErr) {
+		t.Fatalf("dec=%v err=%v", dec, err)
+	}
+	got, _ := w.users.Get(context.Background(), a2.ID)
+	if got.Status != domain.StatusActive {
+		t.Fatalf("status %+v", got)
+	}
+}
+
+func TestLockUserUpdateErrorRollsBack(t *testing.T) {
+	w := newWorld()
+	uow := &memUoW{w: w}
+	admin := seedUser(t, w, "a@b.c", domain.StatusActive, domain.RoleAdmin)
+	cust := seedUser(t, w, "c@b.c", domain.StatusActive, domain.RoleCustomer)
+	w.users.update = errors.New("users update failed")
+	err := LockUserIn(context.Background(), uow, w.service(), statusCmd(adminPrincipal(admin), cust.ID))
+	if !errors.Is(err, w.users.update) {
+		t.Fatalf("got %v", err)
+	}
+	if uow.committed || !uow.rolled {
+		t.Fatalf("commit=%v rollback=%v", uow.committed, uow.rolled)
+	}
+	got, _ := w.users.Get(context.Background(), cust.ID)
+	if got.Status != domain.StatusActive {
+		t.Fatalf("partial lock %+v", got)
 	}
 }

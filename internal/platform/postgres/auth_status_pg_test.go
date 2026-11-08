@@ -40,6 +40,7 @@ func TestAuthAdminUserStatus(t *testing.T) {
 	uow := NewAuthUoW(app)
 
 	t.Run("last ADMIN lock and disable", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
 		admin := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "last"))
 		cmd := pgStatus(adminPrincipal(admin), admin.ID)
 		if err := application.LockUserIn(ctx, uow, svc, cmd); !errors.Is(err, domain.ErrLastAdmin) {
@@ -59,6 +60,7 @@ func TestAuthAdminUserStatus(t *testing.T) {
 	})
 
 	t.Run("one of two can lock", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
 		a1 := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "one-a"))
 		a2 := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "one-b"))
 		if err := application.LockUserIn(ctx, uow, svc, pgStatus(adminPrincipal(a1), a2.ID)); err != nil {
@@ -81,6 +83,7 @@ func TestAuthAdminUserStatus(t *testing.T) {
 	})
 
 	t.Run("parallel lockout cannot lock both last ADMINs", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
 		clock.t = clock.t.Add(domain.RateWindow)
 		a := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "par-a"))
 		b := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "par-b"))
@@ -121,8 +124,8 @@ func TestAuthAdminUserStatus(t *testing.T) {
 		if ub.Status == domain.StatusLocked {
 			locked++
 		}
-		if locked == 2 {
-			t.Fatalf("both last ADMINs LOCKED a=%s b=%s", ua.Status, ub.Status)
+		if locked != 1 {
+			t.Fatalf("locked=%d a=%s b=%s (want exactly one)", locked, ua.Status, ub.Status)
 		}
 		if ua.FailedLoginCount < domain.LockAfter && ub.FailedLoginCount < domain.LockAfter {
 			t.Fatalf("fail counts a=%d b=%d", ua.FailedLoginCount, ub.FailedLoginCount)
@@ -193,7 +196,71 @@ func TestAuthAdminUserStatus(t *testing.T) {
 		}
 	})
 
+	t.Run("one of two can disable", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		a1 := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "dis-a"))
+		a2 := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "dis-b"))
+		if err := application.DisableUserIn(ctx, uow, svc, pgStatus(adminPrincipal(a1), a2.ID)); err != nil {
+			t.Fatal(err)
+		}
+		got, err := NewAuthUsers(app).Get(ctx, a2.ID)
+		if err != nil || got.Status != domain.StatusDisabled {
+			t.Fatalf("disabled %+v %v", got, err)
+		}
+		if err := application.DisableUserIn(ctx, uow, svc, pgStatus(adminPrincipal(a1), a1.ID)); !errors.Is(err, domain.ErrLastAdmin) {
+			t.Fatalf("last: %v", err)
+		}
+	})
+
+	t.Run("unlock locked user", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		admin := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "un-a"))
+		email := pgEmail(t, "un-c")
+		cust, err := application.RegisterIn(ctx, uow, svc, pgRegister(email))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := application.LockUserIn(ctx, uow, svc, pgStatus(adminPrincipal(admin), cust.ID)); err != nil {
+			t.Fatal(err)
+		}
+		if err := application.UnlockUserIn(ctx, uow, svc, pgStatus(adminPrincipal(admin), cust.ID)); err != nil {
+			t.Fatal(err)
+		}
+		got, err := NewAuthUsers(app).Get(ctx, cust.ID)
+		if err != nil || got.Status != domain.StatusActive || got.LockedAt != nil || got.FailedLoginCount != 0 {
+			t.Fatalf("unlocked %+v %v", got, err)
+		}
+	})
+
+	t.Run("rollback discards lock", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		admin := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rb-a"))
+		email := pgEmail(t, "rb-c")
+		cust, err := application.RegisterIn(ctx, uow, svc, pgRegister(email))
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = uow.Do(ctx, func(ctx context.Context, d application.Deps) (application.Decision, error) {
+			s := pgAuthService(clock)
+			s.Users, s.Sessions, s.Tokens, s.Roles = d.Users, d.Sessions, d.Tokens, d.Roles
+			s.Attempts, s.Limiter = d.Attempts, d.Limiter
+			dec, err := s.LockUser(ctx, pgStatus(adminPrincipal(admin), cust.ID))
+			if err != nil {
+				return dec, err
+			}
+			return application.Rollback, errors.New("forced")
+		})
+		if err == nil || err.Error() != "forced" {
+			t.Fatalf("got %v", err)
+		}
+		got, err := NewAuthUsers(app).Get(ctx, cust.ID)
+		if err != nil || got.Status != domain.StatusActive {
+			t.Fatalf("partial lock %+v %v", got, err)
+		}
+	})
+
 	t.Run("advisory released after commit and rollback", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
 		a1 := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rel-a"))
 		a2 := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rel-b"))
 		if err := application.LockUserIn(ctx, uow, svc, pgStatus(adminPrincipal(a1), a2.ID)); err != nil {
@@ -228,6 +295,7 @@ func TestAuthAdminUserStatus(t *testing.T) {
 	})
 
 	t.Run("no deadlock lockout and status", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
 		clock.t = clock.t.Add(domain.RateWindow)
 		a := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "dl-a"))
 		b := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "dl-b"))
@@ -274,6 +342,43 @@ func TestAuthAdminUserStatus(t *testing.T) {
 			t.Fatalf("op %d: %v (all %v)", i, err, errs)
 		}
 	})
+}
+
+func clearActiveAdmins(t *testing.T, ctx context.Context, conn *pgx.Conn, clock *pgClock) {
+	t.Helper()
+	rows, err := conn.Query(ctx, `
+		SELECT u.id
+		  FROM auth.users u
+		  JOIN auth.user_roles ur ON ur.user_id = u.id AND ur.role_code = $1
+		 WHERE u.status = 'ACTIVE'`, string(domain.RoleAdmin))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	users := NewAuthUsers(conn)
+	for _, id := range ids {
+		u, err := users.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u.Status = domain.StatusDisabled
+		u.LockedAt = nil
+		u.UpdatedAt = clock.t
+		if err := users.Update(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func pgStatus(actor domain.Principal, userID uuid.UUID) application.StatusCommand {
