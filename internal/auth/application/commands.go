@@ -42,3 +42,10 @@ type Credentials struct {
 }
 
 const tokenTypeBearer = "Bearer"
+
+// StatusCommand is LockUser / UnlockUser / DisableUser.
+type StatusCommand struct {
+	Actor  domain.Principal
+	UserID uuid.UUID
+	Reason string
+}

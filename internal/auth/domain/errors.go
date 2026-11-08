@@ -41,5 +41,5 @@ var (
 	ErrForbidden    = &Error{Code: CodeForbidden, Message: "Action is not allowed."}
 	ErrNotFound     = &Error{Code: CodeNotFound, Message: "User was not found."}
 	ErrRateLimited  = &Error{Code: CodeRateLimited, Message: "Too many attempts. Retry later."}
-	ErrLastAdmin    = &Error{Code: CodeInvalidRequest, Message: "The last ADMIN cannot be revoked."}
+	ErrLastAdmin    = &Error{Code: CodeInvalidRequest, Message: "The last ACTIVE ADMIN cannot be removed."}
 )

@@ -61,6 +61,16 @@ func TestUoWNil(t *testing.T) {
 	if err := LogoutIn(context.Background(), nil, w.service(), domain.Principal{}); !errors.Is(err, errNotWired) {
 		t.Fatalf("got %v", err)
 	}
+	cmd := StatusCommand{Actor: domain.Principal{Roles: []domain.Role{domain.RoleAdmin}}, Reason: "x"}
+	if err := LockUserIn(context.Background(), nil, w.service(), cmd); !errors.Is(err, errNotWired) {
+		t.Fatalf("lock: %v", err)
+	}
+	if err := UnlockUserIn(context.Background(), nil, w.service(), cmd); !errors.Is(err, errNotWired) {
+		t.Fatalf("unlock: %v", err)
+	}
+	if err := DisableUserIn(context.Background(), nil, w.service(), cmd); !errors.Is(err, errNotWired) {
+		t.Fatalf("disable: %v", err)
+	}
 }
 
 func TestUoWCanceledBeforeDo(t *testing.T) {
@@ -87,5 +97,29 @@ func TestGrantRevokeIn(t *testing.T) {
 	}
 	if err := RevokeRoleIn(context.Background(), uow, svc, adminPrincipal(admin), reg.ID, domain.RoleSupport); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLockUnlockDisableIn(t *testing.T) {
+	w := newWorld()
+	uow := &memUoW{w: w}
+	svc := w.service()
+	a1 := seedUser(t, w, "a1@b.c", domain.StatusActive, domain.RoleAdmin)
+	a2 := seedUser(t, w, "a2@b.c", domain.StatusActive, domain.RoleAdmin)
+	if err := LockUserIn(context.Background(), uow, svc, statusCmd(adminPrincipal(a1), a2.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := UnlockUserIn(context.Background(), uow, svc, statusCmd(adminPrincipal(a1), a2.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := DisableUserIn(context.Background(), uow, svc, statusCmd(adminPrincipal(a1), a2.ID)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := w.users.Get(context.Background(), a2.ID)
+	if got.Status != domain.StatusDisabled {
+		t.Fatalf("status %+v", got)
+	}
+	if !uow.committed || uow.rolled {
+		t.Fatalf("commit=%v rollback=%v", uow.committed, uow.rolled)
 	}
 }

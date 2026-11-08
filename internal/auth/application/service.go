@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,6 +12,13 @@ import (
 )
 
 var errNotWired = errors.New("auth: stores, hasher, signer, issuer, and clock are required")
+
+// errAdminSerialRestart is returned when a failed login took the user row
+// without the ADMIN advisory lock and then observed role ADMIN. Holding
+// FOR UPDATE and then taking the advisory lock deadlocks Grant/LockUser
+// (advisory → user). The UnitOfWork must roll back; LoginIn retries once
+// with the advisory lock first.
+var errAdminSerialRestart = errors.New("auth: retry login lockout under ADMIN advisory lock")
 
 // Service is Identity/Auth use cases. Ports must not Begin. Writes that
 // need one database transaction run inside UnitOfWork.Do and return an
@@ -238,6 +246,15 @@ func (s Service) loginRejected(ctx context.Context, email, ip string, u domain.U
 	reason := domain.FailureInvalidCredentials
 	var uid *uuid.UUID
 	if found {
+		hasAdmin, err := s.Roles.Has(ctx, u.ID, domain.RoleAdmin)
+		if err != nil {
+			return Rollback, err
+		}
+		if hasAdmin {
+			if err := s.Roles.LockAdminRoleMutations(ctx); err != nil {
+				return Rollback, err
+			}
+		}
 		fresh, err := s.Users.GetForUpdate(ctx, u.ID)
 		if err != nil {
 			if !errors.Is(err, domain.ErrNotFound) {
@@ -245,6 +262,15 @@ func (s Service) loginRejected(ctx context.Context, email, ip string, u domain.U
 			}
 		} else {
 			uid = &fresh.ID
+			if !hasAdmin {
+				nowAdmin, err := s.Roles.Has(ctx, fresh.ID, domain.RoleAdmin)
+				if err != nil {
+					return Rollback, err
+				}
+				if nowAdmin {
+					return Rollback, errAdminSerialRestart
+				}
+			}
 			if fresh.Status == domain.StatusActive {
 				fresh, err = s.applyActiveFailure(ctx, fresh, now)
 				if err != nil {
@@ -301,23 +327,31 @@ func failureReason(st domain.Status) domain.FailureReason {
 
 // applyActiveFailure increments the locked ACTIVE row. LOCKED/DISABLED
 // callers must not invoke it. One failed login does not GetForUpdate again.
+// The last ACTIVE ADMIN is never flipped to LOCKED: fail count and the
+// attempt still persist.
 func (s Service) applyActiveFailure(ctx context.Context, u domain.User, now time.Time) (domain.User, error) {
 	u.FailedLoginCount++
 	u.UpdatedAt = now
 	if u.FailedLoginCount >= domain.LockAfter {
-		locked := now
-		u.Status = domain.StatusLocked
-		u.LockedAt = &locked
-		if err := s.Users.Update(ctx, u); err != nil {
+		keep, err := s.mustKeepLastAdminActive(ctx, u)
+		if err != nil {
 			return u, err
 		}
-		if err := s.Sessions.RevokeAllForUser(ctx, u.ID, domain.RevokeUserLocked, now); err != nil {
-			return u, err
+		if !keep {
+			locked := now
+			u.Status = domain.StatusLocked
+			u.LockedAt = &locked
+			if err := s.Users.Update(ctx, u); err != nil {
+				return u, err
+			}
+			if err := s.Sessions.RevokeAllForUser(ctx, u.ID, domain.RevokeUserLocked, now); err != nil {
+				return u, err
+			}
+			if err := s.Tokens.RevokeAllForUser(ctx, u.ID, now); err != nil {
+				return u, err
+			}
+			return u, nil
 		}
-		if err := s.Tokens.RevokeAllForUser(ctx, u.ID, now); err != nil {
-			return u, err
-		}
-		return u, nil
 	}
 	if err := s.Users.Update(ctx, u); err != nil {
 		return u, err
@@ -627,11 +661,10 @@ func (s Service) GrantRole(ctx context.Context, actor domain.Principal, userID u
 		if err := s.lockAndRequireActiveAdmin(ctx, actor.UserID); err != nil {
 			return Rollback, err
 		}
-	}
-	if _, err := s.Users.Get(ctx, userID); err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
+		if _, err := s.Users.GetForUpdate(ctx, userID); err != nil {
 			return Rollback, err
 		}
+	} else if _, err := s.Users.Get(ctx, userID); err != nil {
 		return Rollback, err
 	}
 	has, err := s.Roles.Has(ctx, userID, role)
@@ -670,12 +703,16 @@ func (s Service) RevokeRole(ctx context.Context, actor domain.Principal, userID 
 	if actor.UserID == userID && role == domain.RoleAdmin {
 		return Rollback, domain.ErrForbidden
 	}
+	var u domain.User
+	var err error
 	if role == domain.RoleAdmin {
 		if err := s.lockAndRequireActiveAdmin(ctx, actor.UserID); err != nil {
 			return Rollback, err
 		}
+		u, err = s.Users.GetForUpdate(ctx, userID)
+	} else {
+		u, err = s.Users.Get(ctx, userID)
 	}
-	u, err := s.Users.Get(ctx, userID)
 	if err != nil {
 		return Rollback, err
 	}
@@ -729,4 +766,178 @@ func (s Service) lockAndRequireActiveAdmin(ctx context.Context, actorID uuid.UUI
 		return domain.ErrForbidden
 	}
 	return nil
+}
+
+func (s Service) statusWired() error {
+	if s.Users == nil || s.Roles == nil || s.Clock == nil {
+		return errNotWired
+	}
+	return nil
+}
+
+func (s Service) statusLockWired() error {
+	if err := s.statusWired(); err != nil {
+		return err
+	}
+	if s.Sessions == nil || s.Tokens == nil {
+		return errNotWired
+	}
+	return nil
+}
+
+func (s Service) prepareStatusTarget(ctx context.Context, actor domain.Principal, targetID uuid.UUID) (domain.User, error) {
+	// Always take the ADMIN advisory lock before the user row. A stale
+	// Has(ADMIN)==false must not skip serialization: GrantRole can add
+	// ADMIN before this Tx mutates status.
+	if err := s.lockAndRequireActiveAdmin(ctx, actor.UserID); err != nil {
+		return domain.User{}, err
+	}
+	return s.Users.GetForUpdate(ctx, targetID)
+}
+
+func (s Service) mustKeepLastAdminActive(ctx context.Context, u domain.User) (bool, error) {
+	if u.Status != domain.StatusActive {
+		return false, nil
+	}
+	has, err := s.Roles.Has(ctx, u.ID, domain.RoleAdmin)
+	if err != nil || !has {
+		return false, err
+	}
+	n, err := s.Roles.CountActiveWithRole(ctx, domain.RoleAdmin)
+	if err != nil {
+		return false, err
+	}
+	return n <= 1, nil
+}
+
+func (s Service) validateStatusCommand(cmd StatusCommand) error {
+	if !cmd.Actor.Has(domain.RoleAdmin) {
+		return domain.ErrForbidden
+	}
+	if cmd.UserID == uuid.Nil || strings.TrimSpace(cmd.Reason) == "" {
+		return domain.ErrInvalidRequest
+	}
+	return nil
+}
+
+// LockUser sets ACTIVE → LOCKED and revokes sessions. Already LOCKED is
+// a no-op success. The last ACTIVE ADMIN cannot be locked.
+func (s Service) LockUser(ctx context.Context, cmd StatusCommand) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Rollback, err
+	}
+	if err := s.statusLockWired(); err != nil {
+		return Rollback, err
+	}
+	if err := s.validateStatusCommand(cmd); err != nil {
+		return Rollback, err
+	}
+	u, err := s.prepareStatusTarget(ctx, cmd.Actor, cmd.UserID)
+	if err != nil {
+		return Rollback, err
+	}
+	if u.Status == domain.StatusLocked {
+		return Commit, nil
+	}
+	if u.Status != domain.StatusActive {
+		return Rollback, domain.ErrInvalidRequest
+	}
+	keep, err := s.mustKeepLastAdminActive(ctx, u)
+	if err != nil {
+		return Rollback, err
+	}
+	if keep {
+		return Rollback, domain.ErrLastAdmin
+	}
+	now := s.now()
+	locked := now
+	u.Status = domain.StatusLocked
+	u.LockedAt = &locked
+	u.UpdatedAt = now
+	if err := s.Users.Update(ctx, u); err != nil {
+		return Rollback, err
+	}
+	if err := s.Sessions.RevokeAllForUser(ctx, u.ID, domain.RevokeUserLocked, now); err != nil {
+		return Rollback, err
+	}
+	if err := s.Tokens.RevokeAllForUser(ctx, u.ID, now); err != nil {
+		return Rollback, err
+	}
+	return Commit, nil
+}
+
+// UnlockUser sets LOCKED → ACTIVE and clears failed_login_count.
+// DISABLED cannot be unlocked (that would skip the status machine).
+// Already ACTIVE is a no-op success.
+func (s Service) UnlockUser(ctx context.Context, cmd StatusCommand) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Rollback, err
+	}
+	if err := s.statusWired(); err != nil {
+		return Rollback, err
+	}
+	if err := s.validateStatusCommand(cmd); err != nil {
+		return Rollback, err
+	}
+	u, err := s.prepareStatusTarget(ctx, cmd.Actor, cmd.UserID)
+	if err != nil {
+		return Rollback, err
+	}
+	if u.Status == domain.StatusActive {
+		return Commit, nil
+	}
+	if u.Status != domain.StatusLocked {
+		return Rollback, domain.ErrInvalidRequest
+	}
+	now := s.now()
+	u.Status = domain.StatusActive
+	u.LockedAt = nil
+	u.FailedLoginCount = 0
+	u.UpdatedAt = now
+	if err := s.Users.Update(ctx, u); err != nil {
+		return Rollback, err
+	}
+	return Commit, nil
+}
+
+// DisableUser sets ACTIVE or LOCKED → DISABLED and revokes sessions.
+// Already DISABLED is a no-op success. The last ACTIVE ADMIN cannot be disabled.
+func (s Service) DisableUser(ctx context.Context, cmd StatusCommand) (Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return Rollback, err
+	}
+	if err := s.statusLockWired(); err != nil {
+		return Rollback, err
+	}
+	if err := s.validateStatusCommand(cmd); err != nil {
+		return Rollback, err
+	}
+	u, err := s.prepareStatusTarget(ctx, cmd.Actor, cmd.UserID)
+	if err != nil {
+		return Rollback, err
+	}
+	if u.Status == domain.StatusDisabled {
+		return Commit, nil
+	}
+	keep, err := s.mustKeepLastAdminActive(ctx, u)
+	if err != nil {
+		return Rollback, err
+	}
+	if keep {
+		return Rollback, domain.ErrLastAdmin
+	}
+	now := s.now()
+	u.Status = domain.StatusDisabled
+	u.LockedAt = nil
+	u.UpdatedAt = now
+	if err := s.Users.Update(ctx, u); err != nil {
+		return Rollback, err
+	}
+	if err := s.Sessions.RevokeAllForUser(ctx, u.ID, domain.RevokeUserDisabled, now); err != nil {
+		return Rollback, err
+	}
+	if err := s.Tokens.RevokeAllForUser(ctx, u.ID, now); err != nil {
+		return Rollback, err
+	}
+	return Commit, nil
 }
