@@ -216,7 +216,48 @@ func TestHS256RequiredClaims(t *testing.T) {
 
 	emptyRoles := cloneClaims(valid)
 	emptyRoles["roles"] = []string{}
-	if _, err := s.Parse(signHS256(t, jwtPayload(emptyRoles), s.secret)); err != nil {
+	if _, err := s.Parse(signHS256(t, jwtPayload(emptyRoles), s.secret)); !errors.Is(err, domain.ErrInvalidToken) {
+		t.Fatalf("empty roles: %v", err)
+	}
+}
+
+func TestHS256KnownRolesParse(t *testing.T) {
+	s := testSigner(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, role := range []domain.Role{
+		domain.RoleCustomer,
+		domain.RoleMerchant,
+		domain.RoleSupport,
+		domain.RoleOperator,
+		domain.RoleRiskAnalyst,
+		domain.RoleAdmin,
+	} {
+		p := testPrincipal()
+		p.Roles = []domain.Role{role}
+		tok, err := s.Sign(p, now, now.Add(15*time.Minute))
+		if err != nil {
+			t.Fatalf("%s sign: %v", role, err)
+		}
+		got, err := s.Parse(tok)
+		if err != nil {
+			t.Fatalf("%s parse: %v", role, err)
+		}
+		if len(got.Roles) != 1 || got.Roles[0] != role {
+			t.Fatalf("%s roles: %v", role, got.Roles)
+		}
+	}
+}
+
+func TestHS256SignRejectsEmptyRoles(t *testing.T) {
+	s := testSigner(t)
+	p := testPrincipal()
+	p.Roles = nil
+	now := time.Now().UTC()
+	if _, err := s.Sign(p, now, now.Add(15*time.Minute)); !errors.Is(err, domain.ErrInvalidRequest) {
+		t.Fatalf("nil roles: %v", err)
+	}
+	p.Roles = []domain.Role{}
+	if _, err := s.Sign(p, now, now.Add(15*time.Minute)); !errors.Is(err, domain.ErrInvalidRequest) {
 		t.Fatalf("empty roles: %v", err)
 	}
 }

@@ -49,7 +49,7 @@ func (s *HS256) Sign(p domain.Principal, now, exp time.Time) (string, error) {
 	if s == nil || len(s.secret) < minSecretBytes {
 		return "", errors.New("auth: JWT signer is not configured")
 	}
-	if p.UserID == uuid.Nil || p.SessionID == uuid.Nil {
+	if p.UserID == uuid.Nil || p.SessionID == uuid.Nil || len(p.Roles) == 0 {
 		return "", domain.ErrInvalidRequest
 	}
 	now = now.UTC()
@@ -225,6 +225,9 @@ func jsonIsStringArray(b json.RawMessage) bool {
 }
 
 func parseJWTRoles(raw []string) ([]domain.Role, error) {
+	if len(raw) == 0 {
+		return nil, domain.ErrInvalidToken
+	}
 	roles := make([]domain.Role, 0, len(raw))
 	seen := make(map[domain.Role]struct{}, len(raw))
 	for _, r := range raw {
