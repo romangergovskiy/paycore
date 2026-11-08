@@ -402,6 +402,11 @@ func TestAuthDDL(t *testing.T) {
 		assertPrivilege(t, ctx, owner, "paycore_app", "auth.user_roles", "DELETE", true)
 		assertPrivilege(t, ctx, owner, "paycore_app", "auth.login_attempts", "INSERT", true)
 		assertPrivilege(t, ctx, owner, "paycore_app", "auth.login_attempts", "UPDATE", false)
+		assertPrivilege(t, ctx, owner, "paycore_app", "auth.user_status_history", "INSERT", true)
+		assertPrivilege(t, ctx, owner, "paycore_app", "auth.user_status_history", "UPDATE", false)
+		assertPrivilege(t, ctx, owner, "paycore_app", "auth.user_status_history", "DELETE", false)
+		assertPrivilege(t, ctx, owner, "paycore_readonly", "auth.user_status_history", "SELECT", true)
+		assertPrivilege(t, ctx, owner, "paycore_readonly", "auth.user_status_history", "INSERT", false)
 		assertPrivilege(t, ctx, owner, "paycore_app", "auth.refresh_tokens", "DELETE", true)
 		assertPrivilege(t, ctx, owner, "paycore_readonly", "auth.users", "SELECT", true)
 		assertPrivilege(t, ctx, owner, "paycore_readonly", "auth.users", "INSERT", false)
@@ -440,6 +445,13 @@ func TestAuthDDL(t *testing.T) {
 		conn := mustConnect(t, ctx, c2.owner)
 		defer conn.Close(ctx)
 		insertAuthUser(t, ctx, conn, mustNewID(t).String())
+		if err := Down(ctx, c2.owner); err != nil {
+			t.Fatalf("00006 down with empty history: %v", err)
+		}
+		v, verr := CurrentVersion(ctx, c2.owner)
+		if verr != nil || v != 5 {
+			t.Fatalf("version after 00006 down = %d, %v", v, verr)
+		}
 		err := Down(ctx, c2.owner)
 		if err == nil {
 			t.Fatal("down succeeded with users present")
@@ -447,7 +459,7 @@ func TestAuthDDL(t *testing.T) {
 		if !strings.Contains(strings.ToLower(err.Error()), "refused") {
 			t.Fatalf("down error = %v", err)
 		}
-		v, verr := CurrentVersion(ctx, c2.owner)
+		v, verr = CurrentVersion(ctx, c2.owner)
 		if verr != nil || v != 5 {
 			t.Fatalf("version after refused down = %d, %v", v, verr)
 		}
@@ -462,7 +474,10 @@ func TestAuthDDL(t *testing.T) {
 			t.Fatalf("up: %v", err)
 		}
 		if err := Down(ctx, c2.owner); err != nil {
-			t.Fatalf("down: %v", err)
+			t.Fatalf("00006 down: %v", err)
+		}
+		if err := Down(ctx, c2.owner); err != nil {
+			t.Fatalf("00005 down: %v", err)
 		}
 		v, err := CurrentVersion(ctx, c2.owner)
 		if err != nil || v != 4 {
@@ -496,6 +511,37 @@ func TestAuthDDL(t *testing.T) {
 		}
 		if roles != 0 {
 			t.Fatal("auth.roles remained after down")
+		}
+	})
+
+	t.Run("24. down refuses status history rows", func(t *testing.T) {
+		c2 := startCluster(t)
+		if err := Bootstrap(ctx, c2.admin, c2.owner, c2.app, c2.readonly); err != nil {
+			t.Fatalf("bootstrap: %v", err)
+		}
+		if err := Up(ctx, c2.owner); err != nil {
+			t.Fatalf("up: %v", err)
+		}
+		conn := mustConnect(t, ctx, c2.owner)
+		defer conn.Close(ctx)
+		uid := mustNewID(t)
+		insertAuthUser(t, ctx, conn, uid.String())
+		if _, err := conn.Exec(ctx, `
+			INSERT INTO auth.user_status_history (
+			  id, user_id, changed_by, previous_status, new_status, reason
+			) VALUES ($1, $2, $2, 'ACTIVE', 'LOCKED', 'policy')`, mustNewID(t), uid); err != nil {
+			t.Fatal(err)
+		}
+		err := Down(ctx, c2.owner)
+		if err == nil {
+			t.Fatal("00006 down succeeded with history rows")
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "refused") {
+			t.Fatalf("down error = %v", err)
+		}
+		v, verr := CurrentVersion(ctx, c2.owner)
+		if verr != nil || v != 6 {
+			t.Fatalf("version after refused 00006 down = %d, %v", v, verr)
 		}
 	})
 }
