@@ -37,6 +37,19 @@ func TestRunShortJWTSecret(t *testing.T) {
 	}
 }
 
+func TestRunProductionRequiresPostgresDSN(t *testing.T) {
+	err := Run(context.Background(), []string{
+		"PAYCORE_ENV=production",
+		"PAYCORE_AUTH_JWT_SECRET=" + testJWTSecret,
+	}, io.Discard)
+	if !errors.Is(err, config.ErrInvalid) {
+		t.Fatalf("Run = %v, want config.ErrInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "PAYCORE_POSTGRES_DSN") {
+		t.Fatalf("Run = %v, want PAYCORE_POSTGRES_DSN in the error", err)
+	}
+}
+
 func TestRunListenError(t *testing.T) {
 	err := Run(context.Background(), []string{
 		"PAYCORE_HTTP_ADDR=127.0.0.1:-1",
@@ -47,7 +60,16 @@ func TestRunListenError(t *testing.T) {
 	}
 }
 
-func TestRunServesAndShutsDown(t *testing.T) {
+func TestRunServesWithoutDSNLocal(t *testing.T) {
+	runServesWithoutDSN(t, "local")
+}
+
+func TestRunServesWithoutDSNTest(t *testing.T) {
+	runServesWithoutDSN(t, "test")
+}
+
+func runServesWithoutDSN(t *testing.T, env string) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -55,7 +77,8 @@ func TestRunServesAndShutsDown(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- Run(ctx, []string{
-			"PAYCORE_ENV=test",
+			"PAYCORE_ENV=" + env,
+			"PAYCORE_LOG_FORMAT=json",
 			"PAYCORE_HTTP_ADDR=127.0.0.1:0",
 			"PAYCORE_SHUTDOWN_TIMEOUT=2s",
 			"PAYCORE_AUTH_JWT_SECRET=" + testJWTSecret,

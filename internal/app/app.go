@@ -62,6 +62,9 @@ func Run(ctx context.Context, environ []string, logOut io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Env == config.EnvProduction && cfg.Postgres.DSN == "" {
+		return fmt.Errorf("%w: PAYCORE_POSTGRES_DSN is required in production", config.ErrInvalid)
+	}
 
 	log := logging.New(logOut, logging.Format(cfg.Log.Format), cfg.Log.Level).With(
 		slog.String("service", "paycore-api"),
