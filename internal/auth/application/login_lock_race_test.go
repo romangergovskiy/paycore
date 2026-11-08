@@ -14,8 +14,9 @@ import (
 // GetForUpdate, without sleeping and without memUoW serializing two TXs.
 type hookUsers struct {
 	UserStore
-	afterGetByEmail func()
-	getForUpdateN   int
+	afterGetByEmail    func()
+	beforeGetForUpdate func()
+	getForUpdateN      int
 }
 
 func (h *hookUsers) GetByEmail(ctx context.Context, email string) (domain.User, error) {
@@ -28,6 +29,9 @@ func (h *hookUsers) GetByEmail(ctx context.Context, email string) (domain.User, 
 
 func (h *hookUsers) GetForUpdate(ctx context.Context, id uuid.UUID) (domain.User, error) {
 	h.getForUpdateN++
+	if h.beforeGetForUpdate != nil {
+		h.beforeGetForUpdate()
+	}
 	return h.UserStore.GetForUpdate(ctx, id)
 }
 
@@ -286,5 +290,45 @@ func TestLogin6TenthFailureLocksFromRow(t *testing.T) {
 	}
 	if hooks.getForUpdateN != 1 {
 		t.Fatalf("GetForUpdate %d want 1", hooks.getForUpdateN)
+	}
+}
+
+func TestLoginGrantAdminDuringRowLockRestarts(t *testing.T) {
+	w := newWorld()
+	admin := seedUser(t, w, "admin@b.c", domain.StatusActive, domain.RoleAdmin)
+	cust := seedUser(t, w, "c@b.c", domain.StatusActive, domain.RoleCustomer)
+	cust.FailedLoginCount = domain.LockAfter - 1
+	if err := w.users.Update(context.Background(), cust); err != nil {
+		t.Fatal(err)
+	}
+
+	svc, hooks := serviceWithUserHook(w, nil)
+	hooks.beforeGetForUpdate = func() {
+		hooks.beforeGetForUpdate = nil
+		if _, err := w.service().GrantRole(context.Background(), adminPrincipal(admin), cust.ID, domain.RoleAdmin); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, dec, err := svc.Login(context.Background(), wrongPassword("c@b.c"))
+	if dec != Rollback || !errors.Is(err, errAdminSerialRestart) {
+		t.Fatalf("dec=%v err=%v", dec, err)
+	}
+	got, _ := w.users.Get(context.Background(), cust.ID)
+	if got.Status != domain.StatusActive || got.FailedLoginCount != domain.LockAfter-1 {
+		t.Fatalf("mutated before restart %+v", got)
+	}
+
+	w.calls = nil
+	_, err = LoginIn(context.Background(), &memUoW{w: w}, w.service(), wrongPassword("c@b.c"))
+	if !errors.Is(err, domain.ErrInvalidCredentials) {
+		t.Fatalf("retry: %v", err)
+	}
+	got, _ = w.users.Get(context.Background(), cust.ID)
+	if got.Status != domain.StatusLocked {
+		t.Fatalf("retry lockout %+v", got)
+	}
+	lockAt, rowAt := w.callIndex("lock"), w.callIndex("for-update")
+	if lockAt < 0 || rowAt <= lockAt {
+		t.Fatalf("retry order %v", w.calls)
 	}
 }

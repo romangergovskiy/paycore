@@ -215,7 +215,7 @@ func TestStatusCommandForbiddenAndInvalid(t *testing.T) {
 	}
 }
 
-func TestLockUserCustomerDoesNotTakeAdminLock(t *testing.T) {
+func TestLockUserAlwaysTakesAdminLock(t *testing.T) {
 	w := newWorld()
 	svc := w.service()
 	admin := seedUser(t, w, "a@b.c", domain.StatusActive, domain.RoleAdmin)
@@ -229,8 +229,9 @@ func TestLockUserCustomerDoesNotTakeAdminLock(t *testing.T) {
 	if got.Status != domain.StatusLocked {
 		t.Fatalf("status %+v", got)
 	}
-	if callIndex(w.roles.calls, "lock") != -1 {
-		t.Fatalf("customer lock took ADMIN advisory: %v", w.roles.calls)
+	lockAt, rowAt := w.callIndex("lock"), w.callIndex("for-update")
+	if lockAt < 0 || rowAt < 0 || rowAt <= lockAt {
+		t.Fatalf("customer lock skipped advisory or reversed order %v", w.calls)
 	}
 }
 
@@ -261,6 +262,24 @@ func TestStatusRejectsStaleInitiator(t *testing.T) {
 		t.Fatalf("stale: %v", err)
 	}
 	got, _ := w.users.Get(context.Background(), a2.ID)
+	if got.Status != domain.StatusActive {
+		t.Fatalf("target %+v", got)
+	}
+}
+
+func TestLockUserCustomerRejectsStaleInitiator(t *testing.T) {
+	w := newWorld()
+	svc := w.service()
+	a1 := seedUser(t, w, "a1@b.c", domain.StatusActive, domain.RoleAdmin)
+	_ = seedUser(t, w, "a2@b.c", domain.StatusActive, domain.RoleAdmin)
+	cust := seedUser(t, w, "c@b.c", domain.StatusActive, domain.RoleCustomer)
+	if err := w.roles.Revoke(context.Background(), a1.ID, domain.RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.LockUser(context.Background(), statusCmd(adminPrincipal(a1), cust.ID)); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("stale: %v", err)
+	}
+	got, _ := w.users.Get(context.Background(), cust.ID)
 	if got.Status != domain.StatusActive {
 		t.Fatalf("target %+v", got)
 	}

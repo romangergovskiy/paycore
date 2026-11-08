@@ -13,6 +13,13 @@ import (
 
 var errNotWired = errors.New("auth: stores, hasher, signer, issuer, and clock are required")
 
+// errAdminSerialRestart is returned when a failed login took the user row
+// without the ADMIN advisory lock and then observed role ADMIN. Holding
+// FOR UPDATE and then taking the advisory lock deadlocks Grant/LockUser
+// (advisory → user). The UnitOfWork must roll back; LoginIn retries once
+// with the advisory lock first.
+var errAdminSerialRestart = errors.New("auth: retry login lockout under ADMIN advisory lock")
+
 // Service is Identity/Auth use cases. Ports must not Begin. Writes that
 // need one database transaction run inside UnitOfWork.Do and return an
 // explicit Decision so security-critical side effects are not rolled back
@@ -255,6 +262,15 @@ func (s Service) loginRejected(ctx context.Context, email, ip string, u domain.U
 			}
 		} else {
 			uid = &fresh.ID
+			if !hasAdmin {
+				nowAdmin, err := s.Roles.Has(ctx, fresh.ID, domain.RoleAdmin)
+				if err != nil {
+					return Rollback, err
+				}
+				if nowAdmin {
+					return Rollback, errAdminSerialRestart
+				}
+			}
 			if fresh.Status == domain.StatusActive {
 				fresh, err = s.applyActiveFailure(ctx, fresh, now)
 				if err != nil {
@@ -645,11 +661,10 @@ func (s Service) GrantRole(ctx context.Context, actor domain.Principal, userID u
 		if err := s.lockAndRequireActiveAdmin(ctx, actor.UserID); err != nil {
 			return Rollback, err
 		}
-	}
-	if _, err := s.Users.Get(ctx, userID); err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
+		if _, err := s.Users.GetForUpdate(ctx, userID); err != nil {
 			return Rollback, err
 		}
+	} else if _, err := s.Users.Get(ctx, userID); err != nil {
 		return Rollback, err
 	}
 	has, err := s.Roles.Has(ctx, userID, role)
@@ -688,12 +703,16 @@ func (s Service) RevokeRole(ctx context.Context, actor domain.Principal, userID 
 	if actor.UserID == userID && role == domain.RoleAdmin {
 		return Rollback, domain.ErrForbidden
 	}
+	var u domain.User
+	var err error
 	if role == domain.RoleAdmin {
 		if err := s.lockAndRequireActiveAdmin(ctx, actor.UserID); err != nil {
 			return Rollback, err
 		}
+		u, err = s.Users.GetForUpdate(ctx, userID)
+	} else {
+		u, err = s.Users.Get(ctx, userID)
 	}
-	u, err := s.Users.Get(ctx, userID)
 	if err != nil {
 		return Rollback, err
 	}
@@ -767,14 +786,11 @@ func (s Service) statusLockWired() error {
 }
 
 func (s Service) prepareStatusTarget(ctx context.Context, actor domain.Principal, targetID uuid.UUID) (domain.User, error) {
-	hasAdmin, err := s.Roles.Has(ctx, targetID, domain.RoleAdmin)
-	if err != nil {
+	// Always take the ADMIN advisory lock before the user row. A stale
+	// Has(ADMIN)==false must not skip serialization: GrantRole can add
+	// ADMIN before this Tx mutates status.
+	if err := s.lockAndRequireActiveAdmin(ctx, actor.UserID); err != nil {
 		return domain.User{}, err
-	}
-	if hasAdmin {
-		if err := s.lockAndRequireActiveAdmin(ctx, actor.UserID); err != nil {
-			return domain.User{}, err
-		}
 	}
 	return s.Users.GetForUpdate(ctx, targetID)
 }

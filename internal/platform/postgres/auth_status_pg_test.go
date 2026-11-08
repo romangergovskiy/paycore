@@ -416,3 +416,274 @@ func isLockTimeout(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "lock timeout") || strings.Contains(s, "55p03")
 }
+
+func TestAuthAdminMembershipRaces(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	c := startCluster(t)
+	if err := Bootstrap(ctx, c.admin, c.owner, c.app, c.readonly); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if err := Up(ctx, c.owner); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+
+	app := mustConnect(t, ctx, c.app)
+	defer app.Close(ctx)
+	connB := mustConnect(t, ctx, c.app)
+	defer connB.Close(ctx)
+	connC := mustConnect(t, ctx, c.app)
+	defer connC.Close(ctx)
+
+	clock := &pgClock{t: time.Date(2026, 11, 8, 5, 0, 0, 0, time.UTC)}
+	svc := pgAuthService(clock)
+
+	t.Run("A grant ADMIN and LockUser serialize", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		actor := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "ra-a"))
+		cust, err := application.RegisterIn(ctx, NewAuthUoW(app), svc, pgRegister(pgEmail(t, "ra-b")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			errs[0] = application.GrantRoleIn(ctx, NewAuthUoW(app), pgAuthService(clock), adminPrincipal(actor), cust.ID, domain.RoleAdmin)
+		}()
+		go func() {
+			defer wg.Done()
+			errs[1] = application.LockUserIn(ctx, NewAuthUoW(connB), pgAuthService(clock), pgStatus(adminPrincipal(actor), cust.ID))
+		}()
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("op %d: %v (all %v)", i, err, errs)
+			}
+		}
+		assertActorActiveAdmin(t, ctx, app, actor.ID)
+		got, err := NewAuthUsers(app).Get(ctx, cust.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		has, err := NewAuthRoles(app).Has(ctx, cust.ID, domain.RoleAdmin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == domain.StatusActive && !has {
+			t.Fatalf("neither grant nor lock applied: %+v hasADMIN=%v", got, has)
+		}
+	})
+
+	t.Run("B grant ADMIN and lockout keep last ADMIN", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		clock.t = clock.t.Add(domain.RateWindow)
+		actor := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rb-a"))
+		cust, err := application.RegisterIn(ctx, NewAuthUoW(app), svc, pgRegister(pgEmail(t, "rb-b")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		setFailedLogins(t, ctx, app, cust.ID, domain.LockAfter-1, clock.t)
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			errs[0] = application.GrantRoleIn(ctx, NewAuthUoW(app), pgAuthService(clock), adminPrincipal(actor), cust.ID, domain.RoleAdmin)
+		}()
+		go func() {
+			defer wg.Done()
+			cmd := pgLogin(cust.Email)
+			cmd.Password = "wrongpassword!"
+			_, errs[1] = application.LoginIn(ctx, NewAuthUoW(connB), pgAuthService(clock), cmd)
+		}()
+		wg.Wait()
+		if errs[0] != nil {
+			t.Fatalf("grant: %v", errs[0])
+		}
+		if !errors.Is(errs[1], domain.ErrInvalidCredentials) {
+			t.Fatalf("login: %v", errs[1])
+		}
+		assertActorActiveAdmin(t, ctx, app, actor.ID)
+	})
+
+	t.Run("C revoke ADMIN and LockUser serialize", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		actor := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rc-a"))
+		target := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rc-b"))
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			errs[0] = application.RevokeRoleIn(ctx, NewAuthUoW(app), pgAuthService(clock), adminPrincipal(actor), target.ID, domain.RoleAdmin)
+		}()
+		go func() {
+			defer wg.Done()
+			errs[1] = application.LockUserIn(ctx, NewAuthUoW(connB), pgAuthService(clock), pgStatus(adminPrincipal(actor), target.ID))
+		}()
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil && !errors.Is(err, domain.ErrLastAdmin) {
+				t.Fatalf("op %d: %v (all %v)", i, err, errs)
+			}
+		}
+		assertActorActiveAdmin(t, ctx, app, actor.ID)
+		got, err := NewAuthUsers(app).Get(ctx, target.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		has, err := NewAuthRoles(app).Has(ctx, target.ID, domain.RoleAdmin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == domain.StatusActive && has {
+			t.Fatalf("neither revoke nor lock applied: %+v", got)
+		}
+	})
+
+	t.Run("D customer login does not wait on advisory", func(t *testing.T) {
+		email := pgEmail(t, "rd")
+		if _, err := application.RegisterIn(ctx, NewAuthUoW(app), svc, pgRegister(email)); err != nil {
+			t.Fatal(err)
+		}
+		held, err := app.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = held.Rollback(ctx) }()
+		if err := NewAuthRoles(held).LockAdminRoleMutations(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connB.Exec(ctx, `SET lock_timeout = '5s'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := application.LoginIn(ctx, NewAuthUoW(connB), pgAuthService(clock), pgLogin(email)); err != nil {
+			t.Fatalf("customer login blocked on ADMIN advisory: %v", err)
+		}
+		if _, err := connB.Exec(ctx, `SET lock_timeout = '0'`); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("LockUser waits on advisory even for CUSTOMER", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		actor := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rw-a"))
+		cust, err := application.RegisterIn(ctx, NewAuthUoW(app), svc, pgRegister(pgEmail(t, "rw-b")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		held, err := app.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := NewAuthRoles(held).LockAdminRoleMutations(ctx); err != nil {
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if _, err := connC.Exec(ctx, `SET lock_timeout = '5s'`); err != nil {
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		err = application.LockUserIn(ctx, NewAuthUoW(connC), pgAuthService(clock), pgStatus(adminPrincipal(actor), cust.ID))
+		if err == nil || errors.Is(err, domain.ErrLastAdmin) {
+			_ = held.Rollback(ctx)
+			t.Fatalf("LockUser skipped advisory: %v", err)
+		}
+		if !isLockTimeout(err) {
+			_ = held.Rollback(ctx)
+			t.Fatalf("want lock timeout, got %v", err)
+		}
+		if err := held.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connC.Exec(ctx, `SET lock_timeout = '0'`); err != nil {
+			t.Fatal(err)
+		}
+		if err := application.LockUserIn(ctx, NewAuthUoW(connC), pgAuthService(clock), pgStatus(adminPrincipal(actor), cust.ID)); err != nil {
+			t.Fatalf("after release: %v", err)
+		}
+		got, err := NewAuthUsers(app).Get(ctx, cust.ID)
+		if err != nil || got.Status != domain.StatusLocked {
+			t.Fatalf("locked %+v %v", got, err)
+		}
+	})
+
+	t.Run("Grant ADMIN waits on user FOR UPDATE", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		actor := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rg-a"))
+		cust, err := application.RegisterIn(ctx, NewAuthUoW(app), svc, pgRegister(pgEmail(t, "rg-b")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		held, err := app.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewAuthUsers(held).GetForUpdate(ctx, cust.ID); err != nil {
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if _, err := connC.Exec(ctx, `SET lock_timeout = '5s'`); err != nil {
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		err = application.GrantRoleIn(ctx, NewAuthUoW(connC), pgAuthService(clock), adminPrincipal(actor), cust.ID, domain.RoleAdmin)
+		if err == nil {
+			_ = held.Rollback(ctx)
+			t.Fatal("Grant ADMIN ignored user FOR UPDATE")
+		}
+		if !isLockTimeout(err) {
+			_ = held.Rollback(ctx)
+			t.Fatalf("want lock timeout, got %v", err)
+		}
+		if err := held.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connC.Exec(ctx, `SET lock_timeout = '0'`); err != nil {
+			t.Fatal(err)
+		}
+		if err := application.GrantRoleIn(ctx, NewAuthUoW(connC), pgAuthService(clock), adminPrincipal(actor), cust.ID, domain.RoleAdmin); err != nil {
+			t.Fatalf("after release: %v", err)
+		}
+	})
+
+	t.Run("advisory released after membership commit", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		actor := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rr-a"))
+		cust, err := application.RegisterIn(ctx, NewAuthUoW(app), svc, pgRegister(pgEmail(t, "rr-b")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := application.LockUserIn(ctx, NewAuthUoW(app), svc, pgStatus(adminPrincipal(actor), cust.ID)); err != nil {
+			t.Fatal(err)
+		}
+		probe, err := connB.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !tryAdminAdvisoryLock(t, ctx, probe) {
+			_ = probe.Rollback(ctx)
+			t.Fatal("lock held after LockUser commit")
+		}
+		if err := probe.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func assertActorActiveAdmin(t *testing.T, ctx context.Context, conn *pgx.Conn, id uuid.UUID) {
+	t.Helper()
+	if countActiveAdmins(t, ctx, conn) < 1 {
+		t.Fatal("ACTIVE ADMIN invariant broken")
+	}
+	got, err := NewAuthUsers(conn).Get(ctx, id)
+	if err != nil || got.Status != domain.StatusActive {
+		t.Fatalf("actor %+v %v", got, err)
+	}
+	has, err := NewAuthRoles(conn).Has(ctx, id, domain.RoleAdmin)
+	if err != nil || !has {
+		t.Fatalf("actor ADMIN %v %v", has, err)
+	}
+}

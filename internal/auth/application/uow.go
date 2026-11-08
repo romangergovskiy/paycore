@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 
@@ -58,12 +59,18 @@ func LoginIn(ctx context.Context, uow UnitOfWork, s Service, cmd LoginCommand) (
 	if uow == nil {
 		return out, errNotWired
 	}
-	err := uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
-		var dec Decision
-		var err error
-		out, dec, err = s.withDeps(d).Login(ctx, cmd)
-		return dec, err
-	})
+	var err error
+	for i := 0; i < 2; i++ {
+		err = uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+			var dec Decision
+			var runErr error
+			out, dec, runErr = s.withDeps(d).Login(ctx, cmd)
+			return dec, runErr
+		})
+		if !errors.Is(err, errAdminSerialRestart) {
+			return out, err
+		}
+	}
 	return out, err
 }
 

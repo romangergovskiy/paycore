@@ -52,9 +52,12 @@ type RoleStore interface {
 	List(ctx context.Context, userID uuid.UUID) ([]domain.Role, error)
 	Has(ctx context.Context, userID uuid.UUID, role domain.Role) (bool, error)
 	CountActiveWithRole(ctx context.Context, role domain.Role) (int, error)
-	// LockAdminRoleMutations serializes Grant/Revoke of ADMIN in this
-	// transaction (pg_advisory_xact_lock, not a session lock). Count and
-	// the initiator re-check run after the lock is held.
+	// LockAdminRoleMutations serializes every use-case write that can
+	// change the ACTIVE ADMIN set in this transaction (pg_advisory_xact_lock,
+	// not a session lock): Grant/Revoke of ADMIN, Lock/Unlock/DisableUser,
+	// and login lockout of a user who has (or just gained) ADMIN. Count and
+	// the initiator re-check run after the lock is held. Order is always
+	// this lock, then user FOR UPDATE.
 	LockAdminRoleMutations(ctx context.Context) error
 }
 

@@ -188,11 +188,16 @@ func TestAdminMutationLockOrder(t *testing.T) {
 	}
 
 	w.roles.calls = nil
+	w.calls = nil
 	if _, err := svc.GrantRole(context.Background(), adminPrincipal(a1), cust.ID, domain.RoleAdmin); err != nil {
 		t.Fatal(err)
 	}
 	if i := callIndex(w.roles.calls, "lock"); i < 0 || i >= callIndex(w.roles.calls, "grant") {
 		t.Fatalf("ADMIN grant lock order %v", w.roles.calls)
+	}
+	lockAt, rowAt := w.callIndex("lock"), w.callIndex("for-update")
+	if lockAt < 0 || rowAt < 0 || rowAt <= lockAt {
+		t.Fatalf("ADMIN grant user row before advisory %v", w.calls)
 	}
 
 	w.roles.calls = nil
