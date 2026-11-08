@@ -142,6 +142,25 @@ func TestRequestID(t *testing.T) {
 	}
 }
 
+func TestTooManyRequestsJSON(t *testing.T) {
+	s, _ := newTestServer(t, testConfig())
+	s.Handle("POST /limited", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		WriteError(w, r, apperror.New(apperror.KindTooManyRequests, "AUTH_RATE_LIMITED", "Too many attempts. Retry later."))
+	}))
+
+	rec := serve(s, http.MethodPost, "/limited", nil, nil)
+	e := decodeError(t, rec)
+	if rec.Code != http.StatusTooManyRequests || e.Code != "AUTH_RATE_LIMITED" {
+		t.Errorf("429 = %d %+v", rec.Code, e)
+	}
+	if e.Message != "Too many attempts. Retry later." || e.RequestID == "" {
+		t.Errorf("D-39 body = %+v", e)
+	}
+	if rec.Header().Get("WWW-Authenticate") != "" {
+		t.Errorf("429 must not send WWW-Authenticate: %q", rec.Header().Get("WWW-Authenticate"))
+	}
+}
+
 func TestAppErrorMapping(t *testing.T) {
 	s, _ := newTestServer(t, testConfig())
 	s.Handle("GET /refund", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

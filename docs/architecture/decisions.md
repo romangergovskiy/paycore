@@ -384,7 +384,7 @@
 - `Content-Type: application/json`. Один и тот же формат у всех ответов `4xx`/`5xx`, включая 404/405 маршрутизатора и перехваченные паники.
 - Домен не знает про HTTP: ошибка несёт вид (`invalid`, `not_found`, `conflict`, `unprocessable` …), статус выбирает транспортный слой. Реализация — пакет `internal/platform/apperror`.
 - Поле `details` (ошибки валидации по полям) добавляется, когда появятся первые эндпоинты с телом запроса; добавление поля обратно совместимо.
-- Код `AUTH_RATE_LIMITED` (Identity, [identity-auth.md](identity-auth.md) §9) использует Kind `too_many_requests` и HTTP 429. Тело то же. Kind появляется в `apperror` на этапе реализации Identity; перечисленные выше коды и статусы не меняются.
+- Код `AUTH_RATE_LIMITED` (Identity, [identity-auth.md](identity-auth.md) §9) использует Kind `too_many_requests` и HTTP 429. Тело то же. Kind `KindTooManyRequests` в `apperror` с этапа 3.26.1; перечисленные выше коды и статусы не меняются. HTTP Auth — [auth-http-integration-plan.md](auth-http-integration-plan.md).
 - **Альтернатива:** RFC 9457 `application/problem+json` (`type`, `title`, `status`, `detail`). Отклонена: обязательный `type`-URI без каталога документации не несёт смысла, а код всё равно пришлось бы передавать расширением. Переход возможен позже без изменения доменного слоя.
 
 ### D-40

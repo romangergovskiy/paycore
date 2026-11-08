@@ -57,3 +57,9 @@ func TestPublicMessageHidesInternalMessage(t *testing.T) {
 		t.Errorf("PublicMessage = %q", e.PublicMessage())
 	}
 }
+
+func TestKindTooManyRequestsString(t *testing.T) {
+	if KindTooManyRequests.String() != "too_many_requests" {
+		t.Errorf("KindTooManyRequests = %q", KindTooManyRequests.String())
+	}
+}
