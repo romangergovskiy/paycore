@@ -132,6 +132,11 @@ func TestLoadJWTSecret(t *testing.T) {
 		t.Error("error leaked a secret value")
 	}
 
+	_, err = Load([]string{varAuthJWTSecret + "="})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAuthJWTSecret) {
+		t.Fatalf("empty secret: %v", err)
+	}
+
 	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret[:31]})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAuthJWTSecret) {
 		t.Fatalf("31-byte secret: %v", err)
