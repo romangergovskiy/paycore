@@ -108,6 +108,16 @@ func runServesWithoutDSN(t *testing.T, env string) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("/livez = %d", resp.StatusCode)
 	}
+
+	reg, err := http.Post("http://"+addr+"/api/v1/auth/register", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("POST /api/v1/auth/register: %v", err)
+	}
+	reg.Body.Close()
+	if reg.StatusCode != http.StatusNotFound {
+		t.Errorf("empty DSN must not mount auth: POST /register = %d", reg.StatusCode)
+	}
+
 	waitForLog(t, lines, "http request")
 
 	cancel()

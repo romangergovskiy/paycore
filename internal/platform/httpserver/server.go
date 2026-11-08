@@ -53,6 +53,9 @@ func New(cfg config.HTTP, log *slog.Logger) *Server {
 // Handle registers a module route, e.g. "POST /api/v1/transfers".
 func (s *Server) Handle(pattern string, h http.Handler) { s.mux.Handle(pattern, h) }
 
+// Handler is the middleware stack plus mux. Tests use it with httptest.
+func (s *Server) Handler() http.Handler { return s.srv.Handler }
+
 // Serve accepts connections on ln until Shutdown or Close is called.
 func (s *Server) Serve(ln net.Listener) error {
 	if err := s.srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
