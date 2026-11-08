@@ -3,6 +3,8 @@ package authhttp
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 
@@ -123,10 +125,13 @@ func decodeJSON(r *http.Request, dst any) error {
 	if err := dec.Decode(dst); err != nil {
 		return err
 	}
-	if dec.More() {
-		return invalidJSON()
+	var extra json.RawMessage
+	err := dec.Decode(&extra)
+	if errors.Is(err, io.EOF) {
+		return nil
 	}
-	return nil
+	// A second value (err == nil) or junk after the object is INVALID_REQUEST.
+	return invalidJSON()
 }
 
 func clientIP(r *http.Request) string {

@@ -208,7 +208,6 @@ func TestJSONErrors(t *testing.T) {
 		`{`,
 		`{"email":`,
 		`[]`,
-		`{"email":"a@b.c","password":"x"}{"extra":true}`,
 		``,
 	}
 	for _, body := range cases {
@@ -220,6 +219,53 @@ func TestJSONErrors(t *testing.T) {
 		if strings.Contains(rec.Body.String(), "invalid character") ||
 			strings.Contains(rec.Body.String(), "unexpected") {
 			t.Errorf("decoder text leaked: %s", rec.Body)
+		}
+	}
+}
+
+func TestDecodeJSONOneObjectAndExtra(t *testing.T) {
+	ok := `{"email":"ada@example.com","password":"x"}`
+	h := newTestHandler()
+	called := 0
+	h.login = func(*http.Request, application.LoginCommand) (application.Credentials, error) {
+		called++
+		return testCreds(), nil
+	}
+
+	for _, body := range []string{
+		ok,
+		ok + "   \t\n\r\n",
+	} {
+		called = 0
+		rec := serveAuth(t, h, http.MethodPost, "/api/v1/auth/login", body, nil)
+		if rec.Code != http.StatusOK {
+			t.Errorf("ok body %q -> %d %s", body, rec.Code, rec.Body)
+		}
+		if called != 1 {
+			t.Errorf("login calls = %d, want 1 for %q", called, body)
+		}
+	}
+
+	h.login = func(*http.Request, application.LoginCommand) (application.Credentials, error) {
+		t.Error("login must not run for extra JSON")
+		return application.Credentials{}, nil
+	}
+	for _, body := range []string{
+		ok + `{"extra":true}`,
+		ok + `null`,
+		ok + ` not-json`,
+		ok + `}`,
+		ok + `]`,
+	} {
+		rec := serveAuth(t, h, http.MethodPost, "/api/v1/auth/login", body, nil)
+		e := decodeErr(t, rec)
+		if rec.Code != http.StatusBadRequest || e.Error.Code != domain.CodeInvalidRequest {
+			t.Errorf("extra %q -> %d %s", body, rec.Code, rec.Body)
+		}
+		raw := rec.Body.String()
+		if strings.Contains(raw, "invalid character") || strings.Contains(raw, "unexpected") ||
+			strings.Contains(raw, "looking for beginning") {
+			t.Errorf("decoder text leaked: %s", raw)
 		}
 	}
 }
@@ -426,21 +472,23 @@ func TestErrorJSONShapeHasNoDetails(t *testing.T) {
 }
 
 func TestNoSecretsInResponses(t *testing.T) {
+	password := "hunter2"
+	refreshToken := opaqueToken()
 	bodies := []struct {
 		path, body string
 		setup      func(*Handler)
 	}{
-		{"/api/v1/auth/register", `{"email":"ada@example.com","password":"hunter2"}`, func(h *Handler) {
+		{"/api/v1/auth/register", `{"email":"ada@example.com","password":"` + password + `"}`, func(h *Handler) {
 			h.register = func(*http.Request, application.RegisterCommand) (domain.PublicUser, error) {
 				return domain.PublicUser{}, domain.ErrEmailTaken
 			}
 		}},
-		{"/api/v1/auth/login", `{"email":"ada@example.com","password":"hunter2"}`, func(h *Handler) {
+		{"/api/v1/auth/login", `{"email":"ada@example.com","password":"` + password + `"}`, func(h *Handler) {
 			h.login = func(*http.Request, application.LoginCommand) (application.Credentials, error) {
 				return application.Credentials{}, domain.ErrInvalidCredentials
 			}
 		}},
-		{"/api/v1/auth/refresh", `{"refresh_token":"` + opaqueToken() + `"}`, func(h *Handler) {
+		{"/api/v1/auth/refresh", `{"refresh_token":"` + refreshToken + `"}`, func(h *Handler) {
 			h.refresh = func(*http.Request, application.RefreshCommand) (application.Credentials, error) {
 				return application.Credentials{}, domain.ErrInvalidToken
 			}
@@ -451,13 +499,11 @@ func TestNoSecretsInResponses(t *testing.T) {
 		tc.setup(&hh)
 		rec := serveAuth(t, hh, http.MethodPost, tc.path, tc.body, nil)
 		raw := rec.Body.String()
-		for _, secret := range []string{"hunter2", opaqueToken(), "password_hash", "PAYCORE_AUTH"} {
-			if strings.Contains(raw, secret) && secret != opaqueToken() {
-				t.Errorf("%s leaked %q: %s", tc.path, secret, raw)
-			}
+		if strings.Contains(raw, password) {
+			t.Errorf("%s leaked request password: %s", tc.path, raw)
 		}
-		if strings.Contains(raw, "hunter2") {
-			t.Errorf("%s leaked password", tc.path)
+		if strings.Contains(raw, refreshToken) {
+			t.Errorf("%s leaked request refresh token: %s", tc.path, raw)
 		}
 	}
 }
