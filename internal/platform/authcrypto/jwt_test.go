@@ -132,7 +132,7 @@ func TestHS256RejectsOtherAlg(t *testing.T) {
 		"iat":   now.Unix(),
 		"nbf":   now.Unix(),
 		"exp":   now.Add(15 * time.Minute).Unix(),
-		"jti":   "jti",
+		"jti":   uuid.MustParse("33333333-3333-3333-3333-333333333333").String(),
 	}
 	payload := jwtPayload(claims)
 	noneHeader, _ := json.Marshal(map[string]string{"alg": "none", "typ": "JWT"})
@@ -148,6 +148,85 @@ func TestHS256RejectsOtherAlg(t *testing.T) {
 	if _, err := s.Parse(hs384Tok); !errors.Is(err, domain.ErrInvalidToken) {
 		t.Fatalf("alg HS384: %v", err)
 	}
+	hs512Header, _ := json.Marshal(map[string]string{"alg": "HS512", "typ": "JWT"})
+	hs512Head := base64.RawURLEncoding.EncodeToString(hs512Header)
+	mac512 := hmac.New(sha256.New, s.secret)
+	mac512.Write([]byte(hs512Head + "." + payload))
+	hs512Tok := hs512Head + "." + payload + "." + base64.RawURLEncoding.EncodeToString(mac512.Sum(nil))
+	if _, err := s.Parse(hs512Tok); !errors.Is(err, domain.ErrInvalidToken) {
+		t.Fatalf("alg HS512: %v", err)
+	}
+}
+
+func TestHS256RequiredClaims(t *testing.T) {
+	s := testSigner(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	valid := map[string]any{
+		"iss":   "paycore",
+		"sub":   testPrincipal().UserID.String(),
+		"sid":   testPrincipal().SessionID.String(),
+		"roles": []string{"CUSTOMER"},
+		"iat":   now.Unix(),
+		"nbf":   now.Unix(),
+		"exp":   now.Add(15 * time.Minute).Unix(),
+		"jti":   uuid.MustParse("33333333-3333-3333-3333-333333333333").String(),
+	}
+	tok := signHS256(t, jwtPayload(valid), s.secret)
+	if _, err := s.Parse(tok); err != nil {
+		t.Fatalf("valid: %v", err)
+	}
+
+	omit := func(key string) {
+		t.Helper()
+		c := cloneClaims(valid)
+		delete(c, key)
+		if _, err := s.Parse(signHS256(t, jwtPayload(c), s.secret)); !errors.Is(err, domain.ErrInvalidToken) {
+			t.Fatalf("missing %s: %v", key, err)
+		}
+	}
+	for _, key := range []string{"iss", "sub", "sid", "roles", "iat", "nbf", "exp", "jti"} {
+		omit(key)
+	}
+
+	bad := []map[string]any{
+		{"sub": "not-a-uuid"},
+		{"sid": "not-a-uuid"},
+		{"jti": "not-a-uuid"},
+		{"sub": uuid.Nil.String()},
+		{"sid": uuid.Nil.String()},
+		{"jti": uuid.Nil.String()},
+		{"roles": []string{""}},
+		{"roles": []string{"HACKER"}},
+		{"roles": []string{"CUSTOMER", "CUSTOMER"}},
+		{"roles": "CUSTOMER"},
+		{"sub": 123},
+		{"iat": "1762570000"},
+		{"iat": now.Add(time.Hour).Unix()},
+		{"nbf": now.Add(20 * time.Minute).Unix()},
+	}
+	for i, patch := range bad {
+		c := cloneClaims(valid)
+		for k, v := range patch {
+			c[k] = v
+		}
+		if _, err := s.Parse(signHS256(t, jwtPayload(c), s.secret)); !errors.Is(err, domain.ErrInvalidToken) {
+			t.Fatalf("case %d %+v: %v", i, patch, err)
+		}
+	}
+
+	emptyRoles := cloneClaims(valid)
+	emptyRoles["roles"] = []string{}
+	if _, err := s.Parse(signHS256(t, jwtPayload(emptyRoles), s.secret)); err != nil {
+		t.Fatalf("empty roles: %v", err)
+	}
+}
+
+func cloneClaims(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func TestHS256ExpiredAndNBF(t *testing.T) {

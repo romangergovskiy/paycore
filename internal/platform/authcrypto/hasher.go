@@ -28,14 +28,11 @@ const (
 	argonVersion    = argon2.Version
 
 	// Caps on parameters parsed from a stored PHC string. Larger values
-	// are rejected so a crafted row cannot DoS Verify.
+	// are rejected so a crafted row cannot DoS Verify even before the
+	// D-41 exact-match check.
 	maxArgonMemoryKiB  = 64 * 1024
 	maxArgonIterations = 4
 	maxArgonParallel   = 4
-	maxArgonSaltLen    = 32
-	minArgonSaltLen    = 8
-	maxArgonKeyLen     = 64
-	minArgonKeyLen     = 16
 )
 
 // dummyPHC is a precomputed Argon2id hash of an unused password. Login of an
@@ -96,13 +93,19 @@ func parsePHC(encoded string) (parsedPHC, error) {
 	if parts[2] != "v=19" {
 		return zero, errUnsupportedPHC
 	}
+
 	var memory, time uint32
 	var threads uint8
+	seen := map[string]bool{}
 	for _, kv := range strings.Split(parts[3], ",") {
 		k, v, ok := strings.Cut(kv, "=")
-		if !ok || v == "" {
+		if !ok || k == "" || v == "" {
 			return zero, errInvalidPHC
 		}
+		if seen[k] {
+			return zero, errInvalidPHC
+		}
+		seen[k] = true
 		n, err := strconv.ParseUint(v, 10, 32)
 		if err != nil {
 			return zero, errInvalidPHC
@@ -121,18 +124,22 @@ func parsePHC(encoded string) (parsedPHC, error) {
 			return zero, errInvalidPHC
 		}
 	}
-	if memory == 0 || time == 0 || threads == 0 {
+	if !seen["m"] || !seen["t"] || !seen["p"] {
 		return zero, errInvalidPHC
 	}
 	if memory > maxArgonMemoryKiB || time > maxArgonIterations || uint32(threads) > maxArgonParallel {
 		return zero, errUnsupportedPHC
 	}
+	if memory != argonMemoryKiB || time != argonIterations || threads != argonParallel {
+		return zero, errUnsupportedPHC
+	}
+
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
-	if err != nil || len(salt) < minArgonSaltLen || len(salt) > maxArgonSaltLen {
+	if err != nil || len(salt) != argonSaltLen {
 		return zero, errInvalidPHC
 	}
 	key, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil || len(key) < minArgonKeyLen || len(key) > maxArgonKeyLen {
+	if err != nil || len(key) != argonKeyLen {
 		return zero, errInvalidPHC
 	}
 	return parsedPHC{memory: memory, time: time, threads: threads, salt: salt, key: key}, nil

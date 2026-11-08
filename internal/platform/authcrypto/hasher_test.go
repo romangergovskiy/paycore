@@ -1,8 +1,14 @@
 package authcrypto
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
+)
+
+const (
+	validPHCSalt = "cGF5Y29yZS1kdW1teS0xNg"
+	validPHCKey  = "jqoWTfRQ64xQMhdCUzMQAlFgF9MuueyMrkUvZ9p21gw"
 )
 
 func TestArgon2idHashVerify(t *testing.T) {
@@ -37,13 +43,30 @@ func TestArgon2idHashVerify(t *testing.T) {
 
 func TestArgon2idInvalidPHC(t *testing.T) {
 	h := NewArgon2idHasher()
+	shortSalt := base64.RawStdEncoding.EncodeToString(make([]byte, 8))
+	longSalt := base64.RawStdEncoding.EncodeToString(make([]byte, 32))
+	shortKey := base64.RawStdEncoding.EncodeToString(make([]byte, 16))
+	longKey := base64.RawStdEncoding.EncodeToString(make([]byte, 64))
 	for _, encoded := range []string{
 		"",
 		"not-a-hash",
 		"$argon2id$",
-		"$argon2i$v=19$m=19456,t=2,p=1$AAAA$AAAA",
+		"$argon2i$v=19$m=19456,t=2,p=1$" + validPHCSalt + "$" + validPHCKey,
 		"$argon2id$v=19$m=19456,t=2,p=1$$$",
-		"$argon2id$v=19$m=abc,t=2,p=1$cGF5Y29yZS1kdW1teS0xNg$jqoWTfRQ64xQMhdCUzMQAlFgF9MuueyMrkUvZ9p21gw",
+		"$argon2id$v=19$m=abc,t=2,p=1$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=2,p=1$" + validPHCSalt + "!!!" + "$" + validPHCKey,
+		"$argon2id$v=19$t=2,p=1$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,p=1$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=2$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=2,p=1,m=19456$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,m=19456,t=2$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=2,p=1,k=32$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=4294967296,t=2,p=1$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=18446744073709551616,p=1$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=2,p=1$" + shortSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=2,p=1$" + longSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=2,p=1$" + validPHCSalt + "$" + shortKey,
+		"$argon2id$v=19$m=19456,t=2,p=1$" + validPHCSalt + "$" + longKey,
 	} {
 		ok, err := h.Verify("x", encoded)
 		if ok || err == nil {
@@ -55,10 +78,13 @@ func TestArgon2idInvalidPHC(t *testing.T) {
 func TestArgon2idUnsupportedOrExcessiveParams(t *testing.T) {
 	h := NewArgon2idHasher()
 	cases := []string{
-		"$argon2id$v=16$m=19456,t=2,p=1$cGF5Y29yZS1kdW1teS0xNg$jqoWTfRQ64xQMhdCUzMQAlFgF9MuueyMrkUvZ9p21gw",
-		"$argon2id$v=19$m=999999,t=2,p=1$cGF5Y29yZS1kdW1teS0xNg$jqoWTfRQ64xQMhdCUzMQAlFgF9MuueyMrkUvZ9p21gw",
-		"$argon2id$v=19$m=19456,t=99,p=1$cGF5Y29yZS1kdW1teS0xNg$jqoWTfRQ64xQMhdCUzMQAlFgF9MuueyMrkUvZ9p21gw",
-		"$argon2id$v=19$m=19456,t=2,p=16$cGF5Y29yZS1kdW1teS0xNg$jqoWTfRQ64xQMhdCUzMQAlFgF9MuueyMrkUvZ9p21gw",
+		"$argon2id$v=16$m=19456,t=2,p=1$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=999999,t=2,p=1$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=99,p=1$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=2,p=16$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=1024,t=2,p=1$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=1,p=1$" + validPHCSalt + "$" + validPHCKey,
+		"$argon2id$v=19$m=19456,t=2,p=2$" + validPHCSalt + "$" + validPHCKey,
 	}
 	for _, encoded := range cases {
 		ok, err := h.Verify("x", encoded)

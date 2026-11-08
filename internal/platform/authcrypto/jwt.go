@@ -1,8 +1,12 @@
 package authcrypto
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -111,8 +115,16 @@ func (s *HS256) Parse(token string) (AccessToken, error) {
 		}
 		return zero, domain.ErrInvalidToken
 	}
+	if err := requireJWTClaimJSONTypes(token); err != nil {
+		return zero, err
+	}
 	claims, ok := parsed.Claims.(*accessClaims)
 	if !ok || !parsed.Valid {
+		return zero, domain.ErrInvalidToken
+	}
+	if claims.Issuer != accessIssuer || claims.Subject == "" || claims.SessionID == "" ||
+		claims.ID == "" || claims.Roles == nil || claims.IssuedAt == nil ||
+		claims.NotBefore == nil || claims.ExpiresAt == nil {
 		return zero, domain.ErrInvalidToken
 	}
 	uid, err := uuid.Parse(claims.Subject)
@@ -123,13 +135,19 @@ func (s *HS256) Parse(token string) (AccessToken, error) {
 	if err != nil || sid == uuid.Nil {
 		return zero, domain.ErrInvalidToken
 	}
-	roles := make([]domain.Role, 0, len(claims.Roles))
-	for _, r := range claims.Roles {
-		roles = append(roles, domain.Role(r))
+	jti, err := uuid.Parse(claims.ID)
+	if err != nil || jti == uuid.Nil {
+		return zero, domain.ErrInvalidToken
 	}
-	exp := time.Time{}
-	if claims.ExpiresAt != nil {
-		exp = claims.ExpiresAt.Time.UTC()
+	roles, err := parseJWTRoles(claims.Roles)
+	if err != nil {
+		return zero, err
+	}
+	iat := claims.IssuedAt.Time.UTC()
+	nbf := claims.NotBefore.Time.UTC()
+	exp := claims.ExpiresAt.Time.UTC()
+	if !exp.After(iat) || !exp.After(nbf) || nbf.After(exp) {
+		return zero, domain.ErrInvalidToken
 	}
 	return AccessToken{
 		UserID:    uid,
@@ -138,4 +156,87 @@ func (s *HS256) Parse(token string) (AccessToken, error) {
 		ExpiresAt: exp,
 		TokenID:   claims.ID,
 	}, nil
+}
+
+func requireJWTClaimJSONTypes(token string) error {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return domain.ErrInvalidToken
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return domain.ErrInvalidToken
+	}
+	var raw map[string]json.RawMessage
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.UseNumber()
+	if err := dec.Decode(&raw); err != nil {
+		return domain.ErrInvalidToken
+	}
+	for _, k := range []string{"iss", "sub", "sid", "jti"} {
+		if !jsonIsString(raw[k]) {
+			return domain.ErrInvalidToken
+		}
+	}
+	for _, k := range []string{"iat", "nbf", "exp"} {
+		if !jsonIsNumber(raw[k]) {
+			return domain.ErrInvalidToken
+		}
+	}
+	if !jsonIsStringArray(raw["roles"]) {
+		return domain.ErrInvalidToken
+	}
+	return nil
+}
+
+func jsonTrim(b json.RawMessage) []byte {
+	return bytes.TrimSpace(b)
+}
+
+func jsonIsString(b json.RawMessage) bool {
+	b = jsonTrim(b)
+	return len(b) >= 2 && b[0] == '"' && b[len(b)-1] == '"'
+}
+
+func jsonIsNumber(b json.RawMessage) bool {
+	b = jsonTrim(b)
+	if len(b) == 0 || b[0] == '"' {
+		return false
+	}
+	var n json.Number
+	return json.Unmarshal(b, &n) == nil
+}
+
+func jsonIsStringArray(b json.RawMessage) bool {
+	b = jsonTrim(b)
+	if len(b) == 0 || b[0] != '[' {
+		return false
+	}
+	var elems []json.RawMessage
+	if err := json.Unmarshal(b, &elems); err != nil {
+		return false
+	}
+	for _, e := range elems {
+		if !jsonIsString(e) {
+			return false
+		}
+	}
+	return true
+}
+
+func parseJWTRoles(raw []string) ([]domain.Role, error) {
+	roles := make([]domain.Role, 0, len(raw))
+	seen := make(map[domain.Role]struct{}, len(raw))
+	for _, r := range raw {
+		role := domain.Role(r)
+		if r == "" || !domain.KnownRole(role) {
+			return nil, domain.ErrInvalidToken
+		}
+		if _, dup := seen[role]; dup {
+			return nil, domain.ErrInvalidToken
+		}
+		seen[role] = struct{}{}
+		roles = append(roles, role)
+	}
+	return roles, nil
 }
