@@ -243,7 +243,7 @@ func TestAuthAdminUserStatus(t *testing.T) {
 		err = uow.Do(ctx, func(ctx context.Context, d application.Deps) (application.Decision, error) {
 			s := pgAuthService(clock)
 			s.Users, s.Sessions, s.Tokens, s.Roles = d.Users, d.Sessions, d.Tokens, d.Roles
-			s.Attempts, s.Limiter = d.Attempts, d.Limiter
+			s.Attempts, s.Limiter, s.History = d.Attempts, d.Limiter, d.History
 			dec, err := s.LockUser(ctx, pgStatus(adminPrincipal(admin), cust.ID))
 			if err != nil {
 				return dec, err
@@ -256,6 +256,55 @@ func TestAuthAdminUserStatus(t *testing.T) {
 		got, err := NewAuthUsers(app).Get(ctx, cust.ID)
 		if err != nil || got.Status != domain.StatusActive {
 			t.Fatalf("partial lock %+v %v", got, err)
+		}
+		if n := countStatusHistory(t, ctx, app, cust.ID); n != 0 {
+			t.Fatalf("history after rollback = %d", n)
+		}
+	})
+
+	t.Run("status history append-only and reason", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		admin := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "hist-a"))
+		cust, err := application.RegisterIn(ctx, uow, svc, pgRegister(pgEmail(t, "hist-c")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := pgStatus(adminPrincipal(admin), cust.ID)
+		cmd.Reason = "aml review"
+		if err := application.LockUserIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		assertLatestHistory(t, ctx, app, cust.ID, admin.ID, domain.StatusActive, domain.StatusLocked, "aml review")
+		if err := application.LockUserIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		if n := countStatusHistory(t, ctx, app, cust.ID); n != 1 {
+			t.Fatalf("idempotent history = %d", n)
+		}
+		if err := application.UnlockUserIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		assertLatestHistory(t, ctx, app, cust.ID, admin.ID, domain.StatusLocked, domain.StatusActive, "aml review")
+		if err := application.DisableUserIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		assertLatestHistory(t, ctx, app, cust.ID, admin.ID, domain.StatusActive, domain.StatusDisabled, "aml review")
+
+		_, err = app.Exec(ctx, `UPDATE auth.user_status_history SET reason = 'x' WHERE user_id = $1`, cust.ID)
+		if err == nil {
+			t.Fatal("UPDATE history succeeded")
+		}
+		_, err = app.Exec(ctx, `DELETE FROM auth.user_status_history WHERE user_id = $1`, cust.ID)
+		if err == nil {
+			t.Fatal("DELETE history succeeded")
+		}
+
+		before := countStatusHistory(t, ctx, app, admin.ID)
+		if err := application.LockUserIn(ctx, uow, svc, pgStatus(adminPrincipal(admin), admin.ID)); !errors.Is(err, domain.ErrLastAdmin) {
+			t.Fatalf("last: %v", err)
+		}
+		if n := countStatusHistory(t, ctx, app, admin.ID); n != before {
+			t.Fatalf("last-admin history %d -> %d", before, n)
 		}
 	})
 
@@ -445,17 +494,22 @@ func TestAuthAdminMembershipRaces(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		held := beginAdminAdvisory(t, ctx, app)
 		errs := make([]error, 2)
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			errs[0] = application.GrantRoleIn(ctx, NewAuthUoW(app), pgAuthService(clock), adminPrincipal(actor), cust.ID, domain.RoleAdmin)
+			errs[0] = application.GrantRoleIn(ctx, NewAuthUoW(connB), pgAuthService(clock), adminPrincipal(actor), cust.ID, domain.RoleAdmin)
 		}()
 		go func() {
 			defer wg.Done()
-			errs[1] = application.LockUserIn(ctx, NewAuthUoW(connB), pgAuthService(clock), pgStatus(adminPrincipal(actor), cust.ID))
+			errs[1] = application.LockUserIn(ctx, NewAuthUoW(connC), pgAuthService(clock), pgStatus(adminPrincipal(actor), cust.ID))
 		}()
+		waitAdvisoryWaiters(t, ctx, held, 2)
+		if err := held.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
 		wg.Wait()
 		for i, err := range errs {
 			if err != nil {
@@ -474,6 +528,7 @@ func TestAuthAdminMembershipRaces(t *testing.T) {
 		if got.Status == domain.StatusActive && !has {
 			t.Fatalf("neither grant nor lock applied: %+v hasADMIN=%v", got, has)
 		}
+		assertAdvisoryReleased(t, ctx, app)
 	})
 
 	t.Run("B grant ADMIN and lockout keep last ADMIN", func(t *testing.T) {
@@ -485,44 +540,48 @@ func TestAuthAdminMembershipRaces(t *testing.T) {
 			t.Fatal(err)
 		}
 		setFailedLogins(t, ctx, app, cust.ID, domain.LockAfter-1, clock.t)
-		errs := make([]error, 2)
-		var wg sync.WaitGroup
-		wg.Add(2)
+		held := beginAdminAdvisory(t, ctx, app)
+		grantErr := make(chan error, 1)
 		go func() {
-			defer wg.Done()
-			errs[0] = application.GrantRoleIn(ctx, NewAuthUoW(app), pgAuthService(clock), adminPrincipal(actor), cust.ID, domain.RoleAdmin)
+			grantErr <- application.GrantRoleIn(ctx, NewAuthUoW(connB), pgAuthService(clock), adminPrincipal(actor), cust.ID, domain.RoleAdmin)
 		}()
-		go func() {
-			defer wg.Done()
-			cmd := pgLogin(cust.Email)
-			cmd.Password = "wrongpassword!"
-			_, errs[1] = application.LoginIn(ctx, NewAuthUoW(connB), pgAuthService(clock), cmd)
-		}()
-		wg.Wait()
-		if errs[0] != nil {
-			t.Fatalf("grant: %v", errs[0])
+		waitAdvisoryWaiters(t, ctx, held, 1)
+		cmd := pgLogin(cust.Email)
+		cmd.Password = "wrongpassword!"
+		_, loginErr := application.LoginIn(ctx, NewAuthUoW(connC), pgAuthService(clock), cmd)
+		if err := held.Rollback(ctx); err != nil {
+			t.Fatal(err)
 		}
-		if !errors.Is(errs[1], domain.ErrInvalidCredentials) {
-			t.Fatalf("login: %v", errs[1])
+		if err := <-grantErr; err != nil {
+			t.Fatalf("grant: %v", err)
+		}
+		if !errors.Is(loginErr, domain.ErrInvalidCredentials) {
+			t.Fatalf("login: %v", loginErr)
 		}
 		assertActorActiveAdmin(t, ctx, app, actor.ID)
+		assertAdvisoryReleased(t, ctx, app)
 	})
 
 	t.Run("C revoke ADMIN and LockUser serialize", func(t *testing.T) {
 		clearActiveAdmins(t, ctx, app, clock)
 		actor := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rc-a"))
 		target := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rc-b"))
+		held := beginAdminAdvisory(t, ctx, app)
 		errs := make([]error, 2)
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			errs[0] = application.RevokeRoleIn(ctx, NewAuthUoW(app), pgAuthService(clock), adminPrincipal(actor), target.ID, domain.RoleAdmin)
+			errs[0] = application.RevokeRoleIn(ctx, NewAuthUoW(connB), pgAuthService(clock), adminPrincipal(actor), target.ID, domain.RoleAdmin)
 		}()
 		go func() {
 			defer wg.Done()
-			errs[1] = application.LockUserIn(ctx, NewAuthUoW(connB), pgAuthService(clock), pgStatus(adminPrincipal(actor), target.ID))
+			errs[1] = application.LockUserIn(ctx, NewAuthUoW(connC), pgAuthService(clock), pgStatus(adminPrincipal(actor), target.ID))
 		}()
+		waitAdvisoryWaiters(t, ctx, held, 2)
+		if err := held.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
 		wg.Wait()
 		for i, err := range errs {
 			if err != nil && !errors.Is(err, domain.ErrLastAdmin) {
@@ -541,6 +600,37 @@ func TestAuthAdminMembershipRaces(t *testing.T) {
 		if got.Status == domain.StatusActive && has {
 			t.Fatalf("neither revoke nor lock applied: %+v", got)
 		}
+		assertAdvisoryReleased(t, ctx, app)
+	})
+
+	t.Run("C revoke ADMIN and DisableUser serialize", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		actor := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rdc-a"))
+		target := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "rdc-b"))
+		held := beginAdminAdvisory(t, ctx, app)
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			errs[0] = application.RevokeRoleIn(ctx, NewAuthUoW(connB), pgAuthService(clock), adminPrincipal(actor), target.ID, domain.RoleAdmin)
+		}()
+		go func() {
+			defer wg.Done()
+			errs[1] = application.DisableUserIn(ctx, NewAuthUoW(connC), pgAuthService(clock), pgStatus(adminPrincipal(actor), target.ID))
+		}()
+		waitAdvisoryWaiters(t, ctx, held, 2)
+		if err := held.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil && !errors.Is(err, domain.ErrLastAdmin) {
+				t.Fatalf("op %d: %v (all %v)", i, err, errs)
+			}
+		}
+		assertActorActiveAdmin(t, ctx, app, actor.ID)
+		assertAdvisoryReleased(t, ctx, app)
 	})
 
 	t.Run("D customer login does not wait on advisory", func(t *testing.T) {
@@ -671,6 +761,94 @@ func TestAuthAdminMembershipRaces(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func countStatusHistory(t *testing.T, ctx context.Context, conn *pgx.Conn, userID uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM auth.user_status_history WHERE user_id = $1`, userID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func assertLatestHistory(t *testing.T, ctx context.Context, conn *pgx.Conn, userID, actor uuid.UUID, from, to domain.Status, reason string) {
+	t.Helper()
+	var gotActor uuid.UUID
+	var prev, next, gotReason string
+	err := conn.QueryRow(ctx, `
+		SELECT changed_by, previous_status, new_status, reason
+		  FROM auth.user_status_history
+		 WHERE user_id = $1
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT 1`, userID).Scan(&gotActor, &prev, &next, &gotReason)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotActor != actor || prev != string(from) || next != string(to) || gotReason != reason {
+		t.Fatalf("history actor=%s %s->%s %q", gotActor, prev, next, gotReason)
+	}
+}
+
+func beginAdminAdvisory(t *testing.T, ctx context.Context, conn *pgx.Conn) pgx.Tx {
+	t.Helper()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := NewAuthRoles(tx).LockAdminRoleMutations(ctx); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	return tx
+}
+
+func waitAdvisoryWaiters(t *testing.T, ctx context.Context, q interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}, n int) {
+	t.Helper()
+	deadline, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var got int
+		err := q.QueryRow(deadline, `
+			SELECT count(*)::int
+			  FROM pg_locks
+			 WHERE locktype = 'advisory'
+			   AND classid = (($1::bigint >> 32) & 4294967295)::oid
+			   AND objid = ($1::bigint & 4294967295)::oid
+			   AND objsubid = 1
+			   AND NOT granted`, adminRoleMutationLockKey).Scan(&got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got >= n {
+			return
+		}
+		select {
+		case <-deadline.Done():
+			t.Fatalf("waiting for %d advisory waiters, have %d: %v", n, got, deadline.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func assertAdvisoryReleased(t *testing.T, ctx context.Context, conn *pgx.Conn) {
+	t.Helper()
+	probe, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tryAdminAdvisoryLock(t, ctx, probe) {
+		_ = probe.Rollback(ctx)
+		t.Fatal("ADMIN advisory still held")
+	}
+	if err := probe.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertActorActiveAdmin(t *testing.T, ctx context.Context, conn *pgx.Conn, id uuid.UUID) {
