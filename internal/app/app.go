@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/romangergovskiy/paycore/internal/auth/application"
+	authhttp "github.com/romangergovskiy/paycore/internal/auth/http"
 	"github.com/romangergovskiy/paycore/internal/platform/authcrypto"
 	"github.com/romangergovskiy/paycore/internal/platform/config"
 	"github.com/romangergovskiy/paycore/internal/platform/httpserver"
@@ -20,7 +21,7 @@ import (
 	"github.com/romangergovskiy/paycore/internal/platform/postgres"
 )
 
-// authRuntime is the Identity/Auth composition root. HTTP routes attach in 3.26.3.
+// authRuntime is the Identity/Auth composition root.
 type authRuntime struct {
 	uow  application.UnitOfWork
 	svc  application.Service // hasher, issuer, signer, clock; stores come from uow
@@ -86,9 +87,6 @@ func Run(ctx context.Context, environ []string, logOut io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if auth != nil {
-		log.Info("auth runtime ready")
-	}
 
 	ln, err := net.Listen("tcp", cfg.HTTP.Addr)
 	if err != nil {
@@ -97,6 +95,10 @@ func Run(ctx context.Context, environ []string, logOut io.Writer) error {
 	srv := httpserver.New(cfg.HTTP, log)
 	if pool != nil {
 		srv.SetReadyCheck(pool.Ping)
+	}
+	if auth != nil {
+		authhttp.Mount(srv, authhttp.New(auth.uow, auth.svc))
+		log.Info("auth runtime ready")
 	}
 
 	served := make(chan error, 1)
