@@ -1,10 +1,10 @@
 # Identity и Auth — архитектура и контракты
 
-Статус: **принято для MVP**. Контракт — этап 3.19; DDL — `migrations/00005_auth.sql` (этап 3.20); domain и application — `internal/auth` (этап 3.21); семантика транзакций — `Decision` Commit/Rollback (этап 3.21.1); PostgreSQL-адаптеры портов — `internal/platform/postgres` (этап 3.22); сериализация Grant/Revoke ADMIN — `pg_advisory_xact_lock(0x5041590000000001)` (этап 3.23); Lock/Unlock/DisableUser и last-ADMIN lockout — этап 3.24. HTTP-обработчиков и bootstrap ADMIN нет. Решения — [D-41](decisions.md#d-41), [D-42](decisions.md#d-42). Ошибки API — [D-39](decisions.md#d-39). Скоуп и отказ от PCI/KYC — [D-20](decisions.md#d-20). Стек без Redis — [D-38](decisions.md#d-38).
+Статус: **принято для MVP**. Контракт — этап 3.19; DDL — `migrations/00005_auth.sql` (этап 3.20); domain и application — `internal/auth` (этап 3.21); семантика транзакций — `Decision` Commit/Rollback (этап 3.21.1); PostgreSQL-адаптеры портов — `internal/platform/postgres` (этап 3.22); сериализация Grant/Revoke ADMIN — `pg_advisory_xact_lock(0x5041590000000001)` (этап 3.23); Lock/Unlock/DisableUser и last-ADMIN lockout — этап 3.24; Argon2id / JWT HS256 / opaque refresh / UTC clock и `auth.user_status_history` — этап 3.25. HTTP-обработчиков и bootstrap ADMIN нет. Решения — [D-41](decisions.md#d-41), [D-42](decisions.md#d-42), [D-43](decisions.md#d-43). Ошибки API — [D-39](decisions.md#d-39). Скоуп и отказ от PCI/KYC — [D-20](decisions.md#d-20). Стек без Redis — [D-38](decisions.md#d-38).
 
 Связанные документы: [../PROJECT_SPEC.md](../PROJECT_SPEC.md) §2.1, §5, §8; [decisions.md](decisions.md); [../database/database-schema.md](../database/database-schema.md) §12; [../database/er-diagram.md](../database/er-diagram.md) §4; [../database/data-integrity.md](../database/data-integrity.md).
 
-Текущий код: `00002` создаёт заглушку `auth.users (id)` ради FK `accounts.user_id`; `00005` расширяет её колонками и таблицами §7 **без DROP**. Domain и application — `internal/auth/{domain,application}` (без pgx и HTTP). PostgreSQL-адаптеры портов и Auth UoW — `internal/platform/postgres` (один `pgx.Tx` на `Do`, `Decision` решает Commit). Grant/Revoke роли ADMIN и мутации статуса, которые меняют число ACTIVE ADMIN: `RoleStore.LockAdminRoleMutations` → `pg_advisory_xact_lock(0x5041590000000001)` в той же Tx **до** `GetForUpdate` строки user, затем re-check инициатора ACTIVE+ADMIN, затем count/status. HTTP — `internal/platform/httpserver` (health, JSON-ошибки D-39, `Handle` без маршрутов Auth). Accounts принимает `ChangedBy uuid.UUID` как есть и не читает auth-контекст. Первый ADMIN — будущая Go-команда migrate/bootstrap, не SQL-сид.
+Текущий код: `00002` создаёт заглушку `auth.users (id)` ради FK `accounts.user_id`; `00005` расширяет её колонками и таблицами §7 **без DROP**; `00006` добавляет `auth.user_status_history`. Domain и application — `internal/auth/{domain,application}` (без pgx, HTTP, JWT, Argon2). Инфраструктура Hasher/AccessSigner/RefreshIssuer/Clock — `internal/platform/authcrypto`. PostgreSQL-адаптеры портов и Auth UoW — `internal/platform/postgres` (один `pgx.Tx` на `Do`, `Decision` решает Commit). Grant/Revoke роли ADMIN и мутации статуса, которые меняют число ACTIVE ADMIN: `RoleStore.LockAdminRoleMutations` → `pg_advisory_xact_lock(0x5041590000000001)` в той же Tx **до** `GetForUpdate` строки user, затем re-check инициатора ACTIVE+ADMIN, затем count/status. HTTP — `internal/platform/httpserver` (health, JSON-ошибки D-39, `Handle` без маршрутов Auth). Auth в `app.Run` не собирается. Accounts принимает `ChangedBy uuid.UUID` как есть и не читает auth-контекст. Первый ADMIN — будущая Go-команда migrate/bootstrap, не SQL-сид.
 
 ---
 
@@ -242,7 +242,11 @@ PK `(bucket, counter_key, window_start)`; `count INT NN CHECK >= 0`; `updated_at
 
 ### 7.9. Аудит
 
-Писать в существующий `audit.audit_logs`: `user.registered`, `user.login_succeeded` (без пароля и токенов), `user.login_failed` (без различия «нет такого email» в payload), `session.revoked`, `role.granted`, `role.revoked`, `user.status_changed`. Хеш-цепочка — [Q-20](open-questions.md#q-20).
+Проектный `audit.audit_logs` **ещё не создан** (миграций схемы `audit` нет). События `user.registered`, `user.login_succeeded` (без пароля и токенов), `user.login_failed` (без различия «нет такого email» в payload), `session.revoked`, `role.granted`, `role.revoked` остаются на будущий модуль audit. Хеш-цепочка — [Q-20](open-questions.md#q-20). Смена статуса пользователя в 3.25 пишется в §7.10, не в audit ([D-43](decisions.md#d-43)).
+
+### 7.10. `auth.user_status_history`
+
+Append-only: `id`, `user_id` FK, `changed_by` FK, `previous_status`, `new_status`, `reason` (1…500), `created_at`. CHECK: статусы из `{ACTIVE,LOCKED,DISABLED}`, `previous_status <> new_status`. Индекс `(user_id, created_at DESC)`. `paycore_app`: `SELECT, INSERT`. Триггер запрета UPDATE/DELETE/TRUNCATE. Пишет только `LockUser` / `UnlockUser` / `DisableUser` в той же Tx; no-op и `ErrLastAdmin` — без строки. Login lockout сюда не пишет.
 
 Auth **не** использует L1…L8 [concurrency.md](../database/concurrency.md). Короткие транзакции, блокировки только строк auth (`users` / `refresh_tokens` / счётчик). Захватывать `account_balances` (L5) из auth запрещено.
 
@@ -279,7 +283,7 @@ func (p Principal) IsActiveCustomer() bool // Has(CUSTOMER) — для дене�
 
 `Idempotency-Key` на auth-POST **не требуется** ([D-07](decisions.md#d-07) — денежные объекты). Дубль email — `EMAIL_TAKEN`.
 
-Порты (интерфейсы application, без pgx): `UserStore`, `SessionStore`, `TokenStore`, `AttemptStore`, `RateLimiter`, `Clock`, `Hasher`, `AccessSigner`. Hasher и Signer — инфраструктура; домен не знает PHC и JWT.
+Порты (интерфейсы application, без pgx): `UserStore`, `SessionStore`, `TokenStore`, `AttemptStore`, `RateLimiter`, `StatusHistoryStore`, `Clock`, `Hasher`, `AccessSigner`, `RefreshIssuer`. Hasher, Signer, Issuer и Clock — инфраструктура (`internal/platform/authcrypto`); домен не знает PHC и JWT. JWT `roles` — кэш TTL; источник истины ролей — PostgreSQL + `ValidateSession`. Refresh plaintext в БД не хранится.
 
 ---
 
@@ -355,7 +359,7 @@ Use case возвращает явное `Decision` (`Commit` / `Rollback`). А�
 
 **ADMIN Grant/Revoke и статус:** в той же Tx сначала `SELECT pg_advisory_xact_lock(0x5041590000000001)` (`RoleStore.LockAdminRoleMutations`). Ключ стабильный: namespace `0x504159` («PAY») + объект `1` (ADMIN mutations). Это **transaction** lock (`pg_advisory_xact_lock`), не `pg_advisory_lock` (session) и не mutex процесса. `paycore_app` имеет на `auth.roles` только `SELECT`, поэтому не `FOR UPDATE` каталога. Порядок: advisory → `SELECT … FOR UPDATE` на `auth.users` → остальные записи. Grant/Revoke **роли ADMIN** берут user `FOR UPDATE` после advisory. После lock — re-read инициатора: не ACTIVE+ADMIN → `FORBIDDEN`. CountActiveWithRole(ADMIN) только после lock. Другие роли этот lock не берут. Login CUSTOMER без роли ADMIN — тоже не берёт, пока re-check после `FOR UPDATE` не увидит ADMIN.
 
-**Lock/Unlock/DisableUser:** actor ADMIN; reason не пустой. Advisory **всегда** (не смотреть `Has(ADMIN)` до lock: параллельный Grant не должен обойти сериализацию), re-check инициатора, затем `GetForUpdate` target. Last ACTIVE ADMIN: Lock/Disable → `ErrLastAdmin`, Rollback. Already LOCKED / already DISABLED / already ACTIVE (Unlock) — Commit, без смены статуса. Unlock `DISABLED` — `INVALID_REQUEST` (не перескок машины статусов). Unlock `LOCKED` → `ACTIVE` сбрасывает `failed_login_count` и `locked_at`. Lock и Disable отзывают сессии (`USER_LOCKED` / `USER_DISABLED`) и refresh в той же Tx.
+**Lock/Unlock/DisableUser:** actor ADMIN; reason не пустой (до 500 рун). Advisory **всегда** (не смотреть `Has(ADMIN)` до lock: параллельный Grant не должен обойти сериализацию), re-check инициатора, затем `GetForUpdate` target. Last ACTIVE ADMIN: Lock/Disable → `ErrLastAdmin`, Rollback, без строки истории. Already LOCKED / already DISABLED / already ACTIVE (Unlock) — Commit, без смены статуса и без истории. Unlock `DISABLED` — `INVALID_REQUEST` (не перескок машины статусов). Unlock `LOCKED` → `ACTIVE` сбрасывает `failed_login_count` и `locked_at`. Lock и Disable отзывают сессии (`USER_LOCKED` / `USER_DISABLED`) и refresh в той же Tx. Реальная смена статуса вставляет `auth.user_status_history` (`reason`) до Commit; ошибка вставки — Rollback всей операции.
 
 Прямой `UserStore.Update` статуса и прямой `RoleStore.Grant/Revoke` в обход use case (сид/будущий bootstrap) по-прежнему могут обойти инвариант; адаптер это не запрещает. SQL CHECK «≥1 ADMIN» нет (ломает пустую БД до bootstrap). Второй advisory-ключ не вводим.
 
@@ -440,7 +444,8 @@ Access TTL 15 мин, refresh TTL 30 суток — §4. Max сессий на �
 1. **Документы** — этап 3.19.
 2. **DDL** — этап 3.20, `00005_auth.sql`: `ALTER auth.users`, таблицы, сид `roles`, гранты. Не менять `00002`. Bootstrap ADMIN — не этот этап.
 3. **domain + application** — команды §8, без HTTP и без pgx.
-4. **postgres adapter** — UPSERT лимитов, ротация, интеграционные тесты §12.
-5. **HTTP** — маршруты §9, Bearer middleware, Kind 429, `PAYCORE_AUTH_JWT_SECRET`.
-6. **Связка с Accounts** — отдельный этап: Principal → `ChangedBy` / владелец. Open/Balance/Statement 3.10–3.18 не переписывать здесь.
-7. **Bootstrap ADMIN** — будущая Go-команда, не SQL.
+4. **postgres adapter** — UPSERT лимитов, ротация, интеграционные тесты §12. **Сделано** (3.22–3.24).
+5. **Инфраструктура токенов и пароля** — Argon2id Hasher, JWT HS256 AccessSigner (+ Parse для будущего middleware), opaque RefreshIssuer, UTC Clock; `00006` history. **Сделано** (3.25). Auth в `app.Run` не подключён (это форсировало бы HTTP).
+6. **HTTP** — маршруты §9, Bearer middleware, Kind 429, `PAYCORE_AUTH_JWT_SECRET`, вызов `ValidateSession`. **Не этот этап.**
+7. **Связка с Accounts** — отдельный этап: Principal → `ChangedBy` / владелец. Open/Balance/Statement 3.10–3.18 не переписывать здесь.
+8. **Bootstrap ADMIN** — будущая Go-команда, не SQL. Нужен Hasher из 3.25.
