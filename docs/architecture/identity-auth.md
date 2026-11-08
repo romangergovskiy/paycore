@@ -337,7 +337,7 @@ func (p Principal) IsActiveCustomer() bool // Has(CUSTOMER) — для дене�
 
 `INVALID_CREDENTIALS` на login **не** различает «нет пользователя» / «плохой пароль» / «LOCKED». `ACCOUNT_LOCKED` в API нет — enumeration. `AUTH_RATE_LIMITED` можно отдать и для существующего, и для неизвестного email (сработал IP- или email-ключ).
 
-Kind `too_many_requests` → 429 добавляется в `apperror`/`httpserver` на этапе реализации Identity; формат тела D-39 не меняется. Пока Kind нет в коде — это контракт, не патч 3.19.
+Kind `too_many_requests` → HTTP 429: `apperror.KindTooManyRequests` (этап 3.26.1). Формат тела D-39 не меняется. Ответы 401 (когда появятся защищённые маршруты) несут `WWW-Authenticate: Bearer` без причины. HTTP Auth — [auth-http-integration-plan.md](auth-http-integration-plan.md).
 
 `GET /livez` и `GET /readyz` без Bearer.
 

@@ -17,6 +17,7 @@ MVP работает с виртуальными деньгами: источн�
 | [financial-invariants-testing.md](financial-invariants-testing.md) | План тестирования: unit, property-based, права и функции, идемпотентность, outbox, конкурентные S-01…S-28, fault injection |
 | [ledger-schema-review.md](ledger-schema-review.md) | Ревью окончательной SQL-схемы Ledger после этапа 3.2: вердикт, расхождения с кодом, план грантов по таблице |
 | [identity-auth.md](identity-auth.md) | Identity/Auth: границы, сущности, токены, Argon2id, RBAC, SQL, application и HTTP-контракты, лимиты, угрозы, тесты |
+| [auth-http-integration-plan.md](auth-http-integration-plan.md) | План этапа 3.26: HTTP Identity/Auth (ещё не реализован) |
 
 Модель данных — в [../database/README.md](../database/README.md).
 
