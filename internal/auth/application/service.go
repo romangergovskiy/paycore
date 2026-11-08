@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -31,11 +32,14 @@ type Service struct {
 	Roles    RoleStore
 	Attempts AttemptStore
 	Limiter  RateLimiter
+	History  StatusHistoryStore
 	Hasher   Hasher
 	Issuer   RefreshIssuer
 	Access   AccessSigner
 	Clock    Clock
 }
+
+const maxStatusReasonRunes = 500
 
 func (s Service) writeWired() error {
 	if s.Users == nil || s.Sessions == nil || s.Tokens == nil || s.Roles == nil ||
@@ -769,7 +773,7 @@ func (s Service) lockAndRequireActiveAdmin(ctx context.Context, actorID uuid.UUI
 }
 
 func (s Service) statusWired() error {
-	if s.Users == nil || s.Roles == nil || s.Clock == nil {
+	if s.Users == nil || s.Roles == nil || s.Clock == nil || s.History == nil {
 		return errNotWired
 	}
 	return nil
@@ -814,10 +818,27 @@ func (s Service) validateStatusCommand(cmd StatusCommand) error {
 	if !cmd.Actor.Has(domain.RoleAdmin) {
 		return domain.ErrForbidden
 	}
-	if cmd.UserID == uuid.Nil || strings.TrimSpace(cmd.Reason) == "" {
+	reason := strings.TrimSpace(cmd.Reason)
+	if cmd.UserID == uuid.Nil || reason == "" || utf8.RuneCountInString(reason) > maxStatusReasonRunes {
 		return domain.ErrInvalidRequest
 	}
 	return nil
+}
+
+func (s Service) recordStatusChange(ctx context.Context, cmd StatusCommand, from, to domain.Status, at time.Time) error {
+	id, err := newID()
+	if err != nil {
+		return err
+	}
+	return s.History.Append(ctx, domain.UserStatusHistory{
+		ID:             id,
+		UserID:         cmd.UserID,
+		ChangedBy:      cmd.Actor.UserID,
+		PreviousStatus: from,
+		NewStatus:      to,
+		Reason:         strings.TrimSpace(cmd.Reason),
+		CreatedAt:      at,
+	})
 }
 
 // LockUser sets ACTIVE → LOCKED and revokes sessions. Already LOCKED is
@@ -855,6 +876,9 @@ func (s Service) LockUser(ctx context.Context, cmd StatusCommand) (Decision, err
 	u.LockedAt = &locked
 	u.UpdatedAt = now
 	if err := s.Users.Update(ctx, u); err != nil {
+		return Rollback, err
+	}
+	if err := s.recordStatusChange(ctx, cmd, domain.StatusActive, domain.StatusLocked, now); err != nil {
 		return Rollback, err
 	}
 	if err := s.Sessions.RevokeAllForUser(ctx, u.ID, domain.RevokeUserLocked, now); err != nil {
@@ -897,6 +921,9 @@ func (s Service) UnlockUser(ctx context.Context, cmd StatusCommand) (Decision, e
 	if err := s.Users.Update(ctx, u); err != nil {
 		return Rollback, err
 	}
+	if err := s.recordStatusChange(ctx, cmd, domain.StatusLocked, domain.StatusActive, now); err != nil {
+		return Rollback, err
+	}
 	return Commit, nil
 }
 
@@ -927,10 +954,14 @@ func (s Service) DisableUser(ctx context.Context, cmd StatusCommand) (Decision, 
 		return Rollback, domain.ErrLastAdmin
 	}
 	now := s.now()
+	from := u.Status
 	u.Status = domain.StatusDisabled
 	u.LockedAt = nil
 	u.UpdatedAt = now
 	if err := s.Users.Update(ctx, u); err != nil {
+		return Rollback, err
+	}
+	if err := s.recordStatusChange(ctx, cmd, from, domain.StatusDisabled, now); err != nil {
 		return Rollback, err
 	}
 	if err := s.Sessions.RevokeAllForUser(ctx, u.ID, domain.RevokeUserDisabled, now); err != nil {
