@@ -10,11 +10,47 @@ import (
 	"log/slog"
 	"net"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/romangergovskiy/paycore/internal/auth/application"
+	"github.com/romangergovskiy/paycore/internal/platform/authcrypto"
 	"github.com/romangergovskiy/paycore/internal/platform/config"
 	"github.com/romangergovskiy/paycore/internal/platform/httpserver"
 	"github.com/romangergovskiy/paycore/internal/platform/logging"
 	"github.com/romangergovskiy/paycore/internal/platform/postgres"
 )
+
+// authRuntime is the Identity/Auth composition root. HTTP routes attach in 3.26.3.
+type authRuntime struct {
+	uow  application.UnitOfWork
+	svc  application.Service // hasher, issuer, signer, clock; stores come from uow
+	read application.Service // Users/Sessions/Roles on the pool for ValidateSession
+}
+
+func newAuthRuntime(pool *pgxpool.Pool, jwtSecret string) (*authRuntime, error) {
+	if pool == nil {
+		return nil, nil
+	}
+	signer, err := authcrypto.NewHS256([]byte(jwtSecret))
+	if err != nil {
+		return nil, err
+	}
+	base := application.Service{
+		Hasher: authcrypto.NewArgon2idHasher(),
+		Issuer: authcrypto.NewOpaqueRefresh(),
+		Access: signer,
+		Clock:  authcrypto.NewSystemClock(),
+	}
+	read := base
+	read.Users = postgres.NewAuthUsers(pool)
+	read.Sessions = postgres.NewAuthSessions(pool)
+	read.Roles = postgres.NewAuthRoles(pool)
+	return &authRuntime{
+		uow:  postgres.NewAuthUoW(pool),
+		svc:  base,
+		read: read,
+	}, nil
+}
 
 // Version is set at build time with -ldflags "-X .../internal/app.Version=...".
 var Version = "dev"
@@ -41,6 +77,14 @@ func Run(ctx context.Context, environ []string, logOut io.Writer) error {
 	if pool != nil {
 		defer pool.Close()
 		log.Info("postgres connected", slog.String("dsn", postgres.RedactDSN(cfg.Postgres.DSN)))
+	}
+
+	auth, err := newAuthRuntime(pool, cfg.Auth.JWTSecret)
+	if err != nil {
+		return err
+	}
+	if auth != nil {
+		log.Info("auth runtime ready")
 	}
 
 	ln, err := net.Listen("tcp", cfg.HTTP.Addr)

@@ -7,11 +7,19 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/romangergovskiy/paycore/internal/auth/domain"
+	"github.com/romangergovskiy/paycore/internal/platform/authcrypto"
 	"github.com/romangergovskiy/paycore/internal/platform/config"
 )
+
+const testJWTSecret = "0123456789abcdef0123456789abcdef"
 
 func TestRunInvalidConfig(t *testing.T) {
 	err := Run(context.Background(), []string{"PAYCORE_ENV=staging"}, io.Discard)
@@ -32,7 +40,7 @@ func TestRunShortJWTSecret(t *testing.T) {
 func TestRunListenError(t *testing.T) {
 	err := Run(context.Background(), []string{
 		"PAYCORE_HTTP_ADDR=127.0.0.1:-1",
-		"PAYCORE_AUTH_JWT_SECRET=0123456789abcdef0123456789abcdef",
+		"PAYCORE_AUTH_JWT_SECRET=" + testJWTSecret,
 	}, io.Discard)
 	if err == nil || errors.Is(err, config.ErrInvalid) {
 		t.Fatalf("Run = %v, want listen error", err)
@@ -50,7 +58,7 @@ func TestRunServesAndShutsDown(t *testing.T) {
 			"PAYCORE_ENV=test",
 			"PAYCORE_HTTP_ADDR=127.0.0.1:0",
 			"PAYCORE_SHUTDOWN_TIMEOUT=2s",
-			"PAYCORE_AUTH_JWT_SECRET=0123456789abcdef0123456789abcdef",
+			"PAYCORE_AUTH_JWT_SECRET=" + testJWTSecret,
 		}, logW)
 		logW.Close()
 	}()
@@ -89,6 +97,91 @@ func TestRunServesAndShutsDown(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+
+	for rec := range lines {
+		raw, _ := json.Marshal(rec)
+		if strings.Contains(string(raw), testJWTSecret) {
+			t.Errorf("JWT secret leaked in logs: %s", raw)
+		}
+		if rec["msg"] == "auth runtime ready" {
+			t.Error("auth runtime wired without a postgres pool")
+		}
+	}
+}
+
+func TestNewAuthRuntimeWithoutPool(t *testing.T) {
+	rt, err := newAuthRuntime(nil, testJWTSecret)
+	if err != nil || rt != nil {
+		t.Fatalf("nil pool: runtime=%v err=%v", rt, err)
+	}
+}
+
+func TestNewAuthRuntimeWiresSigner(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, "postgres://paycore_app:x@127.0.0.1:1/paycore?sslmode=disable")
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+
+	rt, err := newAuthRuntime(pool, testJWTSecret)
+	if err != nil {
+		t.Fatalf("newAuthRuntime: %v", err)
+	}
+	if rt == nil || rt.uow == nil || rt.svc.Hasher == nil || rt.svc.Issuer == nil ||
+		rt.svc.Access == nil || rt.svc.Clock == nil || rt.read.Users == nil ||
+		rt.read.Sessions == nil || rt.read.Roles == nil {
+		t.Fatalf("incomplete runtime: %+v", rt)
+	}
+
+	p := domain.Principal{
+		UserID:    uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+		SessionID: uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+		Roles:     []domain.Role{domain.RoleCustomer},
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	tok, err := rt.svc.Access.Sign(p, now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	want, err := authcrypto.NewHS256([]byte(testJWTSecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := want.Parse(tok)
+	if err != nil {
+		t.Fatalf("Parse with configured secret: %v", err)
+	}
+	if got.UserID != p.UserID || got.SessionID != p.SessionID {
+		t.Fatalf("claims: %+v", got)
+	}
+
+	other, err := authcrypto.NewHS256([]byte("ffffffffffffffffffffffffffffffff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Parse(tok); err == nil {
+		t.Fatal("Parse with a different secret succeeded")
+	}
+}
+
+func TestNewAuthRuntimeShortSecret(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, "postgres://paycore_app:x@127.0.0.1:1/paycore?sslmode=disable")
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+
+	short := testJWTSecret[:31]
+	_, err = newAuthRuntime(pool, short)
+	if err == nil {
+		t.Fatal("short secret accepted")
+	}
+	if strings.Contains(err.Error(), short) {
+		t.Errorf("secret leaked in error: %v", err)
 	}
 }
 
