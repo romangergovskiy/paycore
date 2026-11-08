@@ -170,6 +170,18 @@ type LoginAttempt struct {
 	AttemptedAt   time.Time
 }
 
+// UserStatusHistory is one append-only row of auth.user_status_history.
+// It records LockUser / UnlockUser / DisableUser only (D-43).
+type UserStatusHistory struct {
+	ID             uuid.UUID
+	UserID         uuid.UUID
+	ChangedBy      uuid.UUID
+	PreviousStatus Status
+	NewStatus      Status
+	Reason         string
+	CreatedAt      time.Time
+}
+
 // Principal is the authenticated actor (identity-auth.md §8).
 type Principal struct {
 	UserID    uuid.UUID

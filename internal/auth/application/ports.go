@@ -66,6 +66,12 @@ type AttemptStore interface {
 	Append(ctx context.Context, a domain.LoginAttempt) error
 }
 
+// StatusHistoryStore appends auth.user_status_history. Implementations
+// must INSERT only; UPDATE/DELETE are forbidden by the schema.
+type StatusHistoryStore interface {
+	Append(ctx context.Context, h domain.UserStatusHistory) error
+}
+
 // RateLimiter increments a PostgreSQL window counter (not Redis).
 // Hit is a security-critical write: the use case returns Commit after a
 // business rejection so the adapter does not roll the counter back.

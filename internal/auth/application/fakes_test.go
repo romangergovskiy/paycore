@@ -525,6 +525,25 @@ func (s *memRoles) CountActiveWithRole(ctx context.Context, role domain.Role) (i
 	return n, nil
 }
 
+type memHistory struct {
+	mu   sync.Mutex
+	all  []domain.UserStatusHistory
+	fail error
+}
+
+func (s *memHistory) Append(ctx context.Context, h domain.UserStatusHistory) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.fail != nil {
+		return s.fail
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.all = append(s.all, h)
+	return nil
+}
+
 type memAttempts struct {
 	mu   sync.Mutex
 	all  []domain.LoginAttempt
@@ -553,6 +572,7 @@ type world struct {
 	tokens   *memTokens
 	roles    *memRoles
 	attempts *memAttempts
+	history  *memHistory
 	limiter  *memLimiter
 	hasher   *memHasher
 	issuer   *memIssuer
@@ -578,6 +598,7 @@ type worldSnap struct {
 	tokens   map[uuid.UUID]domain.RefreshToken
 	roles    map[uuid.UUID][]domain.UserRole
 	attempts []domain.LoginAttempt
+	history  []domain.UserStatusHistory
 	limiter  map[string]int
 	issuerN  int
 }
@@ -592,6 +613,7 @@ func newWorld() *world {
 		tokens:   &memTokens{byID: map[uuid.UUID]domain.RefreshToken{}, sessions: sessions},
 		roles:    roles,
 		attempts: &memAttempts{},
+		history:  &memHistory{},
 		limiter:  &memLimiter{n: map[string]int{}},
 		hasher:   &memHasher{},
 		issuer:   &memIssuer{},
@@ -611,6 +633,7 @@ func (w *world) service() Service {
 		Roles:    w.roles,
 		Attempts: w.attempts,
 		Limiter:  w.limiter,
+		History:  w.history,
 		Hasher:   w.hasher,
 		Issuer:   w.issuer,
 		Access:   w.signer,
@@ -626,6 +649,7 @@ func (w *world) deps() Deps {
 		Roles:    w.roles,
 		Attempts: w.attempts,
 		Limiter:  w.limiter,
+		History:  w.history,
 	}
 }
 
@@ -693,6 +717,10 @@ func (w *world) snapshot() worldSnap {
 	attempts := append([]domain.LoginAttempt(nil), w.attempts.all...)
 	w.attempts.mu.Unlock()
 
+	w.history.mu.Lock()
+	history := append([]domain.UserStatusHistory(nil), w.history.all...)
+	w.history.mu.Unlock()
+
 	w.limiter.mu.Lock()
 	limiter := make(map[string]int, len(w.limiter.n))
 	for k, v := range w.limiter.n {
@@ -706,6 +734,7 @@ func (w *world) snapshot() worldSnap {
 		tokens:   tokens,
 		roles:    roles,
 		attempts: attempts,
+		history:  history,
 		limiter:  limiter,
 		issuerN:  w.issuer.n,
 	}
@@ -731,6 +760,10 @@ func (w *world) restore(s worldSnap) {
 	w.attempts.mu.Lock()
 	w.attempts.all = s.attempts
 	w.attempts.mu.Unlock()
+
+	w.history.mu.Lock()
+	w.history.all = s.history
+	w.history.mu.Unlock()
 
 	w.limiter.mu.Lock()
 	w.limiter.n = s.limiter

@@ -417,3 +417,11 @@
 - ADMIN утверждает корректировку, не создаёт её ([D-31](#d-31)), и не пишет в ledger в обход шлюза ([D-03](#d-03), [D-40](#d-40)).
 - Rate limit login/register/refresh — счётчики в PostgreSQL с явными окнами ([identity-auth.md §13](identity-auth.md#13-лимиты-mvp-явные)), не Redis.
 - **Альтернативы:** самоназначение роли из тела регистрации — отклонено; ADMIN с правом transfer/topup «для поддержки» — отклонено ТЗ §2.1.
+
+### D-43
+**Причина смены статуса пользователя — `auth.user_status_history`, не `audit.audit_logs`.**
+- `audit.audit_logs` в текущих миграциях нет. Этап 3.25 не создаёт схему `audit` и не строит универсальный аудит.
+- `LockUser` / `UnlockUser` / `DisableUser` пишут append-only строку `auth.user_status_history` в той же Auth UoW Tx, что и смена статуса. Ошибка вставки откатывает операцию. Идемпотентный no-op и `ErrLastAdmin` строку не пишут.
+- Приложение только `INSERT`; `UPDATE`/`DELETE` запрещены триггером. `paycore_app`: `SELECT, INSERT`; `paycore_readonly`: `SELECT`.
+- Login lockout в эту таблицу не пишет (нет `StatusCommand.Reason`).
+- **Альтернативы:** писать сразу в `audit.audit_logs` (отклонено: таблицы нет); расширять `auth.users` колонкой last_reason (отклонено: нет истории); откладывать Reason до модуля audit (отклонено: reason уже в команде и терялся).

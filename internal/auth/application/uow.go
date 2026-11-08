@@ -18,6 +18,7 @@ type Deps struct {
 	Roles    RoleStore
 	Attempts AttemptStore
 	Limiter  RateLimiter
+	History  StatusHistoryStore
 }
 
 // UnitOfWork runs fn in one transaction. Begin/Commit/Rollback belong to
@@ -37,6 +38,7 @@ func (s Service) withDeps(d Deps) Service {
 	out.Roles = d.Roles
 	out.Attempts = d.Attempts
 	out.Limiter = d.Limiter
+	out.History = d.History
 	return out
 }
 

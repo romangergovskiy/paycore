@@ -56,6 +56,12 @@ func NewAuthLimiter(q execQueryer) *AuthLimiter { return &AuthLimiter{q: q} }
 
 var _ application.RateLimiter = (*AuthLimiter)(nil)
 
+type AuthStatusHistory struct{ q execQueryer }
+
+func NewAuthStatusHistory(q execQueryer) *AuthStatusHistory { return &AuthStatusHistory{q: q} }
+
+var _ application.StatusHistoryStore = (*AuthStatusHistory)(nil)
+
 func authDeps(tx execQueryer) application.Deps {
 	return application.Deps{
 		Users:    NewAuthUsers(tx),
@@ -64,6 +70,7 @@ func authDeps(tx execQueryer) application.Deps {
 		Roles:    NewAuthRoles(tx),
 		Attempts: NewAuthAttempts(tx),
 		Limiter:  NewAuthLimiter(tx),
+		History:  NewAuthStatusHistory(tx),
 	}
 }
 
@@ -211,6 +218,13 @@ INSERT INTO auth.login_attempts (
   id, email, user_id, ip, success, failure_reason, attempted_at
 ) VALUES (
   $1, $2, $3, $4::inet, $5, $6, $7
+)`
+
+const insertUserStatusHistorySQL = `
+INSERT INTO auth.user_status_history (
+  id, user_id, changed_by, previous_status, new_status, reason, created_at
+) VALUES (
+  $1, $2, $3, $4, $5, $6, $7
 )`
 
 const hitLimiterSQL = `
@@ -395,6 +409,14 @@ func (s *AuthAttempts) Append(ctx context.Context, a domain.LoginAttempt) error 
 		failureReasonArg(a.Success, a.FailureReason), a.AttemptedAt,
 	)
 	return mapAuthSQLError("attempts append", err)
+}
+
+func (s *AuthStatusHistory) Append(ctx context.Context, h domain.UserStatusHistory) error {
+	_, err := s.q.Exec(ctx, insertUserStatusHistorySQL,
+		h.ID, h.UserID, h.ChangedBy, string(h.PreviousStatus), string(h.NewStatus),
+		h.Reason, h.CreatedAt,
+	)
+	return mapAuthSQLError("status history append", err)
 }
 
 func (s *AuthLimiter) Hit(ctx context.Context, bucket domain.RateBucket, key string, at time.Time) (int, error) {

@@ -329,3 +329,89 @@ func TestLockUserUpdateErrorRollsBack(t *testing.T) {
 		t.Fatalf("partial lock %+v", got)
 	}
 }
+
+func TestLockUserWritesHistory(t *testing.T) {
+	w := newWorld()
+	svc := w.service()
+	admin := seedUser(t, w, "a@b.c", domain.StatusActive, domain.RoleAdmin)
+	cust := seedUser(t, w, "c@b.c", domain.StatusActive, domain.RoleCustomer)
+	if _, err := svc.LockUser(context.Background(), statusCmd(adminPrincipal(admin), cust.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.history.all) != 1 {
+		t.Fatalf("history rows = %d", len(w.history.all))
+	}
+	h := w.history.all[0]
+	if h.UserID != cust.ID || h.ChangedBy != admin.ID || h.PreviousStatus != domain.StatusActive ||
+		h.NewStatus != domain.StatusLocked || h.Reason != "policy" {
+		t.Fatalf("history %+v", h)
+	}
+}
+
+func TestLockUserIdempotentSkipsHistory(t *testing.T) {
+	w := newWorld()
+	svc := w.service()
+	admin := seedUser(t, w, "a@b.c", domain.StatusActive, domain.RoleAdmin)
+	locked := seedUser(t, w, "lock@b.c", domain.StatusLocked, domain.RoleCustomer)
+	if _, err := svc.LockUser(context.Background(), statusCmd(adminPrincipal(admin), locked.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.history.all) != 0 {
+		t.Fatalf("noop wrote history %+v", w.history.all)
+	}
+}
+
+func TestLockUserLastAdminSkipsHistory(t *testing.T) {
+	w := newWorld()
+	svc := w.service()
+	admin := seedUser(t, w, "a@b.c", domain.StatusActive, domain.RoleAdmin)
+	if _, err := svc.LockUser(context.Background(), statusCmd(adminPrincipal(admin), admin.ID)); !errors.Is(err, domain.ErrLastAdmin) {
+		t.Fatalf("got %v", err)
+	}
+	if len(w.history.all) != 0 {
+		t.Fatalf("last admin wrote history %+v", w.history.all)
+	}
+}
+
+func TestLockUserHistoryErrorRollsBack(t *testing.T) {
+	w := newWorld()
+	uow := &memUoW{w: w}
+	admin := seedUser(t, w, "a@b.c", domain.StatusActive, domain.RoleAdmin)
+	cust := seedUser(t, w, "c@b.c", domain.StatusActive, domain.RoleCustomer)
+	w.history.fail = errors.New("history failed")
+	err := LockUserIn(context.Background(), uow, w.service(), statusCmd(adminPrincipal(admin), cust.ID))
+	if !errors.Is(err, w.history.fail) {
+		t.Fatalf("got %v", err)
+	}
+	if uow.committed || !uow.rolled {
+		t.Fatalf("commit=%v rollback=%v", uow.committed, uow.rolled)
+	}
+	got, _ := w.users.Get(context.Background(), cust.ID)
+	if got.Status != domain.StatusActive {
+		t.Fatalf("partial lock %+v", got)
+	}
+	if len(w.history.all) != 0 {
+		t.Fatalf("history after rollback %+v", w.history.all)
+	}
+}
+
+func TestUnlockAndDisableWriteHistory(t *testing.T) {
+	w := newWorld()
+	svc := w.service()
+	admin := seedUser(t, w, "a@b.c", domain.StatusActive, domain.RoleAdmin)
+	locked := seedUser(t, w, "lock@b.c", domain.StatusLocked, domain.RoleCustomer)
+	if _, err := svc.UnlockUser(context.Background(), statusCmd(adminPrincipal(admin), locked.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.history.all) != 1 || w.history.all[0].PreviousStatus != domain.StatusLocked ||
+		w.history.all[0].NewStatus != domain.StatusActive {
+		t.Fatalf("unlock history %+v", w.history.all)
+	}
+	cust := seedUser(t, w, "c@b.c", domain.StatusActive, domain.RoleCustomer)
+	if _, err := svc.DisableUser(context.Background(), statusCmd(adminPrincipal(admin), cust.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.history.all) != 2 || w.history.all[1].NewStatus != domain.StatusDisabled {
+		t.Fatalf("disable history %+v", w.history.all)
+	}
+}

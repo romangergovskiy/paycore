@@ -103,7 +103,7 @@ func TestMigrationsAndRoles(t *testing.T) {
 		t.Fatalf("up: %v", err)
 	}
 	v, err := CurrentVersion(ctx, c.owner)
-	if err != nil || v != 5 {
+	if err != nil || v != 6 {
 		t.Fatalf("version after up = %d, %v", v, err)
 	}
 	assertSchemaInfo(t, ctx, c.app, true)
@@ -118,7 +118,7 @@ func TestMigrationsAndRoles(t *testing.T) {
 			t.Fatalf("up: %v", err)
 		}
 		v2, err := CurrentVersion(ctx, c2.owner)
-		if err != nil || v2 != 5 {
+		if err != nil || v2 != 6 {
 			t.Fatalf("version after up = %d, %v", v2, err)
 		}
 		assertSchemaInfo(t, ctx, c2.app, true)
