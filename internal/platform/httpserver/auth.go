@@ -117,27 +117,15 @@ func mapBearerError(err error) error {
 		}
 		return appErr
 	}
-	var domErr *domain.Error
-	if errors.As(err, &domErr) {
-		if domErr.Code == domain.CodeTokenExpired {
-			return invalidToken()
-		}
-		return apperror.New(kindForAuth(domErr.Code), domErr.Code, domErr.Message)
+	if errors.Is(err, domain.ErrInvalidToken) {
+		return invalidToken()
 	}
-	return apperror.From(err)
+	if errors.Is(err, domain.ErrForbidden) {
+		return apperror.New(apperror.KindForbidden, domain.CodeForbidden, domain.ErrForbidden.Message)
+	}
+	return err
 }
 
 func invalidToken() *apperror.Error {
 	return apperror.New(apperror.KindUnauthorized, domain.CodeInvalidToken, domain.ErrInvalidToken.Message)
-}
-
-func kindForAuth(code string) apperror.Kind {
-	switch code {
-	case domain.CodeInvalidToken, domain.CodeInvalidCredentials, domain.CodeTokenExpired, domain.CodeTokenReused:
-		return apperror.KindUnauthorized
-	case domain.CodeForbidden:
-		return apperror.KindForbidden
-	default:
-		return apperror.KindInternal
-	}
 }

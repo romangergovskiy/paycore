@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/romangergovskiy/paycore/internal/auth/domain"
+	"github.com/romangergovskiy/paycore/internal/platform/apperror"
 	"github.com/romangergovskiy/paycore/internal/platform/authcrypto"
 )
 
@@ -24,6 +26,7 @@ const testJWTSecret = "0123456789abcdef0123456789abcdef"
 type fakeSessions struct {
 	mu   sync.Mutex
 	byID map[uuid.UUID]domain.Principal
+	err  error
 }
 
 func newFakeSessions(ps ...domain.Principal) *fakeSessions {
@@ -37,6 +40,9 @@ func newFakeSessions(ps ...domain.Principal) *fakeSessions {
 func (f *fakeSessions) ValidateSession(_ context.Context, sessionID uuid.UUID) (domain.Principal, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.err != nil {
+		return domain.Principal{}, f.err
+	}
 	p, ok := f.byID[sessionID]
 	if !ok {
 		return domain.Principal{}, domain.ErrInvalidToken
@@ -314,6 +320,46 @@ func TestPrincipalFromContextMissing(t *testing.T) {
 	p, ok := PrincipalFromContext(context.Background())
 	if ok || p.UserID != uuid.Nil {
 		t.Fatalf("empty context: %+v ok=%v", p, ok)
+	}
+}
+
+func TestBearerValidateSessionDeadlineExceeded(t *testing.T) {
+	s := testSigner(t)
+	p := testPrincipal()
+	sessions := newFakeSessions(p)
+	sessions.err = context.DeadlineExceeded
+	tok := signAccess(t, s, p, time.Now().UTC().Add(15*time.Minute))
+	h := BearerAuth(s, sessions)(okHandler(t))
+	rec := serveBearer(t, h, "Bearer "+tok)
+	e := decodeError(t, rec)
+	if rec.Code != http.StatusServiceUnavailable || e.Code != apperror.CodeRequestTimeout {
+		t.Fatalf("got %d %+v body=%s", rec.Code, e, rec.Body)
+	}
+	if rec.Header().Get("WWW-Authenticate") != "" {
+		t.Errorf("503 must not send WWW-Authenticate: %q", rec.Header().Get("WWW-Authenticate"))
+	}
+}
+
+func TestBearerValidateSessionInfraErrorHidesCause(t *testing.T) {
+	s := testSigner(t)
+	p := testPrincipal()
+	sessions := newFakeSessions(p)
+	sessions.err = errors.New("connection reset by postgres host=db password=supersecret")
+	tok := signAccess(t, s, p, time.Now().UTC().Add(15*time.Minute))
+	h := BearerAuth(s, sessions)(okHandler(t))
+	rec := serveBearer(t, h, "Bearer "+tok)
+	e := decodeError(t, rec)
+	if rec.Code != http.StatusInternalServerError || e.Code != apperror.CodeInternal {
+		t.Fatalf("got %d %+v body=%s", rec.Code, e, rec.Body)
+	}
+	raw := rec.Body.String()
+	for _, secret := range []string{"postgres", "supersecret", "connection reset", "password"} {
+		if strings.Contains(raw, secret) {
+			t.Errorf("infra error leaked %q: %s", secret, raw)
+		}
+	}
+	if rec.Header().Get("WWW-Authenticate") != "" {
+		t.Errorf("500 must not send WWW-Authenticate: %q", rec.Header().Get("WWW-Authenticate"))
 	}
 }
 
