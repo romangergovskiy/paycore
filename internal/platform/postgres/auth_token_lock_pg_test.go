@@ -608,6 +608,7 @@ type hookAuthUoW struct {
 	db           beginner
 	wrapTokens   func(application.TokenStore) application.TokenStore
 	wrapSessions func(application.SessionStore) application.SessionStore
+	wrapUsers    func(application.UserStore) application.UserStore
 }
 
 func (u hookAuthUoW) Do(ctx context.Context, fn func(context.Context, application.Deps) (application.Decision, error)) error {
@@ -620,6 +621,9 @@ func (u hookAuthUoW) Do(ctx context.Context, fn func(context.Context, applicatio
 	}
 	return runAuthTx(ctx, tx, func() (application.Decision, error) {
 		d := authDeps(tx)
+		if u.wrapUsers != nil {
+			d.Users = u.wrapUsers(d.Users)
+		}
 		if u.wrapTokens != nil {
 			d.Tokens = u.wrapTokens(d.Tokens)
 		}
@@ -667,6 +671,24 @@ func (h hookTokens) LockAllForUser(ctx context.Context, userID uuid.UUID) error 
 		return h.afterLock(ctx)
 	}
 	return nil
+}
+
+type hookUsers struct {
+	application.UserStore
+	afterGetForUpdate func(context.Context) error
+}
+
+func (h hookUsers) GetForUpdate(ctx context.Context, id uuid.UUID) (domain.User, error) {
+	u, err := h.UserStore.GetForUpdate(ctx, id)
+	if err != nil {
+		return u, err
+	}
+	if h.afterGetForUpdate != nil {
+		if err := h.afterGetForUpdate(ctx); err != nil {
+			return domain.User{}, err
+		}
+	}
+	return u, nil
 }
 
 type hookSessions struct {

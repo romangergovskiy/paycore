@@ -288,8 +288,8 @@ func TestLogin6TenthFailureLocksFromRow(t *testing.T) {
 	if lastAttempt(t, w).FailureReason != domain.FailureLocked {
 		t.Fatalf("reason %s", lastAttempt(t, w).FailureReason)
 	}
-	if hooks.getForUpdateN != 1 {
-		t.Fatalf("GetForUpdate %d want 1", hooks.getForUpdateN)
+	if hooks.getForUpdateN != 2 {
+		t.Fatalf("GetForUpdate %d want 2", hooks.getForUpdateN)
 	}
 }
 

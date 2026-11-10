@@ -139,9 +139,20 @@ func TestLogoutAllTokensLockedBeforeSessions(t *testing.T) {
 	if _, err := w.service().LogoutAll(context.Background(), actorOf(first)); err != nil {
 		t.Fatal(err)
 	}
-	lockAt, sessAt, tokAt := w.callIndex("lock-tokens-user"), w.callIndex("revoke-sessions"), w.callIndex("revoke-tokens-user")
-	if lockAt < 0 || sessAt < 0 || tokAt < 0 || !(lockAt < sessAt && sessAt < tokAt) {
+	userAt, lockAt, sessAt, tokAt := w.callIndex("for-update"), w.callIndex("lock-tokens-user"), w.callIndex("revoke-sessions"), w.callIndex("revoke-tokens-user")
+	if userAt < 0 || lockAt < 0 || sessAt < 0 || tokAt < 0 || !(userAt < lockAt && lockAt < sessAt && sessAt < tokAt) {
 		t.Fatalf("order %v", w.calls)
+	}
+}
+
+func TestLogoutAllRequiresUsers(t *testing.T) {
+	w := newWorld()
+	first := loginEmail(t, w, "a@b.c")
+	svc := w.service()
+	svc.Users = nil
+	dec, err := svc.LogoutAll(context.Background(), actorOf(first))
+	if dec != Rollback || !errors.Is(err, errNotWired) {
+		t.Fatalf("dec=%v err=%v", dec, err)
 	}
 }
 

@@ -17,6 +17,10 @@ type UserStore interface {
 	// GetForUpdate locks the user row until the transaction ends (FOR UPDATE).
 	// Login re-reads with this after password verify so a concurrent lockout
 	// is not overwritten by Update of a stale GetByEmail copy.
+	// Bulk session revoke (LogoutAll, ChangePassword, LockUser, DisableUser,
+	// login lockout) takes it in the same Tx before tokens so Login cannot
+	// insert a session after the token set is frozen. Order: user → tokens
+	// → sessions. Signature unchanged.
 	GetForUpdate(ctx context.Context, id uuid.UUID) (domain.User, error)
 	Update(ctx context.Context, u domain.User) error
 }
