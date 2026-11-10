@@ -575,10 +575,7 @@ func (s Service) Logout(ctx context.Context, p domain.Principal) (Decision, erro
 		return Commit, nil
 	}
 	now := s.now()
-	if err := s.Sessions.Revoke(ctx, sess.ID, domain.RevokeLogout, now); err != nil {
-		return Rollback, err
-	}
-	if err := s.Tokens.RevokeBySession(ctx, sess.ID, now); err != nil {
+	if err := s.revokeSessionAfterTokenLock(ctx, sess.ID, domain.RevokeLogout, now); err != nil {
 		return Rollback, err
 	}
 	return Commit, nil

@@ -1,10 +1,12 @@
 package application
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -21,9 +23,11 @@ type memHasher struct {
 	failHash, failVerify bool
 	lastVerify           string
 	verifyCalls          int
+	hashCalls            int
 }
 
 func (h *memHasher) Hash(password string) (string, error) {
+	h.hashCalls++
 	if h.failHash {
 		return "", errors.New("hash failed")
 	}
@@ -202,10 +206,47 @@ func (s *memUsers) Update(ctx context.Context, u domain.User) error {
 	return nil
 }
 
+func (s *memUsers) List(ctx context.Context, q ListUsersQuery) ([]domain.User, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]domain.User, 0, len(s.byID))
+	for _, u := range s.byID {
+		if q.Status != nil && u.Status != *q.Status {
+			continue
+		}
+		if q.Cursor != nil {
+			if u.CreatedAt.Before(q.Cursor.CreatedAt) {
+				continue
+			}
+			if u.CreatedAt.Equal(q.Cursor.CreatedAt) && bytes.Compare(u.ID[:], q.Cursor.ID[:]) <= 0 {
+				continue
+			}
+		}
+		out = append(out, cloneUser(u))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return bytes.Compare(out[i].ID[:], out[j].ID[:]) < 0
+	})
+	if q.Limit > 0 {
+		n := q.Limit + 1
+		if n < len(out) {
+			out = out[:n]
+		}
+	}
+	return out, nil
+}
+
 type memSessions struct {
-	mu   sync.Mutex
-	byID map[uuid.UUID]domain.Session
-	err  error
+	mu    sync.Mutex
+	byID  map[uuid.UUID]domain.Session
+	err   error
+	trace func(string)
 }
 
 func (s *memSessions) Create(ctx context.Context, sess domain.Session) error {
@@ -241,6 +282,9 @@ func (s *memSessions) Revoke(ctx context.Context, id uuid.UUID, reason domain.Re
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if s.trace != nil {
+		s.trace("revoke-session")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.byID[id]
@@ -260,6 +304,9 @@ func (s *memSessions) RevokeAllForUser(ctx context.Context, userID uuid.UUID, re
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if s.trace != nil {
+		s.trace("revoke-sessions")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, sess := range s.byID {
@@ -271,6 +318,38 @@ func (s *memSessions) RevokeAllForUser(ctx context.Context, userID uuid.UUID, re
 		}
 	}
 	return nil
+}
+
+func (s *memSessions) ListByUser(ctx context.Context, userID uuid.UUID, liveOnly bool) ([]domain.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.trace != nil {
+		if liveOnly {
+			s.trace("list-by-user-live")
+		} else {
+			s.trace("list-by-user")
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]domain.Session, 0)
+	for _, sess := range s.byID {
+		if sess.UserID != userID {
+			continue
+		}
+		if liveOnly && !sess.Live() {
+			continue
+		}
+		out = append(out, cloneSession(sess))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return bytes.Compare(out[i].ID[:], out[j].ID[:]) > 0
+	})
+	return out, nil
 }
 
 func (s *memSessions) Touch(ctx context.Context, id uuid.UUID, at time.Time) error {
@@ -293,6 +372,7 @@ type memTokens struct {
 	byID     map[uuid.UUID]domain.RefreshToken
 	sessions *memSessions
 	create   error
+	trace    func(string)
 }
 
 func (s *memTokens) Create(ctx context.Context, tok domain.RefreshToken) error {
@@ -356,9 +436,32 @@ func (s *memTokens) MarkUsed(ctx context.Context, id, replacedBy uuid.UUID, at t
 	return nil
 }
 
+func (s *memTokens) LockBySession(ctx context.Context, sessionID uuid.UUID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.trace != nil {
+		s.trace("lock-tokens-session")
+	}
+	return nil
+}
+
+func (s *memTokens) LockAllForUser(ctx context.Context, userID uuid.UUID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.trace != nil {
+		s.trace("lock-tokens-user")
+	}
+	return nil
+}
+
 func (s *memTokens) RevokeBySession(ctx context.Context, sessionID uuid.UUID, at time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if s.trace != nil {
+		s.trace("revoke-tokens-session")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -375,6 +478,9 @@ func (s *memTokens) RevokeBySession(ctx context.Context, sessionID uuid.UUID, at
 func (s *memTokens) RevokeAllForUser(ctx context.Context, userID uuid.UUID, at time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if s.trace != nil {
+		s.trace("revoke-tokens-user")
 	}
 	owned := map[uuid.UUID]struct{}{}
 	if s.sessions != nil {
@@ -622,6 +728,8 @@ func newWorld() *world {
 	}
 	w.users.trace = w.trace
 	w.roles.trace = w.trace
+	w.sessions.trace = w.trace
+	w.tokens.trace = w.trace
 	return w
 }
 

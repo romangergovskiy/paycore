@@ -1,6 +1,8 @@
 package application
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 
 	"github.com/romangergovskiy/paycore/internal/auth/domain"
@@ -43,9 +45,36 @@ type Credentials struct {
 
 const tokenTypeBearer = "Bearer"
 
-// StatusCommand is LockUser / UnlockUser / DisableUser.
+// StatusCommand is LockUser / UnlockUser / DisableUser / EnableUser.
 type StatusCommand struct {
 	Actor  domain.Principal
 	UserID uuid.UUID
 	Reason string
+}
+
+// ChangePasswordCommand is POST /auth/password. It does not issue tokens.
+type ChangePasswordCommand struct {
+	Actor       domain.Principal
+	OldPassword string
+	NewPassword string
+}
+
+// RevokeSessionCommand is POST /auth/sessions/{id}/revoke.
+type RevokeSessionCommand struct {
+	Actor     domain.Principal
+	SessionID uuid.UUID
+}
+
+// ListUsersQuery is GET /admin/users. Limit is 1…100; HTTP default 50
+// is applied before the call. Cursor is typed, never a SQL string.
+type ListUsersQuery struct {
+	Status *domain.Status
+	Limit  int
+	Cursor *UserCursor
+}
+
+// UserCursor is the admin-list keyset position (created_at, id).
+type UserCursor struct {
+	CreatedAt time.Time
+	ID        uuid.UUID
 }

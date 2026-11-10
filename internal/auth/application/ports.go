@@ -19,6 +19,9 @@ type UserStore interface {
 	// is not overwritten by Update of a stale GetByEmail copy.
 	GetForUpdate(ctx context.Context, id uuid.UUID) (domain.User, error)
 	Update(ctx context.Context, u domain.User) error
+	// List is a keyset page (LIMIT+1). Adapters must not SELECT password_hash.
+	// Cursor binds are typed $created_at, $id, never a decoded SQL string.
+	List(ctx context.Context, q ListUsersQuery) ([]domain.User, error)
 }
 
 // SessionStore persists auth.sessions. The implementation must not Begin.
@@ -28,6 +31,9 @@ type SessionStore interface {
 	Revoke(ctx context.Context, id uuid.UUID, reason domain.RevokeReason, at time.Time) error
 	RevokeAllForUser(ctx context.Context, userID uuid.UUID, reason domain.RevokeReason, at time.Time) error
 	Touch(ctx context.Context, id uuid.UUID, at time.Time) error
+	// ListByUser returns the user's sessions. liveOnly=true is the MVP
+	// default (revoked_at IS NULL), matching the partial index.
+	ListByUser(ctx context.Context, userID uuid.UUID, liveOnly bool) ([]domain.Session, error)
 }
 
 // TokenStore persists hashed refresh tokens. The implementation must not Begin
@@ -41,6 +47,14 @@ type TokenStore interface {
 	// a PostgreSQL isolation proof.
 	GetForUpdate(ctx context.Context, hash []byte) (domain.RefreshToken, error)
 	MarkUsed(ctx context.Context, id, replacedBy uuid.UUID, at time.Time) error
+	// LockBySession is SELECT … FOR UPDATE ORDER BY id on the session's
+	// refresh tokens. Logout and RevokeSession take this before updating
+	// the session row so Refresh cannot lock tokens after sessions.
+	LockBySession(ctx context.Context, sessionID uuid.UUID) error
+	// LockAllForUser is SELECT … FOR UPDATE ORDER BY id on the user's
+	// refresh tokens. LogoutAll and ChangePassword take this before
+	// updating session rows.
+	LockAllForUser(ctx context.Context, userID uuid.UUID) error
 	RevokeBySession(ctx context.Context, sessionID uuid.UUID, at time.Time) error
 	RevokeAllForUser(ctx context.Context, userID uuid.UUID, at time.Time) error
 }
@@ -54,7 +68,7 @@ type RoleStore interface {
 	CountActiveWithRole(ctx context.Context, role domain.Role) (int, error)
 	// LockAdminRoleMutations serializes every use-case write that can
 	// change the ACTIVE ADMIN set in this transaction (pg_advisory_xact_lock,
-	// not a session lock): Grant/Revoke of ADMIN, Lock/Unlock/DisableUser,
+	// not a session lock): Grant/Revoke of ADMIN, Lock/Unlock/Disable/EnableUser,
 	// and login lockout of a user who has (or just gained) ADMIN. Count and
 	// the initiator re-check run after the lock is held. Order is always
 	// this lock, then user FOR UPDATE.

@@ -35,10 +35,16 @@ const (
 //	Grant/Revoke success                     Commit
 //	Grant/Revoke FORBIDDEN/NOT_FOUND/INVALID Rollback
 //	Grant/Revoke store/ctx error             Rollback
-//	Lock/Unlock/Disable success / idempotent Commit
+//	Lock/Unlock/Disable/Enable success / idempotent Commit
 //	Lock/Disable last ACTIVE ADMIN           Rollback
-//	Lock/Unlock/Disable FORBIDDEN/NOT_FOUND  Rollback
-//	Unlock DISABLED (invalid transition)     Rollback
+//	Lock/Unlock/Disable/Enable FORBIDDEN/NOT_FOUND Rollback
+//	Unlock DISABLED / Enable LOCKED          Rollback
+//	LogoutAll success / repeat               Commit
+//	ChangePassword success                   Commit
+//	ChangePassword INVALID_CREDENTIALS (old) Rollback
+//	ChangePassword INVALID_REQUEST           Rollback
+//	RevokeSession success / already revoked  Commit
+//	RevokeSession foreign / missing          Rollback (NOT_FOUND)
 //	Login last ACTIVE ADMIN at LockAfter     Commit (attempt + fail count; not LOCKED)
 //
 // GetForUpdate on a refresh hash must be SELECT … FOR UPDATE held until
