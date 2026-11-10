@@ -144,6 +144,15 @@ UPDATE auth.sessions
    SET last_seen_at = $2
  WHERE id = $1`
 
+const listSessionsByUserSQL = `
+SELECT id, user_id, COALESCE(user_agent, ''),
+       CASE WHEN ip IS NULL THEN '' ELSE host(ip) END,
+       created_at, last_seen_at, revoked_at, COALESCE(revoke_reason, '')
+  FROM auth.sessions
+ WHERE user_id = $1
+   AND (NOT $2 OR revoked_at IS NULL)
+ ORDER BY created_at DESC, id DESC`
+
 const selectTokenSQL = `
 SELECT id, session_id, token_hash, replaced_by, expires_at, used_at, revoked_at, created_at
   FROM auth.refresh_tokens
@@ -175,6 +184,21 @@ UPDATE auth.refresh_tokens AS t
  WHERE t.session_id = s.id
    AND s.user_id = $1
    AND t.revoked_at IS NULL`
+
+const lockTokensBySessionSQL = `
+SELECT id
+  FROM auth.refresh_tokens
+ WHERE session_id = $1
+ ORDER BY id
+ FOR UPDATE`
+
+const lockTokensForUserSQL = `
+SELECT t.id
+  FROM auth.refresh_tokens AS t
+  JOIN auth.sessions AS s ON s.id = t.session_id
+ WHERE s.user_id = $1
+ ORDER BY t.id
+ FOR UPDATE OF t`
 
 const grantRoleSQL = `
 INSERT INTO auth.user_roles (user_id, role_code, granted_by, granted_at)
@@ -302,14 +326,27 @@ func (s *AuthSessions) RevokeAllForUser(ctx context.Context, userID uuid.UUID, r
 	return mapAuthSQLError("sessions revoke all", err)
 }
 
-// ListByUser is a 3.27.1 compile stub so SessionStore still assigns.
-// It does not query. SQL is 3.27.2. This branch must not merge to main
-// until the real SELECT exists.
+// ListByUser returns the user's sessions. liveOnly uses the partial live
+// index (revoked_at IS NULL). There is no pagination. Rows are ordered
+// created_at DESC, id DESC. The SELECT has no password or token hashes.
 func (s *AuthSessions) ListByUser(ctx context.Context, userID uuid.UUID, liveOnly bool) ([]domain.Session, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	rows, err := s.q.Query(ctx, listSessionsByUserSQL, userID, liveOnly)
+	if err != nil {
+		return nil, mapAuthSQLError("sessions list by user", err)
 	}
-	return nil, fmt.Errorf("auth sessions list by user: not implemented")
+	defer rows.Close()
+	out := make([]domain.Session, 0)
+	for rows.Next() {
+		sess, err := scanSession(rows, "sessions list by user")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapAuthSQLError("sessions list by user", err)
+	}
+	return out, nil
 }
 
 func (s *AuthSessions) Touch(ctx context.Context, id uuid.UUID, at time.Time) error {
@@ -350,18 +387,17 @@ func (s *AuthTokens) MarkUsed(ctx context.Context, id, replacedBy uuid.UUID, at 
 	return nil
 }
 
-// LockBySession is a 3.27.1 compile stub. It does not lock rows and is
-// not SELECT … FOR UPDATE. Real token locks are 3.27.2. This branch
-// must not merge to main until those locks exist.
+// LockBySession is SELECT … FOR UPDATE ORDER BY id on the session's
+// refresh tokens. It does not Begin. Locks are held until the caller's Tx ends.
 func (s *AuthTokens) LockBySession(ctx context.Context, sessionID uuid.UUID) error {
-	return ctx.Err()
+	return lockTokenRows(ctx, s.q, lockTokensBySessionSQL, "tokens lock by session", sessionID)
 }
 
-// LockAllForUser is a 3.27.1 compile stub. It does not lock rows and is
-// not SELECT … FOR UPDATE. Real token locks are 3.27.2. This branch
-// must not merge to main until those locks exist.
+// LockAllForUser is SELECT … FOR UPDATE OF refresh_tokens ORDER BY id
+// for every token of the user's sessions. The JOIN does not lock session
+// rows (FOR UPDATE OF t) so lock order stays tokens then sessions.
 func (s *AuthTokens) LockAllForUser(ctx context.Context, userID uuid.UUID) error {
-	return ctx.Err()
+	return lockTokenRows(ctx, s.q, lockTokensForUserSQL, "tokens lock all for user", userID)
 }
 
 func (s *AuthTokens) RevokeBySession(ctx context.Context, sessionID uuid.UUID, at time.Time) error {
@@ -495,6 +531,24 @@ func scanToken(row scanner, op string) (domain.RefreshToken, error) {
 	}
 	tok.Hash = copyBytes(tok.Hash)
 	return tok, nil
+}
+
+func lockTokenRows(ctx context.Context, q execQueryer, sql, op string, arg any) error {
+	rows, err := q.Query(ctx, sql, arg)
+	if err != nil {
+		return mapAuthSQLError(op, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("auth %s: scan: %w", op, err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return mapAuthSQLError(op, err)
+	}
+	return nil
 }
 
 func mapAuthSQLError(op string, err error) error {

@@ -348,10 +348,7 @@ func (s Service) applyActiveFailure(ctx context.Context, u domain.User, now time
 			if err := s.Users.Update(ctx, u); err != nil {
 				return u, err
 			}
-			if err := s.Sessions.RevokeAllForUser(ctx, u.ID, domain.RevokeUserLocked, now); err != nil {
-				return u, err
-			}
-			if err := s.Tokens.RevokeAllForUser(ctx, u.ID, now); err != nil {
+			if err := s.revokeUserAfterTokenLock(ctx, u.ID, domain.RevokeUserLocked, now); err != nil {
 				return u, err
 			}
 			return u, nil
