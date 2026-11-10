@@ -2,7 +2,7 @@
 
 Демонстрационная платёжная инфраструктура с double-entry ledger: Go, PostgreSQL, модульный монолит. Деньги виртуальные, соответствие PCI DSS и банковским требованиям не заявляется.
 
-Статус: **этап 3.25 — Argon2id, JWT HS256, opaque refresh, UTC clock, история статуса пользователя**. HTTP auth, bootstrap ADMIN и Payments/Transfers ещё нет.
+Статус: **этап 3.26 — HTTP Identity/Auth (register/login/refresh/logout) и PostgreSQL HTTP-тесты**. Bootstrap ADMIN и Payments/Transfers ещё нет.
 
 ## Документация
 

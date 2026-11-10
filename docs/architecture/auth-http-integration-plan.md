@@ -1,6 +1,6 @@
 # Этап 3.26 — план HTTP Identity/Auth
 
-Статус: **решения §8 зафиксированы (2026-11-08).** В коде: **3.26.1** (JWT + 429), **3.26.2** (Auth runtime), **3.26.3** (register/login/refresh), **3.26.4** (Bearer + RequireRole), **3.26.5** (`POST /api/v1/auth/logout`). **3.26.6** (PostgreSQL HTTP) — следующий PR.
+Статус: **решения §8 зафиксированы (2026-11-08).** В коде: **3.26.1–3.26.6** (JWT + 429, runtime, public handlers, Bearer/RBAC, logout, PostgreSQL HTTP testcontainers). Этап 3.26 закрыт.
 
 **Ворота.** Изучен `main` = `e9a8cb150fa88b2f37e1494059743ab31dcc5706` (merge PR **#32**, этап 3.25). Документ не опирается на чат: только файлы репозитория.
 
@@ -352,7 +352,7 @@ Client IP: `host` из `RemoteAddr` (`net.SplitHostPort`). `X-Forwarded-For` и 
 
 ### 3.26.6 — интеграция PostgreSQL
 
-**Файлы:** `internal/auth/http/http_pg_test.go` или `internal/platform/postgres/auth_http_pg_test.go` (как accounts: testcontainers, `paycore_app`, без `t.Skip` «нет Docker»). Реальный `Argon2idHasher` + `HS256` + `OpaqueRefresh` + `NewAuthUoW`.
+**Файлы:** `internal/platform/postgres/auth_http_pg_test.go` (testcontainers, `paycore_app`, без `t.Skip` «нет Docker»). Реальный `Argon2idHasher` + `HS256` + `OpaqueRefresh` + `NewAuthUoW`. Тестовый `GET /api/v1/__test/require-admin` только в этом файле, не в production Mount.
 
 **Сценарии:**
 
