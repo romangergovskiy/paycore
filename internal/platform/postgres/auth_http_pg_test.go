@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,6 +149,9 @@ func TestAuthHTTPPostgres(t *testing.T) {
 		}
 		cred := decodeCreds(t, login.Body)
 		env.trackSecret(cred.AccessToken, cred.RefreshToken)
+
+		env.gate.arm()
+		defer env.gate.release()
 
 		var ready, done sync.WaitGroup
 		start := make(chan struct{})
@@ -354,6 +360,7 @@ type authHTTPEnv struct {
 	uow    application.UnitOfWork
 	write  application.Service
 	issuer application.RefreshIssuer
+	gate   *refreshLockGate
 	mu     sync.Mutex
 	banned []string
 }
@@ -374,7 +381,8 @@ func newAuthHTTPEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *auth
 	read.Users = NewAuthUsers(pool)
 	read.Sessions = NewAuthSessions(pool)
 	read.Roles = NewAuthRoles(pool)
-	uow := NewAuthUoW(pool)
+	gate := newRefreshLockGate()
+	uow := gatedAuthUoW{db: pool, gate: gate}
 
 	logs := &syncBuf{}
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -397,6 +405,7 @@ func newAuthHTTPEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *auth
 		uow:    uow,
 		write:  base,
 		issuer: base.Issuer,
+		gate:   gate,
 		banned: []string{
 			httpPGPassword, httpPGJWTSecret, appPassword, ownerPassword,
 			"Authorization", "$argon2id$", "pgx",
@@ -628,5 +637,102 @@ func assertRefreshRotated(t *testing.T, ctx context.Context, conn *pgx.Conn, iss
 	}
 	if newUsed || newRevoked {
 		t.Fatalf("new refresh used=%v revoked=%v", newUsed, newRevoked)
+	}
+}
+
+// gatedAuthUoW is a test-only seam: the same Begin / Decision finish as
+// NewAuthUoW, with TokenStore.GetForUpdate wrapped so a two-party barrier
+// can sit immediately before SELECT … FOR UPDATE. Production UoW is unchanged.
+type gatedAuthUoW struct {
+	db   beginner
+	gate *refreshLockGate
+}
+
+func (u gatedAuthUoW) Do(ctx context.Context, fn func(context.Context, application.Deps) (application.Decision, error)) error {
+	if fn == nil {
+		return errors.New("auth: unit of work callback is required")
+	}
+	tx, err := u.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("auth tx begin: %w", err)
+	}
+	return runAuthTx(ctx, tx, func() (application.Decision, error) {
+		d := authDeps(tx)
+		d.Tokens = gatedTokenStore{TokenStore: d.Tokens, gate: u.gate}
+		return fn(ctx, d)
+	})
+}
+
+type gatedTokenStore struct {
+	application.TokenStore
+	gate *refreshLockGate
+}
+
+func (g gatedTokenStore) GetForUpdate(ctx context.Context, hash []byte) (domain.RefreshToken, error) {
+	if err := g.gate.beforeLock(ctx); err != nil {
+		return domain.RefreshToken{}, err
+	}
+	return g.TokenStore.GetForUpdate(ctx, hash)
+}
+
+// refreshLockGate rendezvous both Refresh callers immediately before
+// GetForUpdate. Armed only for the concurrent HTTP subtest. release()
+// unblocks waiters on error, timeout, or test cleanup.
+type refreshLockGate struct {
+	armed    atomic.Bool
+	mu       sync.Mutex
+	n        int
+	both     chan struct{}
+	bothOnce sync.Once
+	relOnce  sync.Once
+	released chan struct{}
+}
+
+func newRefreshLockGate() *refreshLockGate {
+	g := &refreshLockGate{
+		both:     make(chan struct{}),
+		released: make(chan struct{}),
+	}
+	g.bothOnce.Do(func() { close(g.both) })
+	return g
+}
+
+func (g *refreshLockGate) arm() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.n = 0
+	g.both = make(chan struct{})
+	g.bothOnce = sync.Once{}
+	g.released = make(chan struct{})
+	g.relOnce = sync.Once{}
+	g.armed.Store(true)
+}
+
+func (g *refreshLockGate) release() {
+	g.relOnce.Do(func() { close(g.released) })
+	g.bothOnce.Do(func() { close(g.both) })
+	g.armed.Store(false)
+}
+
+func (g *refreshLockGate) beforeLock(ctx context.Context) error {
+	if !g.armed.Load() {
+		return nil
+	}
+	g.mu.Lock()
+	g.n++
+	n := g.n
+	both := g.both
+	g.mu.Unlock()
+	if n >= 2 {
+		g.bothOnce.Do(func() { close(both) })
+	}
+	select {
+	case <-both:
+		return nil
+	case <-g.released:
+		return nil
+	case <-ctx.Done():
+		g.release()
+		return ctx.Err()
 	}
 }
