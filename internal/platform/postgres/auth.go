@@ -274,14 +274,6 @@ func (s *AuthUsers) Update(ctx context.Context, u domain.User) error {
 	return nil
 }
 
-// List satisfies UserStore. SQL keyset paging is stage 3.27.2.
-func (s *AuthUsers) List(ctx context.Context, q application.ListUsersQuery) ([]domain.User, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return nil, fmt.Errorf("auth users list: not implemented")
-}
-
 func (s *AuthSessions) Create(ctx context.Context, sess domain.Session) error {
 	_, err := s.q.Exec(ctx, insertSessionSQL,
 		sess.ID, sess.UserID, sess.UserAgent, inetArg(sess.IP),
@@ -310,7 +302,9 @@ func (s *AuthSessions) RevokeAllForUser(ctx context.Context, userID uuid.UUID, r
 	return mapAuthSQLError("sessions revoke all", err)
 }
 
-// ListByUser satisfies SessionStore. SQL is stage 3.27.2.
+// ListByUser is a 3.27.1 compile stub so SessionStore still assigns.
+// It does not query. SQL is 3.27.2. This branch must not merge to main
+// until the real SELECT exists.
 func (s *AuthSessions) ListByUser(ctx context.Context, userID uuid.UUID, liveOnly bool) ([]domain.Session, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -356,13 +350,16 @@ func (s *AuthTokens) MarkUsed(ctx context.Context, id, replacedBy uuid.UUID, at 
 	return nil
 }
 
-// LockBySession and LockAllForUser satisfy TokenStore. SELECT … FOR UPDATE
-// ORDER BY id is stage 3.27.2. Returning nil keeps existing Logout tests
-// compiling: application still revokes the session then the tokens.
+// LockBySession is a 3.27.1 compile stub. It does not lock rows and is
+// not SELECT … FOR UPDATE. Real token locks are 3.27.2. This branch
+// must not merge to main until those locks exist.
 func (s *AuthTokens) LockBySession(ctx context.Context, sessionID uuid.UUID) error {
 	return ctx.Err()
 }
 
+// LockAllForUser is a 3.27.1 compile stub. It does not lock rows and is
+// not SELECT … FOR UPDATE. Real token locks are 3.27.2. This branch
+// must not merge to main until those locks exist.
 func (s *AuthTokens) LockAllForUser(ctx context.Context, userID uuid.UUID) error {
 	return ctx.Err()
 }

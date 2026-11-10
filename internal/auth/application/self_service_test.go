@@ -174,6 +174,7 @@ func TestChangePasswordWrongOldRollsBack(t *testing.T) {
 func TestChangePasswordShortNewSkipsHash(t *testing.T) {
 	w := newWorld()
 	cred := loginEmail(t, w, "a@b.c")
+	w.calls = nil
 	w.hasher.hashCalls = 0
 	w.hasher.verifyCalls = 0
 	dec, err := w.service().ChangePassword(context.Background(), ChangePasswordCommand{
@@ -187,11 +188,16 @@ func TestChangePasswordShortNewSkipsHash(t *testing.T) {
 	if w.hasher.hashCalls != 0 {
 		t.Fatalf("Hash called %d times", w.hasher.hashCalls)
 	}
+	rowAt, verifyAt, hashAt := w.callIndex("for-update"), w.callIndex("verify"), w.callIndex("hash")
+	if rowAt < 0 || verifyAt < 0 || verifyAt <= rowAt || hashAt >= 0 {
+		t.Fatalf("want GetForUpdate then Verify then ValidatePassword without Hash, got %v", w.calls)
+	}
 }
 
 func TestChangePasswordSameOldAndNewRejected(t *testing.T) {
 	w := newWorld()
 	cred := loginEmail(t, w, "a@b.c")
+	w.calls = nil
 	w.hasher.hashCalls = 0
 	dec, err := w.service().ChangePassword(context.Background(), ChangePasswordCommand{
 		Actor:       actorOf(cred),
@@ -203,6 +209,10 @@ func TestChangePasswordSameOldAndNewRejected(t *testing.T) {
 	}
 	if w.hasher.hashCalls != 0 {
 		t.Fatalf("Hash called %d times", w.hasher.hashCalls)
+	}
+	rowAt, verifyAt, hashAt := w.callIndex("for-update"), w.callIndex("verify"), w.callIndex("hash")
+	if rowAt < 0 || verifyAt <= rowAt || hashAt >= 0 {
+		t.Fatalf("order %v", w.calls)
 	}
 }
 
@@ -247,10 +257,41 @@ func TestChangePasswordSuccessRevokesSessions(t *testing.T) {
 	if liveTokenCount(w, first.User.ID) != 0 {
 		t.Fatal("tokens still live")
 	}
+	rowAt, verifyAt, hashAt := w.callIndex("for-update"), w.callIndex("verify"), w.callIndex("hash")
 	lockAt, sessAt, tokAt := w.callIndex("lock-tokens-user"), w.callIndex("revoke-sessions"), w.callIndex("revoke-tokens-user")
-	rowAt := w.callIndex("for-update")
-	if rowAt < 0 || lockAt < 0 || sessAt < 0 || tokAt < 0 || !(rowAt < lockAt && lockAt < sessAt && sessAt < tokAt) {
+	if rowAt < 0 || verifyAt < 0 || hashAt < 0 || lockAt < 0 || sessAt < 0 || tokAt < 0 ||
+		!(rowAt < verifyAt && verifyAt < hashAt && hashAt < lockAt && lockAt < sessAt && sessAt < tokAt) {
 		t.Fatalf("order %v", w.calls)
+	}
+}
+
+func TestChangePasswordVerifyAfterGetForUpdateBeforeValidate(t *testing.T) {
+	w := newWorld()
+	cred := loginEmail(t, w, "a@b.c")
+	before, _ := w.users.Get(context.Background(), cred.User.ID)
+	w.calls = nil
+	w.hasher.hashCalls = 0
+	dec, err := w.service().ChangePassword(context.Background(), ChangePasswordCommand{
+		Actor:       actorOf(cred),
+		OldPassword: "wrongpassword",
+		NewPassword: "12345678901",
+	})
+	if dec != Rollback || !errors.Is(err, domain.ErrInvalidCredentials) {
+		t.Fatalf("short new with wrong old: dec=%v err=%v", dec, err)
+	}
+	if w.hasher.hashCalls != 0 {
+		t.Fatal("Hash of new password")
+	}
+	rowAt, verifyAt, hashAt := w.callIndex("for-update"), w.callIndex("verify"), w.callIndex("hash")
+	if rowAt < 0 || verifyAt <= rowAt || hashAt >= 0 {
+		t.Fatalf("Verify must follow GetForUpdate and precede ValidatePassword, got %v", w.calls)
+	}
+	if w.hasher.lastVerify != before.PasswordHash {
+		t.Fatalf("verified %q want locked PHC %q", w.hasher.lastVerify, before.PasswordHash)
+	}
+	got, _ := w.users.Get(context.Background(), cred.User.ID)
+	if got.PasswordHash != before.PasswordHash {
+		t.Fatal("PHC changed")
 	}
 }
 
@@ -537,6 +578,48 @@ func TestUnlockTakesAdvisoryBeforeGetForUpdate(t *testing.T) {
 	lockAt, rowAt := w.callIndex("lock"), w.callIndex("for-update")
 	if lockAt < 0 || rowAt < 0 || rowAt <= lockAt {
 		t.Fatalf("order %v", w.calls)
+	}
+}
+
+func TestLockUserRevokesAfterTokenLock(t *testing.T) {
+	w := newWorld()
+	svc := w.service()
+	admin := seedUser(t, w, "a@b.c", domain.StatusActive, domain.RoleAdmin)
+	cred := loginEmail(t, w, "c@b.c")
+	w.calls = nil
+	if _, err := svc.LockUser(context.Background(), statusCmd(adminPrincipal(admin), cred.User.ID)); err != nil {
+		t.Fatal(err)
+	}
+	lockAt, rowAt := w.callIndex("lock"), w.callIndex("for-update")
+	tokLock, sessAt, tokAt := w.callIndex("lock-tokens-user"), w.callIndex("revoke-sessions"), w.callIndex("revoke-tokens-user")
+	if lockAt < 0 || rowAt < 0 || tokLock < 0 || sessAt < 0 || tokAt < 0 ||
+		!(lockAt < rowAt && rowAt < tokLock && tokLock < sessAt && sessAt < tokAt) {
+		t.Fatalf("order %v", w.calls)
+	}
+	sess, _ := w.sessions.Get(context.Background(), cred.SessionID)
+	if sess.Live() || sess.RevokeReason != domain.RevokeUserLocked {
+		t.Fatalf("session %+v", sess)
+	}
+}
+
+func TestDisableUserRevokesAfterTokenLock(t *testing.T) {
+	w := newWorld()
+	svc := w.service()
+	admin := seedUser(t, w, "a@b.c", domain.StatusActive, domain.RoleAdmin)
+	cred := loginEmail(t, w, "c@b.c")
+	w.calls = nil
+	if _, err := svc.DisableUser(context.Background(), statusCmd(adminPrincipal(admin), cred.User.ID)); err != nil {
+		t.Fatal(err)
+	}
+	lockAt, rowAt := w.callIndex("lock"), w.callIndex("for-update")
+	tokLock, sessAt, tokAt := w.callIndex("lock-tokens-user"), w.callIndex("revoke-sessions"), w.callIndex("revoke-tokens-user")
+	if lockAt < 0 || rowAt < 0 || tokLock < 0 || sessAt < 0 || tokAt < 0 ||
+		!(lockAt < rowAt && rowAt < tokLock && tokLock < sessAt && sessAt < tokAt) {
+		t.Fatalf("order %v", w.calls)
+	}
+	sess, _ := w.sessions.Get(context.Background(), cred.SessionID)
+	if sess.Live() || sess.RevokeReason != domain.RevokeUserDisabled {
+		t.Fatalf("session %+v", sess)
 	}
 }
 

@@ -24,30 +24,37 @@ type memHasher struct {
 	lastVerify           string
 	verifyCalls          int
 	hashCalls            int
+	trace                func(string)
+}
+
+func fakePHC(password string) string {
+	return "$argon2id$v=19$m=19456,t=2,p=1$fake$" + password
 }
 
 func (h *memHasher) Hash(password string) (string, error) {
 	h.hashCalls++
+	if h.trace != nil {
+		h.trace("hash")
+	}
 	if h.failHash {
 		return "", errors.New("hash failed")
 	}
-	return "$argon2id$v=19$m=19456,t=2,p=1$fake$" + password, nil
+	return fakePHC(password), nil
 }
 
 func (h *memHasher) Verify(password, encoded string) (bool, error) {
 	h.verifyCalls++
 	h.lastVerify = encoded
+	if h.trace != nil {
+		h.trace("verify")
+	}
 	if h.failVerify {
 		return false, errors.New("verify failed")
 	}
 	if encoded == h.DummyHash() {
 		return false, nil
 	}
-	want, err := h.Hash(password)
-	if err != nil {
-		return false, err
-	}
-	return encoded == want, nil
+	return encoded == fakePHC(password), nil
 }
 
 func (h *memHasher) DummyHash() string {
@@ -204,42 +211,6 @@ func (s *memUsers) Update(ctx context.Context, u domain.User) error {
 	}
 	s.byID[u.ID] = u
 	return nil
-}
-
-func (s *memUsers) List(ctx context.Context, q ListUsersQuery) ([]domain.User, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]domain.User, 0, len(s.byID))
-	for _, u := range s.byID {
-		if q.Status != nil && u.Status != *q.Status {
-			continue
-		}
-		if q.Cursor != nil {
-			if u.CreatedAt.Before(q.Cursor.CreatedAt) {
-				continue
-			}
-			if u.CreatedAt.Equal(q.Cursor.CreatedAt) && bytes.Compare(u.ID[:], q.Cursor.ID[:]) <= 0 {
-				continue
-			}
-		}
-		out = append(out, cloneUser(u))
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].CreatedAt.Before(out[j].CreatedAt)
-		}
-		return bytes.Compare(out[i].ID[:], out[j].ID[:]) < 0
-	})
-	if q.Limit > 0 {
-		n := q.Limit + 1
-		if n < len(out) {
-			out = out[:n]
-		}
-	}
-	return out, nil
 }
 
 type memSessions struct {
@@ -730,6 +701,7 @@ func newWorld() *world {
 	w.roles.trace = w.trace
 	w.sessions.trace = w.trace
 	w.tokens.trace = w.trace
+	w.hasher.trace = w.trace
 	return w
 }
 

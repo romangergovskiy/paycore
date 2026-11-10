@@ -19,9 +19,6 @@ type UserStore interface {
 	// is not overwritten by Update of a stale GetByEmail copy.
 	GetForUpdate(ctx context.Context, id uuid.UUID) (domain.User, error)
 	Update(ctx context.Context, u domain.User) error
-	// List is a keyset page (LIMIT+1). Adapters must not SELECT password_hash.
-	// Cursor binds are typed $created_at, $id, never a decoded SQL string.
-	List(ctx context.Context, q ListUsersQuery) ([]domain.User, error)
 }
 
 // SessionStore persists auth.sessions. The implementation must not Begin.
@@ -47,13 +44,13 @@ type TokenStore interface {
 	// a PostgreSQL isolation proof.
 	GetForUpdate(ctx context.Context, hash []byte) (domain.RefreshToken, error)
 	MarkUsed(ctx context.Context, id, replacedBy uuid.UUID, at time.Time) error
-	// LockBySession is SELECT … FOR UPDATE ORDER BY id on the session's
-	// refresh tokens. Logout and RevokeSession take this before updating
-	// the session row so Refresh cannot lock tokens after sessions.
+	// LockBySession is the application lock point for the session's
+	// refresh tokens, taken before updating the session row. The
+	// PostgreSQL adapter must SELECT … FOR UPDATE ORDER BY id (3.27.2).
 	LockBySession(ctx context.Context, sessionID uuid.UUID) error
-	// LockAllForUser is SELECT … FOR UPDATE ORDER BY id on the user's
-	// refresh tokens. LogoutAll and ChangePassword take this before
-	// updating session rows.
+	// LockAllForUser is the application lock point for the user's
+	// refresh tokens, taken before updating session rows. The
+	// PostgreSQL adapter must SELECT … FOR UPDATE ORDER BY id (3.27.2).
 	LockAllForUser(ctx context.Context, userID uuid.UUID) error
 	RevokeBySession(ctx context.Context, sessionID uuid.UUID, at time.Time) error
 	RevokeAllForUser(ctx context.Context, userID uuid.UUID, at time.Time) error

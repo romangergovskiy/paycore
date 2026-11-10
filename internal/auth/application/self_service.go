@@ -92,9 +92,9 @@ func (s Service) LogoutAll(ctx context.Context, p domain.Principal) (Decision, e
 	return Commit, nil
 }
 
-// ChangePassword verifies the old PHC after Users.GetForUpdate, hashes the
-// new password, and revokes every session with PASSWORD_CHANGED. A stale
-// old password after a concurrent winner is INVALID_CREDENTIALS + Rollback.
+// ChangePassword order in Tx: GetForUpdate → Verify current PHC →
+// ValidatePassword(new) → Hash → Update → revoke all PASSWORD_CHANGED.
+// A stale old password after a concurrent winner is INVALID_CREDENTIALS + Rollback.
 func (s Service) ChangePassword(ctx context.Context, cmd ChangePasswordCommand) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Rollback, err
@@ -104,12 +104,6 @@ func (s Service) ChangePassword(ctx context.Context, cmd ChangePasswordCommand) 
 	}
 	if cmd.Actor.UserID == uuid.Nil {
 		return Rollback, domain.ErrInvalidToken
-	}
-	if cmd.OldPassword == cmd.NewPassword {
-		return Rollback, domain.ErrInvalidRequest
-	}
-	if err := domain.ValidatePassword(cmd.NewPassword); err != nil {
-		return Rollback, err
 	}
 
 	u, err := s.Users.GetForUpdate(ctx, cmd.Actor.UserID)
@@ -128,6 +122,12 @@ func (s Service) ChangePassword(ctx context.Context, cmd ChangePasswordCommand) 
 	}
 	if !ok {
 		return Rollback, domain.ErrInvalidCredentials
+	}
+	if cmd.OldPassword == cmd.NewPassword {
+		return Rollback, domain.ErrInvalidRequest
+	}
+	if err := domain.ValidatePassword(cmd.NewPassword); err != nil {
+		return Rollback, err
 	}
 	hash, err := s.Hasher.Hash(cmd.NewPassword)
 	if err != nil {

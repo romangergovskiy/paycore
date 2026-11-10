@@ -878,10 +878,7 @@ func (s Service) LockUser(ctx context.Context, cmd StatusCommand) (Decision, err
 	if err := s.recordStatusChange(ctx, cmd, domain.StatusActive, domain.StatusLocked, now); err != nil {
 		return Rollback, err
 	}
-	if err := s.Sessions.RevokeAllForUser(ctx, u.ID, domain.RevokeUserLocked, now); err != nil {
-		return Rollback, err
-	}
-	if err := s.Tokens.RevokeAllForUser(ctx, u.ID, now); err != nil {
+	if err := s.revokeUserAfterTokenLock(ctx, u.ID, domain.RevokeUserLocked, now); err != nil {
 		return Rollback, err
 	}
 	return Commit, nil
@@ -961,10 +958,7 @@ func (s Service) DisableUser(ctx context.Context, cmd StatusCommand) (Decision, 
 	if err := s.recordStatusChange(ctx, cmd, from, domain.StatusDisabled, now); err != nil {
 		return Rollback, err
 	}
-	if err := s.Sessions.RevokeAllForUser(ctx, u.ID, domain.RevokeUserDisabled, now); err != nil {
-		return Rollback, err
-	}
-	if err := s.Tokens.RevokeAllForUser(ctx, u.ID, now); err != nil {
+	if err := s.revokeUserAfterTokenLock(ctx, u.ID, domain.RevokeUserDisabled, now); err != nil {
 		return Rollback, err
 	}
 	return Commit, nil

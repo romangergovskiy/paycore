@@ -1,8 +1,6 @@
 package application
 
 import (
-	"time"
-
 	"github.com/google/uuid"
 
 	"github.com/romangergovskiy/paycore/internal/auth/domain"
@@ -63,18 +61,4 @@ type ChangePasswordCommand struct {
 type RevokeSessionCommand struct {
 	Actor     domain.Principal
 	SessionID uuid.UUID
-}
-
-// ListUsersQuery is GET /admin/users. Limit is 1…100; HTTP default 50
-// is applied before the call. Cursor is typed, never a SQL string.
-type ListUsersQuery struct {
-	Status *domain.Status
-	Limit  int
-	Cursor *UserCursor
-}
-
-// UserCursor is the admin-list keyset position (created_at, id).
-type UserCursor struct {
-	CreatedAt time.Time
-	ID        uuid.UUID
 }
