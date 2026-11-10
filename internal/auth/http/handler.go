@@ -21,10 +21,14 @@ type Handler struct {
 	register func(*http.Request, application.RegisterCommand) (domain.PublicUser, error)
 	login    func(*http.Request, application.LoginCommand) (application.Credentials, error)
 	refresh  func(*http.Request, application.RefreshCommand) (application.Credentials, error)
+	logout   func(*http.Request, domain.Principal) error
+	parser   httpserver.AccessParser
+	sessions httpserver.SessionValidator
 }
 
-// New wires the public auth routes to application use cases.
-func New(uow application.UnitOfWork, svc application.Service) Handler {
+// New wires auth routes to application use cases. parser and sessions
+// are required to mount logout (BearerAuth → ValidateSession).
+func New(uow application.UnitOfWork, svc application.Service, parser httpserver.AccessParser, sessions httpserver.SessionValidator) Handler {
 	return Handler{
 		register: func(r *http.Request, cmd application.RegisterCommand) (domain.PublicUser, error) {
 			return application.RegisterIn(r.Context(), uow, svc, cmd)
@@ -35,14 +39,23 @@ func New(uow application.UnitOfWork, svc application.Service) Handler {
 		refresh: func(r *http.Request, cmd application.RefreshCommand) (application.Credentials, error) {
 			return application.RefreshIn(r.Context(), uow, svc, cmd)
 		},
+		logout: func(r *http.Request, p domain.Principal) error {
+			return application.LogoutIn(r.Context(), uow, svc, p)
+		},
+		parser:   parser,
+		sessions: sessions,
 	}
 }
 
 // Mount registers POST /api/v1/auth/register, login, and refresh.
+// Logout is mounted only when BearerAuth dependencies are present.
 func Mount(s *httpserver.Server, h Handler) {
 	s.Handle("POST /api/v1/auth/register", http.HandlerFunc(h.postRegister))
 	s.Handle("POST /api/v1/auth/login", http.HandlerFunc(h.postLogin))
 	s.Handle("POST /api/v1/auth/refresh", http.HandlerFunc(h.postRefresh))
+	if h.parser != nil && h.sessions != nil {
+		s.Handle("POST /api/v1/auth/logout", httpserver.BearerAuth(h.parser, h.sessions)(http.HandlerFunc(h.postLogout)))
+	}
 }
 
 func (h Handler) postRegister(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +120,19 @@ func (h Handler) postRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpserver.WriteJSON(w, http.StatusOK, credentialsDTO(cred))
+}
+
+func (h Handler) postLogout(w http.ResponseWriter, r *http.Request) {
+	p, ok := httpserver.PrincipalFromContext(r.Context())
+	if !ok {
+		writeError(w, r, domain.ErrInvalidToken)
+		return
+	}
+	if err := h.logout(r, p); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func credentialsDTO(c application.Credentials) credentialsResponse {

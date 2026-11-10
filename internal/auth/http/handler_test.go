@@ -158,8 +158,8 @@ func TestRegisterSuccess(t *testing.T) {
 }
 
 func TestNewWiresUseCases(t *testing.T) {
-	h := New(nil, application.Service{})
-	if h.register == nil || h.login == nil || h.refresh == nil {
+	h := New(nil, application.Service{}, nil, nil)
+	if h.register == nil || h.login == nil || h.refresh == nil || h.logout == nil {
 		t.Fatal("New left a use case unset")
 	}
 }

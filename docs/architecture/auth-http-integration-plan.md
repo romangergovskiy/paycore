@@ -1,6 +1,6 @@
 # Этап 3.26 — план HTTP Identity/Auth
 
-Статус: **решения §8 зафиксированы (2026-11-08).** Подэтап **3.26.1** (конфиг JWT + Kind 429) — в коде; маршруты Auth и `app.Run` wiring — 3.26.2+.
+Статус: **решения §8 зафиксированы (2026-11-08).** В коде: **3.26.1** (JWT + 429), **3.26.2** (Auth runtime), **3.26.3** (register/login/refresh), **3.26.4** (Bearer + RequireRole), **3.26.5** (`POST /api/v1/auth/logout`). **3.26.6** (PostgreSQL HTTP) — следующий PR.
 
 **Ворота.** Изучен `main` = `e9a8cb150fa88b2f37e1494059743ab31dcc5706` (merge PR **#32**, этап 3.25). Документ не опирается на чат: только файлы репозитория.
 
@@ -161,8 +161,8 @@ RequireRole (RBAC)
 1. Middleware: нет/не `Bearer` / битая подпись / чужой `iss` / просроченный access → `INVALID_TOKEN` 401 (**не** `TOKEN_EXPIRED`: этот code — про refresh, identity-auth §9).
 2. `ValidateSession(sid)`: revoked / нет сессии / не ACTIVE → `INVALID_TOKEN` 401. Logout после revoke JWT до `exp` сразу бесполезен — это цель (нет denylist `jti`).
 3. Principal в context из store-ролей.
-4. `LogoutIn(ctx, uow, svc, principal)`: revoke session `LOGOUT` + refresh сессии. Повторный logout — 204/200 успех без ошибки.
-5. Тело запроса пустое. Предложение: **204 No Content**.
+4. `LogoutIn(ctx, uow, svc, principal)`: revoke session `LOGOUT` + refresh сессии. UserID и SessionID берутся из Principal в context (BearerAuth), не из тела и не из JWT claims в handler. Тело запроса не разбирается.
+5. Успех: **204 No Content**, без JSON. Application `Logout`: повторный вызов по той же сессии — Commit без ошибки. HTTP: если BearerAuth ещё видит живую сессию (два запроса успели пройти ValidateSession), handler тоже отдаёт 204. Если сессия уже revoked — ValidateSession → **401** `INVALID_TOKEN` (это не Logout All и не смена контракта application).
 
 Access после logout на любом protected маршруте: Parse OK (если JWT ещё не истёк) → ValidateSession → 401. Refresh старого opaque → `INVALID_TOKEN` или `TOKEN_REUSED` в зависимости от revoked vs used.
 
@@ -342,11 +342,13 @@ Client IP: `host` из `RemoteAddr` (`net.SplitHostPort`). `X-Forwarded-For` и 
 
 ### 3.26.5 — logout
 
-**Файлы:** handler logout + Mount `POST /api/v1/auth/logout` через Bearer.
+**Файлы:** `internal/auth/http/handler.go` (`postLogout`, Mount через `BearerAuth`), `internal/app/app.go` (parser + read `ValidateSession`), тесты `internal/auth/http/logout_test.go`. PostgreSQL HTTP — 3.26.6.
 
-**Тесты:** login → logout 204 → ValidateSession/второй Bearer 401; повторный logout 204; чужой Bearer 401.
+**Изменения:** `POST /api/v1/auth/logout` → Principal из BearerAuth → `LogoutIn`. 204 без тела. Нет/битый Bearer / revoked session → 401 + `WWW-Authenticate: Bearer`. Register/login/refresh не менялись. Без Auth runtime (пустой DSN) маршрут не монтируется (404).
 
-**Done:** четыре маршрута из скоупа закрыты.
+**Тесты (httptest, без `time.Sleep`, без PG):** 204 пустое тело; нет/битый Bearer 401; revoked 401; Logout получает UserID/SessionID Principal (тело игнорируется); повтор, пока ValidateSession пропускает — 204 как application; повтор после revoke — 401; чужая сессия того же user не отзывается; без parser/sessions — 404.
+
+**Done:** четыре маршрута скоупа 3.26 закрыты на HTTP. Интеграция PG — 3.26.6.
 
 ### 3.26.6 — интеграция PostgreSQL
 

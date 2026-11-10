@@ -339,6 +339,8 @@ func (p Principal) IsActiveCustomer() bool // Has(CUSTOMER) — для дене�
 
 Kind `too_many_requests` → HTTP 429: `apperror.KindTooManyRequests` (этап 3.26.1). Формат тела D-39 не меняется. Ответы 401 (когда появятся защищённые маршруты) несут `WWW-Authenticate: Bearer` без причины. HTTP Auth — [auth-http-integration-plan.md](auth-http-integration-plan.md).
 
+`POST /api/v1/auth/logout` (этап 3.26.5): Bearer, тело не используется, успех **204** без JSON. Только текущая сессия Principal. Application `Logout` на уже отозванной сессии — успех; повторный HTTP с тем же JWT после revoke — 401 `INVALID_TOKEN` (ValidateSession в BearerAuth). Logout All не входит в 3.26.
+
 `GET /livez` и `GET /readyz` без Bearer.
 
 ---
