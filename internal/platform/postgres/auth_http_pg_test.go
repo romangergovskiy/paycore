@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	httpPGJWTSecret = "paycore-http-pg-test-secret-32b"
+	httpPGJWTSecret = "paycore-http-pg-test-secret-32b!"
 	httpPGPassword  = "correct-horse-pg"
 	testAdminPath   = "/api/v1/__test/require-admin"
 )
