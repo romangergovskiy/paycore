@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/romangergovskiy/paycore/internal/auth/application"
 	"github.com/romangergovskiy/paycore/internal/auth/domain"
@@ -464,6 +465,18 @@ func isLockTimeout(err error) bool {
 	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "lock timeout") || strings.Contains(s, "55p03")
+}
+
+func isDeadlock(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) && pe.Code == "40P01" {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "deadlock detected")
 }
 
 func TestAuthAdminMembershipRaces(t *testing.T) {

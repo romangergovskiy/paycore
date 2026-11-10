@@ -200,6 +200,17 @@ SELECT t.id
  ORDER BY t.id
  FOR UPDATE OF t`
 
+const countTokensBySessionSQL = `
+SELECT count(*)::int
+  FROM auth.refresh_tokens
+ WHERE session_id = $1`
+
+const countTokensForUserSQL = `
+SELECT count(*)::int
+  FROM auth.refresh_tokens AS t
+  JOIN auth.sessions AS s ON s.id = t.session_id
+ WHERE s.user_id = $1`
+
 const grantRoleSQL = `
 INSERT INTO auth.user_roles (user_id, role_code, granted_by, granted_at)
 VALUES ($1, $2, $3, $4)`
@@ -388,16 +399,25 @@ func (s *AuthTokens) MarkUsed(ctx context.Context, id, replacedBy uuid.UUID, at 
 }
 
 // LockBySession is SELECT … FOR UPDATE ORDER BY id on the session's
-// refresh tokens. It does not Begin. Locks are held until the caller's Tx ends.
+// refresh tokens, repeated until the locked set equals every matching
+// row. A single SELECT uses a statement snapshot: a Refresh that waited
+// behind this lock can INSERT a new token and commit before this
+// statement finishes, and that row would be missed. Taking the session
+// row and then UPDATE-ing tokens would wait on that new row while
+// Refresh holds it and waits on the session (deadlock). After the set is
+// stable, Refresh cannot INSERT: it must GetForUpdate an existing token
+// first. Locks are held until the caller's Tx ends. Does not Begin.
 func (s *AuthTokens) LockBySession(ctx context.Context, sessionID uuid.UUID) error {
-	return lockTokenRows(ctx, s.q, lockTokensBySessionSQL, "tokens lock by session", sessionID)
+	return lockTokensUntilStable(ctx, s.q, lockTokensBySessionSQL, countTokensBySessionSQL, "tokens lock by session", sessionID)
 }
 
 // LockAllForUser is SELECT … FOR UPDATE OF refresh_tokens ORDER BY id
-// for every token of the user's sessions. The JOIN does not lock session
-// rows (FOR UPDATE OF t) so lock order stays tokens then sessions.
+// for every token of the user's sessions, repeated until the locked set
+// is complete (same phantom-insert reason as LockBySession). The JOIN
+// does not lock session rows (FOR UPDATE OF t) so lock order stays
+// tokens then sessions.
 func (s *AuthTokens) LockAllForUser(ctx context.Context, userID uuid.UUID) error {
-	return lockTokenRows(ctx, s.q, lockTokensForUserSQL, "tokens lock all for user", userID)
+	return lockTokensUntilStable(ctx, s.q, lockTokensForUserSQL, countTokensForUserSQL, "tokens lock all for user", userID)
 }
 
 func (s *AuthTokens) RevokeBySession(ctx context.Context, sessionID uuid.UUID, at time.Time) error {
@@ -533,22 +553,48 @@ func scanToken(row scanner, op string) (domain.RefreshToken, error) {
 	return tok, nil
 }
 
-func lockTokenRows(ctx context.Context, q execQueryer, sql, op string, arg any) error {
+func lockTokenRows(ctx context.Context, q execQueryer, sql, op string, arg any) (int, error) {
 	rows, err := q.Query(ctx, sql, arg)
 	if err != nil {
-		return mapAuthSQLError(op, err)
+		return 0, mapAuthSQLError(op, err)
 	}
 	defer rows.Close()
+	n := 0
 	for rows.Next() {
 		var id uuid.UUID
 		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("auth %s: scan: %w", op, err)
+			return 0, fmt.Errorf("auth %s: scan: %w", op, err)
 		}
+		n++
 	}
 	if err := rows.Err(); err != nil {
-		return mapAuthSQLError(op, err)
+		return 0, mapAuthSQLError(op, err)
 	}
-	return nil
+	return n, nil
+}
+
+// lockTokensUntilStable re-runs SELECT … FOR UPDATE until the number of
+// locked rows equals the live COUNT of matching tokens. Each FOR UPDATE
+// is a new READ COMMITTED snapshot, so a token inserted while the
+// previous statement waited is taken on the next pass. Stopping at the
+// first pass is what deadlocks with Refresh.
+func lockTokensUntilStable(ctx context.Context, q execQueryer, lockSQL, countSQL, op string, arg any) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, err := lockTokenRows(ctx, q, lockSQL, op, arg)
+		if err != nil {
+			return err
+		}
+		var total int
+		if err := q.QueryRow(ctx, countSQL, arg).Scan(&total); err != nil {
+			return mapAuthSQLError(op, err)
+		}
+		if n == total {
+			return nil
+		}
+	}
 }
 
 func mapAuthSQLError(op string, err error) error {

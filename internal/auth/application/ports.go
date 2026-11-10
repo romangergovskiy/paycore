@@ -46,11 +46,14 @@ type TokenStore interface {
 	MarkUsed(ctx context.Context, id, replacedBy uuid.UUID, at time.Time) error
 	// LockBySession is the application lock point for the session's
 	// refresh tokens, taken before updating the session row. The
-	// PostgreSQL adapter must SELECT … FOR UPDATE ORDER BY id (3.27.2).
+	// PostgreSQL adapter must SELECT … FOR UPDATE ORDER BY id and
+	// repeat until every matching row is locked, including rows a
+	// concurrent Refresh inserted after this Tx's first snapshot.
+	// One SELECT is not enough under READ COMMITTED.
 	LockBySession(ctx context.Context, sessionID uuid.UUID) error
 	// LockAllForUser is the application lock point for the user's
-	// refresh tokens, taken before updating session rows. The
-	// PostgreSQL adapter must SELECT … FOR UPDATE ORDER BY id (3.27.2).
+	// refresh tokens, taken before updating session rows. Same
+	// SELECT … FOR UPDATE ORDER BY id until the locked set is complete.
 	LockAllForUser(ctx context.Context, userID uuid.UUID) error
 	RevokeBySession(ctx context.Context, sessionID uuid.UUID, at time.Time) error
 	RevokeAllForUser(ctx context.Context, userID uuid.UUID, at time.Time) error
