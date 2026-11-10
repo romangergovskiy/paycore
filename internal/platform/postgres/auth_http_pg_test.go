@@ -62,6 +62,7 @@ func TestAuthHTTPPostgres(t *testing.T) {
 	t.Cleanup(func() { _ = app.Close(context.Background()) })
 
 	env := newAuthHTTPEnv(t, ctx, pool)
+	ledgerBefore := ledgerCounts(t, ctx, app)
 
 	t.Run("full lifecycle", func(t *testing.T) {
 		env.t = t
@@ -111,10 +112,6 @@ func TestAuthHTTPPostgres(t *testing.T) {
 		env.trackSecret(second.AccessToken, second.RefreshToken)
 		assertRefreshRotated(t, ctx, app, env.issuer, first.RefreshToken, second.RefreshToken)
 
-		old := env.do(http.MethodPost, "/api/v1/auth/refresh", refreshBody(first.RefreshToken), "", nextTestIP())
-		assertAuthError(t, old, http.StatusUnauthorized, domain.CodeTokenReused)
-		env.assertNoSecrets(old.Body.String())
-
 		out := env.do(http.MethodPost, "/api/v1/auth/logout", "", "Bearer "+second.AccessToken, nextTestIP())
 		if out.Code != http.StatusNoContent || out.Body.Len() != 0 {
 			t.Fatalf("logout = %d %q", out.Code, out.Body)
@@ -123,6 +120,10 @@ func TestAuthHTTPPostgres(t *testing.T) {
 
 		bearer := env.do(http.MethodGet, testAdminPath, "", "Bearer "+second.AccessToken, nextTestIP())
 		assertAuthError(t, bearer, http.StatusUnauthorized, domain.CodeInvalidToken)
+
+		old := env.do(http.MethodPost, "/api/v1/auth/refresh", refreshBody(first.RefreshToken), "", nextTestIP())
+		assertAuthError(t, old, http.StatusUnauthorized, domain.CodeTokenReused, domain.CodeInvalidToken)
+		env.assertNoSecrets(old.Body.String())
 
 		ended := env.do(http.MethodPost, "/api/v1/auth/refresh", refreshBody(second.RefreshToken), "", nextTestIP())
 		assertAuthError(t, ended, http.StatusUnauthorized, domain.CodeInvalidToken, domain.CodeTokenReused)
@@ -313,23 +314,36 @@ func TestAuthHTTPPostgres(t *testing.T) {
 
 	t.Run("auth http does not touch ledger", func(t *testing.T) {
 		env.t = t
-		var accounts, journals, balances, entries int
-		if err := app.QueryRow(ctx, `SELECT count(*) FROM ledger.ledger_accounts`).Scan(&accounts); err != nil {
-			t.Fatal(err)
+		got := ledgerCounts(t, ctx, app)
+		if got != ledgerBefore {
+			t.Fatalf("ledger changed: before=%+v after=%+v", ledgerBefore, got)
 		}
-		if err := app.QueryRow(ctx, `SELECT count(*) FROM ledger.journal_transactions`).Scan(&journals); err != nil {
-			t.Fatal(err)
-		}
-		if err := app.QueryRow(ctx, `SELECT count(*) FROM ledger.account_balances`).Scan(&balances); err != nil {
-			t.Fatal(err)
-		}
-		if err := app.QueryRow(ctx, `SELECT count(*) FROM ledger.ledger_entries`).Scan(&entries); err != nil {
-			t.Fatal(err)
-		}
-		if accounts != 0 || journals != 0 || balances != 0 || entries != 0 {
-			t.Fatalf("ledger rows accounts=%d journals=%d balances=%d entries=%d", accounts, journals, balances, entries)
+		if got.journals != 0 || got.entries != 0 || got.balances != 0 {
+			t.Fatalf("auth wrote journals/entries/balances: %+v", got)
 		}
 	})
+}
+
+type ledgerRowCounts struct {
+	accounts, journals, balances, entries int
+}
+
+func ledgerCounts(t *testing.T, ctx context.Context, conn *pgx.Conn) ledgerRowCounts {
+	t.Helper()
+	var c ledgerRowCounts
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM ledger.ledger_accounts`).Scan(&c.accounts); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM ledger.journal_transactions`).Scan(&c.journals); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM ledger.account_balances`).Scan(&c.balances); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM ledger.ledger_entries`).Scan(&c.entries); err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 type authHTTPEnv struct {
