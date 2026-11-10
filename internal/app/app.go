@@ -23,9 +23,10 @@ import (
 
 // authRuntime is the Identity/Auth composition root.
 type authRuntime struct {
-	uow  application.UnitOfWork
-	svc  application.Service // hasher, issuer, signer, clock; stores come from uow
-	read application.Service // Users/Sessions/Roles on the pool for ValidateSession
+	uow    application.UnitOfWork
+	svc    application.Service // hasher, issuer, signer, clock; stores come from uow
+	read   application.Service // Users/Sessions/Roles on the pool for ValidateSession
+	parser httpserver.AccessParser
 }
 
 func newAuthRuntime(pool *pgxpool.Pool, jwtSecret string) (*authRuntime, error) {
@@ -47,9 +48,10 @@ func newAuthRuntime(pool *pgxpool.Pool, jwtSecret string) (*authRuntime, error) 
 	read.Sessions = postgres.NewAuthSessions(pool)
 	read.Roles = postgres.NewAuthRoles(pool)
 	return &authRuntime{
-		uow:  postgres.NewAuthUoW(pool),
-		svc:  base,
-		read: read,
+		uow:    postgres.NewAuthUoW(pool),
+		svc:    base,
+		read:   read,
+		parser: signer,
 	}, nil
 }
 
@@ -97,7 +99,7 @@ func Run(ctx context.Context, environ []string, logOut io.Writer) error {
 		srv.SetReadyCheck(pool.Ping)
 	}
 	if auth != nil {
-		authhttp.Mount(srv, authhttp.New(auth.uow, auth.svc))
+		authhttp.Mount(srv, authhttp.New(auth.uow, auth.svc, auth.parser, auth.read))
 		log.Info("auth runtime ready")
 	}
 

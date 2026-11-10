@@ -118,6 +118,15 @@ func runServesWithoutDSN(t *testing.T, env string) {
 		t.Errorf("empty DSN must not mount auth: POST /register = %d", reg.StatusCode)
 	}
 
+	logout, err := http.Post("http://"+addr+"/api/v1/auth/logout", "application/json", strings.NewReader(``))
+	if err != nil {
+		t.Fatalf("POST /api/v1/auth/logout: %v", err)
+	}
+	logout.Body.Close()
+	if logout.StatusCode != http.StatusNotFound {
+		t.Errorf("empty DSN must not mount auth: POST /logout = %d", logout.StatusCode)
+	}
+
 	waitForLog(t, lines, "http request")
 
 	cancel()
@@ -164,7 +173,7 @@ func TestNewAuthRuntimeWiresSigner(t *testing.T) {
 	}
 	if rt == nil || rt.uow == nil || rt.svc.Hasher == nil || rt.svc.Issuer == nil ||
 		rt.svc.Access == nil || rt.svc.Clock == nil || rt.read.Users == nil ||
-		rt.read.Sessions == nil || rt.read.Roles == nil {
+		rt.read.Sessions == nil || rt.read.Roles == nil || rt.parser == nil {
 		t.Fatalf("incomplete runtime: %+v", rt)
 	}
 
