@@ -139,6 +139,43 @@ func TestRefreshIssuerError(t *testing.T) {
 	}
 }
 
+func TestRefreshRotateLocksTokensBeforeSession(t *testing.T) {
+	w := newWorld()
+	first := loginOnce(t, w)
+	w.calls = nil
+	if _, _, err := w.service().Refresh(context.Background(), RefreshCommand{
+		RefreshToken: first.RefreshToken, IP: "203.0.113.10",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lockAt, touchAt := w.callIndex("lock-tokens-session"), w.callIndex("touch-session")
+	if lockAt < 0 || touchAt < 0 || !(lockAt < touchAt) {
+		t.Fatalf("order %v", w.calls)
+	}
+}
+
+func TestRefreshReuseLocksTokensBeforeSession(t *testing.T) {
+	w := newWorld()
+	first := loginOnce(t, w)
+	svc := w.service()
+	if _, _, err := svc.Refresh(context.Background(), RefreshCommand{
+		RefreshToken: first.RefreshToken, IP: "203.0.113.10",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w.calls = nil
+	_, _, err := svc.Refresh(context.Background(), RefreshCommand{
+		RefreshToken: first.RefreshToken, IP: "203.0.113.10",
+	})
+	if !errors.Is(err, domain.ErrTokenReused) {
+		t.Fatalf("got %v", err)
+	}
+	lockAt, sessAt, tokAt := w.callIndex("lock-tokens-session"), w.callIndex("revoke-session"), w.callIndex("revoke-tokens-session")
+	if lockAt < 0 || sessAt < 0 || tokAt < 0 || !(lockAt < sessAt && sessAt < tokAt) {
+		t.Fatalf("order %v", w.calls)
+	}
+}
+
 func TestRefreshCanceled(t *testing.T) {
 	w := newWorld()
 	ctx, cancel := context.WithCancel(context.Background())

@@ -47,7 +47,9 @@ const (
 //	RevokeSession foreign / missing          Rollback (NOT_FOUND)
 //	Login last ACTIVE ADMIN at LockAfter     Commit (attempt + fail count; not LOCKED)
 //
-// GetForUpdate on a refresh hash must be SELECT … FOR UPDATE held until
-// the transaction ends so two concurrent Refresh calls cannot both observe
-// an unused token. Unit tests serialize the fake transaction; they do not
-// prove PostgreSQL isolation.
+// Refresh locks the session's tokens (LockBySession, ORDER BY id, until
+// the set is stable) then re-reads the presented hash with GetForUpdate.
+// Session Touch/Revoke comes after that. Reuse must not take the session
+// row while another Refresh holds a later token of the same session.
+// Unit tests serialize the fake transaction; they do not prove PostgreSQL
+// isolation.

@@ -470,7 +470,21 @@ func (s Service) Refresh(ctx context.Context, cmd RefreshCommand) (Credentials, 
 	if err != nil {
 		return zero, Rollback, err
 	}
-	tok, err := s.Tokens.GetForUpdate(ctx, hash)
+	// Lock every token of the session (id order) before the session row.
+	// GetForUpdate(hash) then session then RevokeBySession deadlocks with
+	// rotation (holds the live token, waits on the session) and with
+	// Logout LockBySession when UUID order disagrees with the held row.
+	tok, err := s.Tokens.GetByHash(ctx, hash)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return zero, Commit, domain.ErrInvalidToken
+		}
+		return zero, Rollback, err
+	}
+	if err := s.Tokens.LockBySession(ctx, tok.SessionID); err != nil {
+		return zero, Rollback, err
+	}
+	tok, err = s.Tokens.GetForUpdate(ctx, hash)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return zero, Commit, domain.ErrInvalidToken

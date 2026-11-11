@@ -400,13 +400,14 @@ func (s *AuthTokens) MarkUsed(ctx context.Context, id, replacedBy uuid.UUID, at 
 
 // LockBySession is SELECT … FOR UPDATE ORDER BY id on the session's
 // refresh tokens, repeated until the locked set equals every matching
-// row. A single SELECT uses a statement snapshot: a Refresh that waited
-// behind this lock can INSERT a new token and commit before this
+// row. A single SELECT uses a statement snapshot: a Refresh that already
+// locked this session can INSERT a replacement and commit before this
 // statement finishes, and that row would be missed. Taking the session
 // row and then UPDATE-ing tokens would wait on that new row while
-// Refresh holds it and waits on the session (deadlock). After the set is
-// stable, Refresh cannot INSERT: it must GetForUpdate an existing token
-// first. Locks are held until the caller's Tx ends. Does not Begin.
+// Refresh holds it and waits on the session (deadlock). Refresh itself
+// takes LockBySession before Touch or reuse-revoke. Concurrent Lock*
+// loops until COUNT sees the insert. Locks are held until the caller's
+// Tx ends. Does not Begin.
 func (s *AuthTokens) LockBySession(ctx context.Context, sessionID uuid.UUID) error {
 	return lockTokensUntilStable(ctx, s.q, lockTokensBySessionSQL, countTokensBySessionSQL, "tokens lock by session", sessionID)
 }

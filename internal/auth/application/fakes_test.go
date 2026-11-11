@@ -327,6 +327,9 @@ func (s *memSessions) Touch(ctx context.Context, id uuid.UUID, at time.Time) err
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if s.trace != nil {
+		s.trace("touch-session")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.byID[id]

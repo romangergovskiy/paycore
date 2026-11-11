@@ -43,9 +43,10 @@ type TokenStore interface {
 	Create(ctx context.Context, tok domain.RefreshToken) error
 	GetByHash(ctx context.Context, hash []byte) (domain.RefreshToken, error)
 	// GetForUpdate is SELECT … FOR UPDATE on token_hash, held until the
-	// transaction ends. Two concurrent Refresh calls must not both see an
-	// unused token. Unit tests serialize a fake transaction; they are not
-	// a PostgreSQL isolation proof.
+	// transaction ends. Refresh re-reads with this after LockBySession so
+	// two concurrent callers cannot both observe an unused token. Unit
+	// tests serialize a fake transaction; they are not a PostgreSQL
+	// isolation proof.
 	GetForUpdate(ctx context.Context, hash []byte) (domain.RefreshToken, error)
 	MarkUsed(ctx context.Context, id, replacedBy uuid.UUID, at time.Time) error
 	// LockBySession is the application lock point for the session's

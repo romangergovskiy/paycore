@@ -688,14 +688,39 @@ func runRefreshInsertRevoke(t *testing.T, ctx context.Context, app, connB, connC
 	}
 
 	cDone := make(chan error, 1)
-	go func() {
-		_, err := application.RefreshIn(ctx, cUoW, pgAuthService(clock), application.RefreshCommand{
-			RefreshToken: aRes.cred.RefreshToken, IP: nextTestIP(),
-		})
-		cDone <- err
-	}()
-
 	if opts.onePass {
+		// Production Refresh now LockBySession first, so it waits on B's
+		// old tokens instead of holding only the new row. Keep proving
+		// one-pass B (session then UPDATE tokens) deadlocks with a holder
+		// of the inserted token heading for the session.
+		newHash, err := pgAuthService(clock).Issuer.Hash(aRes.cred.RefreshToken)
+		if err != nil {
+			bErr = <-bDone
+			return aErr, bErr, err
+		}
+		go func() {
+			tx, err := beginAuthTx(ctx, connC)
+			if err != nil {
+				cDone <- err
+				return
+			}
+			// Signal only after Rollback so the next subtest can reuse
+			// connC (*pgx.Conn is not concurrent-safe).
+			var opErr error
+			defer func() {
+				_ = tx.Rollback(ctx)
+				cDone <- opErr
+			}()
+			if _, err := NewAuthTokens(tx).GetForUpdate(ctx, newHash); err != nil {
+				opErr = err
+				return
+			}
+			if err := cBeforeTouch.hold(ctx); err != nil {
+				opErr = err
+				return
+			}
+			_, opErr = tx.Exec(ctx, `SELECT id FROM auth.sessions WHERE id = $1 FOR UPDATE`, cred.SessionID)
+		}()
 		if err := cBeforeTouch.waitArrived(ctx); err != nil {
 			bErr = <-bDone
 			cErr = <-cDone
@@ -708,6 +733,13 @@ func runRefreshInsertRevoke(t *testing.T, ctx context.Context, app, connB, connC
 		cErr = <-cDone
 		return aErr, bErr, cErr
 	}
+
+	go func() {
+		_, err := application.RefreshIn(ctx, cUoW, pgAuthService(clock), application.RefreshCommand{
+			RefreshToken: aRes.cred.RefreshToken, IP: nextTestIP(),
+		})
+		cDone <- err
+	}()
 
 	waitBackendLockWait(t, ctx, app, cName)
 	bAfterLock.release()
