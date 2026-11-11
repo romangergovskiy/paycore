@@ -220,6 +220,18 @@ func (s Service) Login(ctx context.Context, cmd LoginCommand) (Credentials, Deci
 		dec, err := s.rejectInactive(ctx, email, cmd.IP, fresh, now)
 		return zero, dec, err
 	}
+	// ChangePassword can replace the PHC while this Login waited on
+	// GetForUpdate after verifying the old hash. Status is re-read above
+	// (Lock/Disable); the hash must be too. Do not call loginRejected:
+	// that takes the ADMIN advisory while this Tx already holds the user
+	// row. Attempt is persisted; fail count is not bumped (this was not
+	// a guess at the current password).
+	if fresh.PasswordHash != encoded {
+		if err := s.noteAttempt(ctx, email, &fresh.ID, cmd.IP, false, domain.FailureInvalidCredentials, now); err != nil {
+			return zero, Rollback, err
+		}
+		return zero, Commit, domain.ErrInvalidCredentials
+	}
 
 	fresh.FailedLoginCount = 0
 	fresh.LockedAt = nil

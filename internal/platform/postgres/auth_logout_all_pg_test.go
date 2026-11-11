@@ -171,6 +171,161 @@ func TestAuthLoginVsLogoutAll(t *testing.T) {
 	})
 }
 
+func TestAuthLoginVsChangePassword(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	c := startCluster(t)
+	if err := Bootstrap(ctx, c.admin, c.owner, c.app, c.readonly); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if err := Up(ctx, c.owner); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+
+	app := mustConnect(t, ctx, c.app)
+	defer app.Close(ctx)
+	connB := mustConnect(t, ctx, c.app)
+	defer connB.Close(ctx)
+	connC := mustConnect(t, ctx, c.app)
+	defer connC.Close(ctx)
+
+	clock := &pgClock{t: time.Date(2026, 11, 11, 16, 0, 0, 0, time.UTC)}
+	svc := pgAuthService(clock)
+	uow := NewAuthUoW(app)
+
+	t.Run("A ChangePassword first then Login with old password fails", func(t *testing.T) {
+		email := pgEmail(t, "pw-a")
+		if _, err := application.RegisterIn(ctx, uow, svc, pgRegister(email)); err != nil {
+			t.Fatal(err)
+		}
+		first, err := application.LoginIn(ctx, uow, svc, pgLogin(email))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		pwHold := newPark()
+		defer pwHold.release()
+		pwUoW := hookAuthUoW{db: connB, wrapUsers: func(base application.UserStore) application.UserStore {
+			return hookUsers{UserStore: base, afterGetForUpdate: pwHold.hold}
+		}}
+		const loginName = "paycore-login-pw-a"
+		setAppName(t, ctx, connC, loginName)
+
+		pwDone := make(chan error, 1)
+		go func() {
+			pwDone <- application.ChangePasswordIn(ctx, pwUoW, pgAuthService(clock), application.ChangePasswordCommand{
+				Actor:       domain.Principal{UserID: first.User.ID, SessionID: first.SessionID, Roles: first.User.Roles},
+				OldPassword: "twelvechars!",
+				NewPassword: "newpassword!!",
+			})
+		}()
+		if err := pwHold.waitArrived(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		type credErr struct {
+			cred application.Credentials
+			err  error
+		}
+		loginDone := make(chan credErr, 1)
+		go func() {
+			out, err := application.LoginIn(ctx, NewAuthUoW(connC), pgAuthService(clock), pgLogin(email))
+			loginDone <- credErr{out, err}
+		}()
+		waitBackendLockWait(t, ctx, app, loginName)
+
+		pwHold.release()
+		pwErr := <-pwDone
+		loginRes := <-loginDone
+		if pwErr != nil {
+			t.Fatalf("change-password: %v", pwErr)
+		}
+		if !errors.Is(loginRes.err, domain.ErrInvalidCredentials) {
+			t.Fatalf("login after password change: %v", loginRes.err)
+		}
+		if loginRes.cred.SessionID != uuid.Nil || loginRes.cred.AccessToken != "" {
+			t.Fatalf("session issued: %+v", loginRes.cred)
+		}
+		assertUserFullyRevoked(t, ctx, app, first.User.ID)
+		if mustUserHash(t, ctx, app, first.User.ID) == fakeLoginHash(t, "twelvechars!") {
+			t.Fatal("PHC unchanged")
+		}
+		cmd := pgLogin(email)
+		cmd.Password = "newpassword!!"
+		if _, err := application.LoginIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatalf("new password: %v", err)
+		}
+	})
+
+	t.Run("B Login first then ChangePassword revokes the new session", func(t *testing.T) {
+		email := pgEmail(t, "pw-b")
+		if _, err := application.RegisterIn(ctx, uow, svc, pgRegister(email)); err != nil {
+			t.Fatal(err)
+		}
+		first, err := application.LoginIn(ctx, uow, svc, pgLogin(email))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		loginHold := newPark()
+		defer loginHold.release()
+		loginUoW := hookAuthUoW{db: connB, wrapUsers: func(base application.UserStore) application.UserStore {
+			return hookUsers{UserStore: base, afterGetForUpdate: loginHold.hold}
+		}}
+		const pwName = "paycore-pw-b"
+		setAppName(t, ctx, connC, pwName)
+
+		type credErr struct {
+			cred application.Credentials
+			err  error
+		}
+		loginDone := make(chan credErr, 1)
+		go func() {
+			out, err := application.LoginIn(ctx, loginUoW, pgAuthService(clock), pgLogin(email))
+			loginDone <- credErr{out, err}
+		}()
+		if err := loginHold.waitArrived(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		pwDone := make(chan error, 1)
+		go func() {
+			pwDone <- application.ChangePasswordIn(ctx, NewAuthUoW(connC), pgAuthService(clock), application.ChangePasswordCommand{
+				Actor:       domain.Principal{UserID: first.User.ID, SessionID: first.SessionID, Roles: first.User.Roles},
+				OldPassword: "twelvechars!",
+				NewPassword: "newpassword!!",
+			})
+		}()
+		waitBackendLockWait(t, ctx, app, pwName)
+
+		loginHold.release()
+		loginRes := <-loginDone
+		pwErr := <-pwDone
+		if loginRes.err != nil {
+			t.Fatalf("login: %v", loginRes.err)
+		}
+		if pwErr != nil {
+			t.Fatalf("change-password: %v", pwErr)
+		}
+		assertUserFullyRevoked(t, ctx, app, first.User.ID)
+		for _, sid := range []uuid.UUID{first.SessionID, loginRes.cred.SessionID} {
+			sess, err := NewAuthSessions(app).Get(ctx, sid)
+			if err != nil || sess.Live() || sess.RevokeReason != domain.RevokePasswordChanged {
+				t.Fatalf("session %s %+v %v", sid, sess, err)
+			}
+		}
+	})
+}
+
+func fakeLoginHash(t *testing.T, password string) string {
+	t.Helper()
+	h, err := pgHasher{}.Hash(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
 func TestAuthLogoutAllConcurrency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
