@@ -99,7 +99,7 @@ func Run(ctx context.Context, environ []string, logOut io.Writer) error {
 		srv.SetReadyCheck(pool.Ping)
 	}
 	if auth != nil {
-		authhttp.Mount(srv, authhttp.New(auth.uow, auth.svc, auth.parser, auth.read))
+		authhttp.Mount(srv, authhttp.Compose(auth.uow, postgres.LogoutRefreshRetry(auth.uow), auth.svc, auth.parser, auth.read))
 		log.Info("auth runtime ready")
 	}
 
