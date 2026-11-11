@@ -252,6 +252,10 @@ func (panicBeginner) Begin(context.Context) (pgx.Tx, error) {
 	panic("Begin must not run for a nil callback")
 }
 
+func (panicBeginner) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+	panic("BeginTx must not run for a nil callback")
+}
+
 func TestAuthUoWBeginCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -269,6 +273,27 @@ type errBeginner struct{ err error }
 
 func (b errBeginner) Begin(context.Context) (pgx.Tx, error) {
 	return nil, b.err
+}
+
+func (b errBeginner) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+	return nil, b.err
+}
+
+type beginOnly struct{}
+
+func (beginOnly) Begin(context.Context) (pgx.Tx, error) {
+	return nil, errors.New("Begin must not be used")
+}
+
+func TestAuthUoWRequiresBeginTx(t *testing.T) {
+	uow := NewAuthUoW(beginOnly{})
+	err := uow.Do(context.Background(), func(context.Context, application.Deps) (application.Decision, error) {
+		t.Fatal("callback ran")
+		return application.Commit, nil
+	})
+	if err == nil || err.Error() != "auth tx begin: BeginTx is required" {
+		t.Fatalf("got %v", err)
+	}
 }
 
 func TestAuthUoWCleanupDeadline(t *testing.T) {

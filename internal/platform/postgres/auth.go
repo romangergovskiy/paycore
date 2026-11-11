@@ -574,10 +574,10 @@ func lockTokenRows(ctx context.Context, q execQueryer, sql, op string, arg any) 
 }
 
 // lockTokensUntilStable re-runs SELECT … FOR UPDATE until the number of
-// locked rows equals the live COUNT of matching tokens. Each FOR UPDATE
-// is a new READ COMMITTED snapshot, so a token inserted while the
-// previous statement waited is taken on the next pass. Stopping at the
-// first pass is what deadlocks with Refresh.
+// locked rows equals the live COUNT of matching tokens. Each statement
+// is a new READ COMMITTED snapshot (Auth UoW BeginTx), so a token
+// inserted while the previous statement waited is taken on the next
+// pass. Stopping at the first pass is what deadlocks with Refresh.
 func lockTokensUntilStable(ctx context.Context, q execQueryer, lockSQL, countSQL, op string, arg any) error {
 	for {
 		if err := ctx.Err(); err != nil {

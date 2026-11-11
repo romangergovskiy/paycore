@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -652,9 +651,9 @@ func (u gatedAuthUoW) Do(ctx context.Context, fn func(context.Context, applicati
 	if fn == nil {
 		return errors.New("auth: unit of work callback is required")
 	}
-	tx, err := u.db.Begin(ctx)
+	tx, err := beginAuthTx(ctx, u.db)
 	if err != nil {
-		return fmt.Errorf("auth tx begin: %w", err)
+		return err
 	}
 	return runAuthTx(ctx, tx, func() (application.Decision, error) {
 		d := authDeps(tx)

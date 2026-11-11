@@ -139,6 +139,114 @@ func TestAuthRefreshInsertVsBulkRevoke(t *testing.T) {
 		}
 	})
 
+	t.Run("stable LockBySession sees insert on next statement", func(t *testing.T) {
+		email := pgEmail(t, "see")
+		if _, err := application.RegisterIn(ctx, uow, svc, pgRegister(email)); err != nil {
+			t.Fatal(err)
+		}
+		cred, err := application.LoginIn(ctx, uow, svc, pgLogin(email))
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldHash, err := svc.Issuer.Hash(cred.RefreshToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := connB.Exec(ctx, `SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ`); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			_, _ = connB.Exec(ctx, `SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED`)
+		}()
+		var sessionIso string
+		if err := connB.QueryRow(ctx, `SHOW transaction_isolation`).Scan(&sessionIso); err != nil {
+			t.Fatal(err)
+		}
+		if sessionIso != "repeatable read" {
+			t.Fatalf("session isolation %q", sessionIso)
+		}
+
+		held, err := app.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldTok, err := NewAuthTokens(held).GetForUpdate(ctx, oldHash)
+		if err != nil {
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+
+		const waiterName = "paycore-stable-lock"
+		setAppName(t, ctx, connB, waiterName)
+		waiter, err := beginAuthTx(ctx, connB)
+		if err != nil {
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		var txIso string
+		if err := waiter.QueryRow(ctx, `SHOW transaction_isolation`).Scan(&txIso); err != nil {
+			_ = waiter.Rollback(ctx)
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if txIso != "read committed" {
+			_ = waiter.Rollback(ctx)
+			_ = held.Rollback(ctx)
+			t.Fatalf("auth tx isolation %q", txIso)
+		}
+
+		lockErr := make(chan error, 1)
+		go func() {
+			lockErr <- lockTokensUntilStable(ctx, waiter, lockTokensBySessionSQL, countTokensBySessionSQL, "tokens lock by session", cred.SessionID)
+		}()
+		waitBackendLockWait(t, ctx, app, waiterName)
+
+		newID := mustNewID(t)
+		newHash := sha256.Sum256([]byte("stable-" + newID.String()))
+		if err := NewAuthTokens(held).Create(ctx, domain.RefreshToken{
+			ID: newID, SessionID: cred.SessionID, Hash: newHash[:],
+			ExpiresAt: clock.t.Add(domain.RefreshTTL), CreatedAt: clock.t,
+		}); err != nil {
+			_ = waiter.Rollback(ctx)
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if err := NewAuthTokens(held).MarkUsed(ctx, oldTok.ID, newID, clock.t); err != nil {
+			_ = waiter.Rollback(ctx)
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if err := held.Commit(ctx); err != nil {
+			_ = waiter.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if err := <-lockErr; err != nil {
+			_ = waiter.Rollback(ctx)
+			t.Fatalf("stable lock: %v", err)
+		}
+
+		probe, err := connD.Begin(ctx)
+		if err != nil {
+			_ = waiter.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if _, err := probe.Exec(ctx, `SET LOCAL lock_timeout = '5s'`); err != nil {
+			_ = probe.Rollback(ctx)
+			_ = waiter.Rollback(ctx)
+			t.Fatal(err)
+		}
+		_, err = NewAuthTokens(probe).GetForUpdate(ctx, newHash[:])
+		_ = probe.Rollback(ctx)
+		if !isLockTimeout(err) {
+			_ = waiter.Rollback(ctx)
+			t.Fatalf("new token must be held after COUNT saw the insert: %v", err)
+		}
+		if err := waiter.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("one-pass lock then session deadlocks Refresh of inserted token", func(t *testing.T) {
 		aErr, bErr, cErr := runRefreshInsertRevoke(t, ctx, app, connB, connC, clock, phantomOpts{
 			onePass: true,
@@ -414,6 +522,52 @@ func TestAuthRefreshVsRevokeRegression(t *testing.T) {
 	}
 }
 
+// TestAuthUoWReadCommitted proves Do begins READ COMMITTED even when the
+// session default is REPEATABLE READ. Isolation comes from BeginTx, not
+// SET TRANSACTION after the first statement and not the role default.
+func TestAuthUoWReadCommitted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	c := startCluster(t)
+	if err := Bootstrap(ctx, c.admin, c.owner, c.app, c.readonly); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if err := Up(ctx, c.owner); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+
+	app := mustConnect(t, ctx, c.app)
+	defer app.Close(ctx)
+	if _, err := app.Exec(ctx, `SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ`); err != nil {
+		t.Fatal(err)
+	}
+	var sessionIso string
+	if err := app.QueryRow(ctx, `SHOW transaction_isolation`).Scan(&sessionIso); err != nil {
+		t.Fatal(err)
+	}
+	if sessionIso != "repeatable read" {
+		t.Fatalf("session isolation %q", sessionIso)
+	}
+
+	var got string
+	err := NewAuthUoW(app).Do(ctx, func(ctx context.Context, d application.Deps) (application.Decision, error) {
+		u, ok := d.Users.(*AuthUsers)
+		if !ok {
+			return application.Rollback, errors.New("expected *AuthUsers")
+		}
+		if err := u.q.QueryRow(ctx, `SHOW transaction_isolation`).Scan(&got); err != nil {
+			return application.Rollback, err
+		}
+		return application.Rollback, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "read committed" {
+		t.Fatalf("auth UoW isolation %q", got)
+	}
+}
+
 type phantomOpts struct {
 	onePass bool
 	revoke  func(ctx context.Context, uow application.UnitOfWork, svc application.Service, cred application.Credentials) error
@@ -615,7 +769,7 @@ func (u hookAuthUoW) Do(ctx context.Context, fn func(context.Context, applicatio
 	if fn == nil {
 		return errors.New("auth: unit of work callback is required")
 	}
-	tx, err := u.db.Begin(ctx)
+	tx, err := beginAuthTx(ctx, u.db)
 	if err != nil {
 		return err
 	}
