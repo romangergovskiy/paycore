@@ -35,13 +35,21 @@ const (
 //	Grant/Revoke success                     Commit
 //	Grant/Revoke FORBIDDEN/NOT_FOUND/INVALID Rollback
 //	Grant/Revoke store/ctx error             Rollback
-//	Lock/Unlock/Disable success / idempotent Commit
+//	Lock/Unlock/Disable/Enable success / idempotent Commit
 //	Lock/Disable last ACTIVE ADMIN           Rollback
-//	Lock/Unlock/Disable FORBIDDEN/NOT_FOUND  Rollback
-//	Unlock DISABLED (invalid transition)     Rollback
+//	Lock/Unlock/Disable/Enable FORBIDDEN/NOT_FOUND Rollback
+//	Unlock DISABLED / Enable LOCKED          Rollback
+//	LogoutAll success / repeat               Commit
+//	ChangePassword success                   Commit
+//	ChangePassword INVALID_CREDENTIALS (old) Rollback
+//	ChangePassword INVALID_REQUEST           Rollback
+//	RevokeSession success / already revoked  Commit
+//	RevokeSession foreign / missing          Rollback (NOT_FOUND)
 //	Login last ACTIVE ADMIN at LockAfter     Commit (attempt + fail count; not LOCKED)
 //
-// GetForUpdate on a refresh hash must be SELECT … FOR UPDATE held until
-// the transaction ends so two concurrent Refresh calls cannot both observe
-// an unused token. Unit tests serialize the fake transaction; they do not
-// prove PostgreSQL isolation.
+// Refresh locks the session's tokens (LockBySession, ORDER BY id, until
+// the set is stable) then re-reads the presented hash with GetForUpdate.
+// Session Touch/Revoke comes after that. Reuse must not take the session
+// row while another Refresh holds a later token of the same session.
+// Unit tests serialize the fake transaction; they do not prove PostgreSQL
+// isolation.

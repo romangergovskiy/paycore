@@ -76,6 +76,59 @@ func lockStoredUser(t *testing.T, w *world, email string, status domain.Status, 
 	}
 }
 
+func TestLoginPasswordChangedAfterVerifyNoSession(t *testing.T) {
+	w := newWorld()
+	if _, _, err := w.service().Register(context.Background(), registerCmd("a@b.c")); err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := w.service().Login(context.Background(), loginCmd("a@b.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, _ := serviceWithUserHook(w, func() {
+		u, err := w.users.GetByEmail(context.Background(), "a@b.c")
+		if err != nil {
+			t.Fatal(err)
+		}
+		u.PasswordHash = fakePHC("newpassword!!")
+		u.UpdatedAt = w.clock.t
+		if err := w.users.Update(context.Background(), u); err != nil {
+			t.Fatal(err)
+		}
+		now := w.clock.t
+		if err := w.sessions.RevokeAllForUser(context.Background(), u.ID, domain.RevokePasswordChanged, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.tokens.RevokeAllForUser(context.Background(), u.ID, now); err != nil {
+			t.Fatal(err)
+		}
+	})
+	cred, dec, err := svc.Login(context.Background(), loginCmd("a@b.c"))
+	if !errors.Is(err, domain.ErrInvalidCredentials) {
+		t.Fatalf("got %v", err)
+	}
+	if dec != Commit {
+		t.Fatalf("decision %v", dec)
+	}
+	if cred.AccessToken != "" || cred.RefreshToken != "" || cred.SessionID != uuid.Nil {
+		t.Fatalf("session issued: %+v", cred)
+	}
+	u, _ := w.users.GetByEmail(context.Background(), "a@b.c")
+	if u.PasswordHash != fakePHC("newpassword!!") {
+		t.Fatalf("PHC overwritten: %q", u.PasswordHash)
+	}
+	if u.FailedLoginCount != 0 {
+		t.Fatalf("fail count %d", u.FailedLoginCount)
+	}
+	sess, _ := w.sessions.Get(context.Background(), first.SessionID)
+	if sess.Live() {
+		t.Fatal("old session still live")
+	}
+	if len(w.sessions.byID) != 1 {
+		t.Fatalf("sessions %d", len(w.sessions.byID))
+	}
+}
+
 func TestLogin1PasswordOkThenLockedNoSession(t *testing.T) {
 	w := newWorld()
 	if _, _, err := w.service().Register(context.Background(), registerCmd("a@b.c")); err != nil {
@@ -288,8 +341,8 @@ func TestLogin6TenthFailureLocksFromRow(t *testing.T) {
 	if lastAttempt(t, w).FailureReason != domain.FailureLocked {
 		t.Fatalf("reason %s", lastAttempt(t, w).FailureReason)
 	}
-	if hooks.getForUpdateN != 1 {
-		t.Fatalf("GetForUpdate %d want 1", hooks.getForUpdateN)
+	if hooks.getForUpdateN != 2 {
+		t.Fatalf("GetForUpdate %d want 2", hooks.getForUpdateN)
 	}
 }
 

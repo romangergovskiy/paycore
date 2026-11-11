@@ -71,6 +71,18 @@ func TestUoWNil(t *testing.T) {
 	if err := DisableUserIn(context.Background(), nil, w.service(), cmd); !errors.Is(err, errNotWired) {
 		t.Fatalf("disable: %v", err)
 	}
+	if err := LogoutAllIn(context.Background(), nil, w.service(), domain.Principal{}); !errors.Is(err, errNotWired) {
+		t.Fatalf("logout-all: %v", err)
+	}
+	if err := ChangePasswordIn(context.Background(), nil, w.service(), ChangePasswordCommand{}); !errors.Is(err, errNotWired) {
+		t.Fatalf("password: %v", err)
+	}
+	if err := RevokeSessionIn(context.Background(), nil, w.service(), RevokeSessionCommand{}); !errors.Is(err, errNotWired) {
+		t.Fatalf("revoke-session: %v", err)
+	}
+	if err := EnableUserIn(context.Background(), nil, w.service(), cmd); !errors.Is(err, errNotWired) {
+		t.Fatalf("enable: %v", err)
+	}
 }
 
 func TestUoWCanceledBeforeDo(t *testing.T) {
@@ -121,5 +133,12 @@ func TestLockUnlockDisableIn(t *testing.T) {
 	}
 	if !uow.committed || uow.rolled {
 		t.Fatalf("commit=%v rollback=%v", uow.committed, uow.rolled)
+	}
+	if err := EnableUserIn(context.Background(), uow, svc, statusCmd(adminPrincipal(a1), a2.ID)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = w.users.Get(context.Background(), a2.ID)
+	if got.Status != domain.StatusActive {
+		t.Fatalf("enabled %+v", got)
 	}
 }

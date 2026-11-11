@@ -43,9 +43,22 @@ type Credentials struct {
 
 const tokenTypeBearer = "Bearer"
 
-// StatusCommand is LockUser / UnlockUser / DisableUser.
+// StatusCommand is LockUser / UnlockUser / DisableUser / EnableUser.
 type StatusCommand struct {
 	Actor  domain.Principal
 	UserID uuid.UUID
 	Reason string
+}
+
+// ChangePasswordCommand is POST /auth/password. It does not issue tokens.
+type ChangePasswordCommand struct {
+	Actor       domain.Principal
+	OldPassword string
+	NewPassword string
+}
+
+// RevokeSessionCommand is POST /auth/sessions/{id}/revoke.
+type RevokeSessionCommand struct {
+	Actor     domain.Principal
+	SessionID uuid.UUID
 }

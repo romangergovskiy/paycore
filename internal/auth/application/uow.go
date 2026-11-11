@@ -143,3 +143,39 @@ func DisableUserIn(ctx context.Context, uow UnitOfWork, s Service, cmd StatusCom
 		return s.withDeps(d).DisableUser(ctx, cmd)
 	})
 }
+
+func LogoutAllIn(ctx context.Context, uow UnitOfWork, s Service, p domain.Principal) error {
+	if uow == nil {
+		return errNotWired
+	}
+	return uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+		return s.withDeps(d).LogoutAll(ctx, p)
+	})
+}
+
+func ChangePasswordIn(ctx context.Context, uow UnitOfWork, s Service, cmd ChangePasswordCommand) error {
+	if uow == nil {
+		return errNotWired
+	}
+	return uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+		return s.withDeps(d).ChangePassword(ctx, cmd)
+	})
+}
+
+func RevokeSessionIn(ctx context.Context, uow UnitOfWork, s Service, cmd RevokeSessionCommand) error {
+	if uow == nil {
+		return errNotWired
+	}
+	return uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+		return s.withDeps(d).RevokeSession(ctx, cmd)
+	})
+}
+
+func EnableUserIn(ctx context.Context, uow UnitOfWork, s Service, cmd StatusCommand) error {
+	if uow == nil {
+		return errNotWired
+	}
+	return uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+		return s.withDeps(d).EnableUser(ctx, cmd)
+	})
+}
