@@ -21,6 +21,17 @@ func (s Service) revokeSessionAfterTokenLock(ctx context.Context, sessionID uuid
 }
 
 func (s Service) revokeUserAfterTokenLock(ctx context.Context, userID uuid.UUID, reason domain.RevokeReason, at time.Time) error {
+	if s.Users == nil {
+		return errNotWired
+	}
+	// User row first so a concurrent Login cannot INSERT a session after
+	// LockAllForUser's token set looks stable. Same Tx; order is user →
+	// tokens → sessions. A second GetForUpdate of a row already held is a
+	// no-op. Login that waited behind this lock runs after Commit and may
+	// create a new session (logout-all then login, not a leak).
+	if _, err := s.Users.GetForUpdate(ctx, userID); err != nil {
+		return err
+	}
 	if err := s.Tokens.LockAllForUser(ctx, userID); err != nil {
 		return err
 	}
@@ -64,12 +75,16 @@ func (s Service) CurrentUser(ctx context.Context, p domain.Principal) (domain.Pu
 }
 
 // LogoutAll revokes every live session of the actor with LOGOUT_ALL.
-// A repeat is a no-op Commit, like Logout.
+// A repeat is a no-op Commit, like Logout. The user row is locked in
+// the same Tx before tokens so a Login that already holds GetForUpdate
+// can insert, then this waits and still revokes that session. A Login
+// that waits behind this lock runs after Commit and may create a new
+// session.
 func (s Service) LogoutAll(ctx context.Context, p domain.Principal) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Rollback, err
 	}
-	if s.Sessions == nil || s.Tokens == nil || s.Clock == nil {
+	if s.Users == nil || s.Sessions == nil || s.Tokens == nil || s.Clock == nil {
 		return Rollback, errNotWired
 	}
 	if p.UserID == uuid.Nil || p.SessionID == uuid.Nil {

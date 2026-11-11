@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/romangergovskiy/paycore/internal/auth/application"
 )
 
@@ -17,19 +19,45 @@ type authUoW struct {
 // Commit vs rollback is an explicit match on application.Decision, not
 // err == nil and not error text or codes. An unknown Decision rolls back
 // with errUnknownAuthDecision. Accounts finishTx must not be reused.
+//
+// Isolation is READ COMMITTED at BEGIN (pgx BeginTx options), not SET
+// TRANSACTION after the first statement, not Open() RuntimeParams, and
+// not the paycore_app role default. Lock* stabilization needs a new
+// snapshot per statement so COUNT sees a Refresh insert that the
+// previous FOR UPDATE missed.
 func NewAuthUoW(db beginner) application.UnitOfWork {
 	return authUoW{db: db}
 }
 
 var _ application.UnitOfWork = authUoW{}
 
+// authTxOptions is BEGIN ISOLATION LEVEL read committed. Empty Begin()
+// would inherit the session (REPEATABLE READ if the client set it).
+var authTxOptions = pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
+
+type authTxBeginner interface {
+	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
+}
+
+func beginAuthTx(ctx context.Context, db beginner) (pgx.Tx, error) {
+	b, ok := db.(authTxBeginner)
+	if !ok {
+		return nil, errors.New("auth tx begin: BeginTx is required")
+	}
+	tx, err := b.BeginTx(ctx, authTxOptions)
+	if err != nil {
+		return nil, fmt.Errorf("auth tx begin: %w", err)
+	}
+	return tx, nil
+}
+
 func (u authUoW) Do(ctx context.Context, fn func(context.Context, application.Deps) (application.Decision, error)) error {
 	if fn == nil {
 		return errors.New("auth: unit of work callback is required")
 	}
-	tx, err := u.db.Begin(ctx)
+	tx, err := beginAuthTx(ctx, u.db)
 	if err != nil {
-		return fmt.Errorf("auth tx begin: %w", err)
+		return err
 	}
 	return runAuthTx(ctx, tx, func() (application.Decision, error) {
 		return fn(ctx, authDeps(tx))

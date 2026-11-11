@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -641,8 +640,9 @@ func assertRefreshRotated(t *testing.T, ctx context.Context, conn *pgx.Conn, iss
 }
 
 // gatedAuthUoW is a test-only seam: the same Begin / Decision finish as
-// NewAuthUoW, with TokenStore.GetForUpdate wrapped so a two-party barrier
-// can sit immediately before SELECT … FOR UPDATE. Production UoW is unchanged.
+// NewAuthUoW, with TokenStore.LockBySession wrapped so a two-party barrier
+// can sit immediately before SELECT … FOR UPDATE of the session's tokens.
+// Production UoW is unchanged.
 type gatedAuthUoW struct {
 	db   beginner
 	gate *refreshLockGate
@@ -652,9 +652,9 @@ func (u gatedAuthUoW) Do(ctx context.Context, fn func(context.Context, applicati
 	if fn == nil {
 		return errors.New("auth: unit of work callback is required")
 	}
-	tx, err := u.db.Begin(ctx)
+	tx, err := beginAuthTx(ctx, u.db)
 	if err != nil {
-		return fmt.Errorf("auth tx begin: %w", err)
+		return err
 	}
 	return runAuthTx(ctx, tx, func() (application.Decision, error) {
 		d := authDeps(tx)
@@ -668,15 +668,15 @@ type gatedTokenStore struct {
 	gate *refreshLockGate
 }
 
-func (g gatedTokenStore) GetForUpdate(ctx context.Context, hash []byte) (domain.RefreshToken, error) {
+func (g gatedTokenStore) LockBySession(ctx context.Context, sessionID uuid.UUID) error {
 	if err := g.gate.beforeLock(ctx); err != nil {
-		return domain.RefreshToken{}, err
+		return err
 	}
-	return g.TokenStore.GetForUpdate(ctx, hash)
+	return g.TokenStore.LockBySession(ctx, sessionID)
 }
 
 // refreshLockGate rendezvous both Refresh callers immediately before
-// GetForUpdate. Armed only for the concurrent HTTP subtest. release()
+// LockBySession. Armed only for the concurrent HTTP subtest. release()
 // unblocks waiters on error, timeout, or test cleanup.
 type refreshLockGate struct {
 	armed    atomic.Bool

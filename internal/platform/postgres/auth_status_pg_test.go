@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/romangergovskiy/paycore/internal/auth/application"
 	"github.com/romangergovskiy/paycore/internal/auth/domain"
@@ -466,6 +467,18 @@ func isLockTimeout(err error) bool {
 	return strings.Contains(s, "lock timeout") || strings.Contains(s, "55p03")
 }
 
+func isDeadlock(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) && pe.Code == "40P01" {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "deadlock detected")
+}
+
 func TestAuthAdminMembershipRaces(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -483,9 +496,12 @@ func TestAuthAdminMembershipRaces(t *testing.T) {
 	defer connB.Close(ctx)
 	connC := mustConnect(t, ctx, c.app)
 	defer connC.Close(ctx)
+	connD := mustConnect(t, ctx, c.app)
+	defer connD.Close(ctx)
 
 	clock := &pgClock{t: time.Date(2026, 11, 8, 5, 0, 0, 0, time.UTC)}
 	svc := pgAuthService(clock)
+	uow := NewAuthUoW(app)
 
 	t.Run("A grant ADMIN and LockUser serialize", func(t *testing.T) {
 		clearActiveAdmins(t, ctx, app, clock)
@@ -737,6 +753,244 @@ func TestAuthAdminMembershipRaces(t *testing.T) {
 		if err := application.GrantRoleIn(ctx, NewAuthUoW(connC), pgAuthService(clock), adminPrincipal(actor), cust.ID, domain.RoleAdmin); err != nil {
 			t.Fatalf("after release: %v", err)
 		}
+	})
+
+	t.Run("EnableUser history only DISABLED to ACTIVE", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		admin := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "en-a"))
+		cust, err := application.RegisterIn(ctx, uow, svc, pgRegister(pgEmail(t, "en-c")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := pgStatus(adminPrincipal(admin), cust.ID)
+		if err := application.EnableUserIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		if n := countStatusHistory(t, ctx, app, cust.ID); n != 0 {
+			t.Fatalf("ACTIVE no-op history = %d", n)
+		}
+		if err := application.LockUserIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		beforeLock := countStatusHistory(t, ctx, app, cust.ID)
+		if err := application.EnableUserIn(ctx, uow, svc, cmd); !errors.Is(err, domain.ErrInvalidRequest) {
+			t.Fatalf("enable LOCKED: %v", err)
+		}
+		if n := countStatusHistory(t, ctx, app, cust.ID); n != beforeLock {
+			t.Fatalf("LOCKED enable history %d -> %d", beforeLock, n)
+		}
+		got, err := NewAuthUsers(app).Get(ctx, cust.ID)
+		if err != nil || got.Status != domain.StatusLocked {
+			t.Fatalf("still locked %+v %v", got, err)
+		}
+		if err := application.UnlockUserIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		if err := application.DisableUserIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		assertLatestHistory(t, ctx, app, cust.ID, admin.ID, domain.StatusActive, domain.StatusDisabled, "policy")
+		beforeEnable := countStatusHistory(t, ctx, app, cust.ID)
+		if err := application.UnlockUserIn(ctx, uow, svc, cmd); !errors.Is(err, domain.ErrInvalidRequest) {
+			t.Fatalf("unlock DISABLED: %v", err)
+		}
+		if n := countStatusHistory(t, ctx, app, cust.ID); n != beforeEnable {
+			t.Fatalf("unlock DISABLED history %d -> %d", beforeEnable, n)
+		}
+		if err := application.EnableUserIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		if n := countStatusHistory(t, ctx, app, cust.ID); n != beforeEnable+1 {
+			t.Fatalf("enable history %d want %d", n, beforeEnable+1)
+		}
+		assertLatestHistory(t, ctx, app, cust.ID, admin.ID, domain.StatusDisabled, domain.StatusActive, "policy")
+		got, err = NewAuthUsers(app).Get(ctx, cust.ID)
+		if err != nil || got.Status != domain.StatusActive || got.LockedAt != nil || got.FailedLoginCount != 0 {
+			t.Fatalf("enabled %+v %v", got, err)
+		}
+		if err := application.EnableUserIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		if n := countStatusHistory(t, ctx, app, cust.ID); n != beforeEnable+1 {
+			t.Fatalf("second enable history %d", n)
+		}
+	})
+
+	t.Run("EnableUser last-ADMIN disable still has no history", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		admin := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "en-last"))
+		before := countStatusHistory(t, ctx, app, admin.ID)
+		if err := application.DisableUserIn(ctx, uow, svc, pgStatus(adminPrincipal(admin), admin.ID)); !errors.Is(err, domain.ErrLastAdmin) {
+			t.Fatalf("last disable: %v", err)
+		}
+		if n := countStatusHistory(t, ctx, app, admin.ID); n != before {
+			t.Fatalf("ErrLastAdmin history %d -> %d", before, n)
+		}
+	})
+
+	t.Run("EnableUser rollback discards history", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		admin := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "en-rb-a"))
+		cust, err := application.RegisterIn(ctx, uow, svc, pgRegister(pgEmail(t, "en-rb-c")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := pgStatus(adminPrincipal(admin), cust.ID)
+		if err := application.DisableUserIn(ctx, uow, svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		before := countStatusHistory(t, ctx, app, cust.ID)
+		err = uow.Do(ctx, func(ctx context.Context, d application.Deps) (application.Decision, error) {
+			s := pgAuthService(clock)
+			s.Users, s.Sessions, s.Tokens, s.Roles = d.Users, d.Sessions, d.Tokens, d.Roles
+			s.Attempts, s.Limiter, s.History = d.Attempts, d.Limiter, d.History
+			dec, err := s.EnableUser(ctx, cmd)
+			if err != nil {
+				return dec, err
+			}
+			return application.Rollback, errors.New("forced")
+		})
+		if err == nil || err.Error() != "forced" {
+			t.Fatalf("got %v", err)
+		}
+		got, err := NewAuthUsers(app).Get(ctx, cust.ID)
+		if err != nil || got.Status != domain.StatusDisabled {
+			t.Fatalf("partial enable %+v %v", got, err)
+		}
+		if n := countStatusHistory(t, ctx, app, cust.ID); n != before {
+			t.Fatalf("history after rollback %d want %d", n, before)
+		}
+	})
+
+	t.Run("EnableUser waits on advisory even for CUSTOMER", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		actor := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "en-w-a"))
+		cust, err := application.RegisterIn(ctx, NewAuthUoW(app), svc, pgRegister(pgEmail(t, "en-w-b")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := pgStatus(adminPrincipal(actor), cust.ID)
+		if err := application.DisableUserIn(ctx, NewAuthUoW(app), svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		held, err := app.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := NewAuthRoles(held).LockAdminRoleMutations(ctx); err != nil {
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if _, err := connC.Exec(ctx, `SET lock_timeout = '5s'`); err != nil {
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		err = application.EnableUserIn(ctx, NewAuthUoW(connC), pgAuthService(clock), cmd)
+		if err == nil {
+			_ = held.Rollback(ctx)
+			t.Fatal("EnableUser skipped advisory")
+		}
+		if !isLockTimeout(err) {
+			_ = held.Rollback(ctx)
+			t.Fatalf("want lock timeout, got %v", err)
+		}
+		if err := held.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connC.Exec(ctx, `SET lock_timeout = '0'`); err != nil {
+			t.Fatal(err)
+		}
+		if err := application.EnableUserIn(ctx, NewAuthUoW(connC), pgAuthService(clock), cmd); err != nil {
+			t.Fatalf("after release: %v", err)
+		}
+		got, err := NewAuthUsers(app).Get(ctx, cust.ID)
+		if err != nil || got.Status != domain.StatusActive {
+			t.Fatalf("enabled %+v %v", got, err)
+		}
+	})
+
+	t.Run("EnableUser takes advisory before user FOR UPDATE", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		actor := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "en-ord-a"))
+		cust, err := application.RegisterIn(ctx, NewAuthUoW(app), svc, pgRegister(pgEmail(t, "en-ord-b")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := pgStatus(adminPrincipal(actor), cust.ID)
+		if err := application.DisableUserIn(ctx, NewAuthUoW(app), svc, cmd); err != nil {
+			t.Fatal(err)
+		}
+		held, err := app.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewAuthUsers(held).GetForUpdate(ctx, cust.ID); err != nil {
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		const waiterName = "paycore-enable-order"
+		setAppName(t, ctx, connC, waiterName)
+		enableErr := make(chan error, 1)
+		go func() {
+			enableErr <- application.EnableUserIn(ctx, NewAuthUoW(connC), pgAuthService(clock), cmd)
+		}()
+		waitBackendLockWait(t, ctx, app, waiterName)
+		probe, err := connB.Begin(ctx)
+		if err != nil {
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if tryAdminAdvisoryLock(t, ctx, probe) {
+			_ = probe.Rollback(ctx)
+			_ = held.Rollback(ctx)
+			t.Fatal("EnableUser waited on user without holding ADMIN advisory")
+		}
+		if err := probe.Rollback(ctx); err != nil {
+			_ = held.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if err := held.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-enableErr; err != nil {
+			t.Fatalf("enable after user release: %v", err)
+		}
+	})
+
+	t.Run("Unlock Grant Lock Disable Enable wait on one advisory", func(t *testing.T) {
+		clearActiveAdmins(t, ctx, app, clock)
+		actor := seedPGAdmin(t, ctx, app, clock, pgEmail(t, "mix-a"))
+		cust, err := application.RegisterIn(ctx, NewAuthUoW(app), svc, pgRegister(pgEmail(t, "mix-b")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		held := beginAdminAdvisory(t, ctx, app)
+		errs := make([]error, 3)
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			errs[0] = application.GrantRoleIn(ctx, NewAuthUoW(connB), pgAuthService(clock), adminPrincipal(actor), cust.ID, domain.RoleAdmin)
+		}()
+		go func() {
+			defer wg.Done()
+			errs[1] = application.LockUserIn(ctx, NewAuthUoW(connC), pgAuthService(clock), pgStatus(adminPrincipal(actor), cust.ID))
+		}()
+		go func() {
+			defer wg.Done()
+			errs[2] = application.EnableUserIn(ctx, NewAuthUoW(connD), pgAuthService(clock), pgStatus(adminPrincipal(actor), cust.ID))
+		}()
+		waitAdvisoryWaiters(t, ctx, held, 3)
+		if err := held.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil && !errors.Is(err, domain.ErrInvalidRequest) && !errors.Is(err, domain.ErrLastAdmin) {
+				t.Fatalf("op %d: %v (all %v)", i, err, errs)
+			}
+		}
+		assertAdvisoryReleased(t, ctx, app)
 	})
 
 	t.Run("advisory released after membership commit", func(t *testing.T) {

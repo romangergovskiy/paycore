@@ -220,6 +220,18 @@ func (s Service) Login(ctx context.Context, cmd LoginCommand) (Credentials, Deci
 		dec, err := s.rejectInactive(ctx, email, cmd.IP, fresh, now)
 		return zero, dec, err
 	}
+	// ChangePassword can replace the PHC while this Login waited on
+	// GetForUpdate after verifying the old hash. Status is re-read above
+	// (Lock/Disable); the hash must be too. Do not call loginRejected:
+	// that takes the ADMIN advisory while this Tx already holds the user
+	// row. Attempt is persisted; fail count is not bumped (this was not
+	// a guess at the current password).
+	if fresh.PasswordHash != encoded {
+		if err := s.noteAttempt(ctx, email, &fresh.ID, cmd.IP, false, domain.FailureInvalidCredentials, now); err != nil {
+			return zero, Rollback, err
+		}
+		return zero, Commit, domain.ErrInvalidCredentials
+	}
 
 	fresh.FailedLoginCount = 0
 	fresh.LockedAt = nil
@@ -348,10 +360,7 @@ func (s Service) applyActiveFailure(ctx context.Context, u domain.User, now time
 			if err := s.Users.Update(ctx, u); err != nil {
 				return u, err
 			}
-			if err := s.Sessions.RevokeAllForUser(ctx, u.ID, domain.RevokeUserLocked, now); err != nil {
-				return u, err
-			}
-			if err := s.Tokens.RevokeAllForUser(ctx, u.ID, now); err != nil {
+			if err := s.revokeUserAfterTokenLock(ctx, u.ID, domain.RevokeUserLocked, now); err != nil {
 				return u, err
 			}
 			return u, nil
@@ -461,7 +470,21 @@ func (s Service) Refresh(ctx context.Context, cmd RefreshCommand) (Credentials, 
 	if err != nil {
 		return zero, Rollback, err
 	}
-	tok, err := s.Tokens.GetForUpdate(ctx, hash)
+	// Lock every token of the session (id order) before the session row.
+	// GetForUpdate(hash) then session then RevokeBySession deadlocks with
+	// rotation (holds the live token, waits on the session) and with
+	// Logout LockBySession when UUID order disagrees with the held row.
+	tok, err := s.Tokens.GetByHash(ctx, hash)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return zero, Commit, domain.ErrInvalidToken
+		}
+		return zero, Rollback, err
+	}
+	if err := s.Tokens.LockBySession(ctx, tok.SessionID); err != nil {
+		return zero, Rollback, err
+	}
+	tok, err = s.Tokens.GetForUpdate(ctx, hash)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return zero, Commit, domain.ErrInvalidToken

@@ -144,6 +144,15 @@ UPDATE auth.sessions
    SET last_seen_at = $2
  WHERE id = $1`
 
+const listSessionsByUserSQL = `
+SELECT id, user_id, COALESCE(user_agent, ''),
+       CASE WHEN ip IS NULL THEN '' ELSE host(ip) END,
+       created_at, last_seen_at, revoked_at, COALESCE(revoke_reason, '')
+  FROM auth.sessions
+ WHERE user_id = $1
+   AND (NOT $2 OR revoked_at IS NULL)
+ ORDER BY created_at DESC, id DESC`
+
 const selectTokenSQL = `
 SELECT id, session_id, token_hash, replaced_by, expires_at, used_at, revoked_at, created_at
   FROM auth.refresh_tokens
@@ -175,6 +184,32 @@ UPDATE auth.refresh_tokens AS t
  WHERE t.session_id = s.id
    AND s.user_id = $1
    AND t.revoked_at IS NULL`
+
+const lockTokensBySessionSQL = `
+SELECT id
+  FROM auth.refresh_tokens
+ WHERE session_id = $1
+ ORDER BY id
+ FOR UPDATE`
+
+const lockTokensForUserSQL = `
+SELECT t.id
+  FROM auth.refresh_tokens AS t
+  JOIN auth.sessions AS s ON s.id = t.session_id
+ WHERE s.user_id = $1
+ ORDER BY t.id
+ FOR UPDATE OF t`
+
+const countTokensBySessionSQL = `
+SELECT count(*)::int
+  FROM auth.refresh_tokens
+ WHERE session_id = $1`
+
+const countTokensForUserSQL = `
+SELECT count(*)::int
+  FROM auth.refresh_tokens AS t
+  JOIN auth.sessions AS s ON s.id = t.session_id
+ WHERE s.user_id = $1`
 
 const grantRoleSQL = `
 INSERT INTO auth.user_roles (user_id, role_code, granted_by, granted_at)
@@ -302,14 +337,27 @@ func (s *AuthSessions) RevokeAllForUser(ctx context.Context, userID uuid.UUID, r
 	return mapAuthSQLError("sessions revoke all", err)
 }
 
-// ListByUser is a 3.27.1 compile stub so SessionStore still assigns.
-// It does not query. SQL is 3.27.2. This branch must not merge to main
-// until the real SELECT exists.
+// ListByUser returns the user's sessions. liveOnly uses the partial live
+// index (revoked_at IS NULL). There is no pagination. Rows are ordered
+// created_at DESC, id DESC. The SELECT has no password or token hashes.
 func (s *AuthSessions) ListByUser(ctx context.Context, userID uuid.UUID, liveOnly bool) ([]domain.Session, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	rows, err := s.q.Query(ctx, listSessionsByUserSQL, userID, liveOnly)
+	if err != nil {
+		return nil, mapAuthSQLError("sessions list by user", err)
 	}
-	return nil, fmt.Errorf("auth sessions list by user: not implemented")
+	defer rows.Close()
+	out := make([]domain.Session, 0)
+	for rows.Next() {
+		sess, err := scanSession(rows, "sessions list by user")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapAuthSQLError("sessions list by user", err)
+	}
+	return out, nil
 }
 
 func (s *AuthSessions) Touch(ctx context.Context, id uuid.UUID, at time.Time) error {
@@ -350,18 +398,27 @@ func (s *AuthTokens) MarkUsed(ctx context.Context, id, replacedBy uuid.UUID, at 
 	return nil
 }
 
-// LockBySession is a 3.27.1 compile stub. It does not lock rows and is
-// not SELECT … FOR UPDATE. Real token locks are 3.27.2. This branch
-// must not merge to main until those locks exist.
+// LockBySession is SELECT … FOR UPDATE ORDER BY id on the session's
+// refresh tokens, repeated until the locked set equals every matching
+// row. A single SELECT uses a statement snapshot: a Refresh that already
+// locked this session can INSERT a replacement and commit before this
+// statement finishes, and that row would be missed. Taking the session
+// row and then UPDATE-ing tokens would wait on that new row while
+// Refresh holds it and waits on the session (deadlock). Refresh itself
+// takes LockBySession before Touch or reuse-revoke. Concurrent Lock*
+// loops until COUNT sees the insert. Locks are held until the caller's
+// Tx ends. Does not Begin.
 func (s *AuthTokens) LockBySession(ctx context.Context, sessionID uuid.UUID) error {
-	return ctx.Err()
+	return lockTokensUntilStable(ctx, s.q, lockTokensBySessionSQL, countTokensBySessionSQL, "tokens lock by session", sessionID)
 }
 
-// LockAllForUser is a 3.27.1 compile stub. It does not lock rows and is
-// not SELECT … FOR UPDATE. Real token locks are 3.27.2. This branch
-// must not merge to main until those locks exist.
+// LockAllForUser is SELECT … FOR UPDATE OF refresh_tokens ORDER BY id
+// for every token of the user's sessions, repeated until the locked set
+// is complete (same phantom-insert reason as LockBySession). The JOIN
+// does not lock session rows (FOR UPDATE OF t) so lock order stays
+// tokens then sessions.
 func (s *AuthTokens) LockAllForUser(ctx context.Context, userID uuid.UUID) error {
-	return ctx.Err()
+	return lockTokensUntilStable(ctx, s.q, lockTokensForUserSQL, countTokensForUserSQL, "tokens lock all for user", userID)
 }
 
 func (s *AuthTokens) RevokeBySession(ctx context.Context, sessionID uuid.UUID, at time.Time) error {
@@ -495,6 +552,50 @@ func scanToken(row scanner, op string) (domain.RefreshToken, error) {
 	}
 	tok.Hash = copyBytes(tok.Hash)
 	return tok, nil
+}
+
+func lockTokenRows(ctx context.Context, q execQueryer, sql, op string, arg any) (int, error) {
+	rows, err := q.Query(ctx, sql, arg)
+	if err != nil {
+		return 0, mapAuthSQLError(op, err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return 0, fmt.Errorf("auth %s: scan: %w", op, err)
+		}
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, mapAuthSQLError(op, err)
+	}
+	return n, nil
+}
+
+// lockTokensUntilStable re-runs SELECT … FOR UPDATE until the number of
+// locked rows equals the live COUNT of matching tokens. Each statement
+// is a new READ COMMITTED snapshot (Auth UoW BeginTx), so a token
+// inserted while the previous statement waited is taken on the next
+// pass. Stopping at the first pass is what deadlocks with Refresh.
+func lockTokensUntilStable(ctx context.Context, q execQueryer, lockSQL, countSQL, op string, arg any) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, err := lockTokenRows(ctx, q, lockSQL, op, arg)
+		if err != nil {
+			return err
+		}
+		var total int
+		if err := q.QueryRow(ctx, countSQL, arg).Scan(&total); err != nil {
+			return mapAuthSQLError(op, err)
+		}
+		if n == total {
+			return nil
+		}
+	}
 }
 
 func mapAuthSQLError(op string, err error) error {

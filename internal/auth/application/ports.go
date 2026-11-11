@@ -17,6 +17,10 @@ type UserStore interface {
 	// GetForUpdate locks the user row until the transaction ends (FOR UPDATE).
 	// Login re-reads with this after password verify so a concurrent lockout
 	// is not overwritten by Update of a stale GetByEmail copy.
+	// Bulk session revoke (LogoutAll, ChangePassword, LockUser, DisableUser,
+	// login lockout) takes it in the same Tx before tokens so Login cannot
+	// insert a session after the token set is frozen. Order: user → tokens
+	// → sessions. Signature unchanged.
 	GetForUpdate(ctx context.Context, id uuid.UUID) (domain.User, error)
 	Update(ctx context.Context, u domain.User) error
 }
@@ -39,18 +43,22 @@ type TokenStore interface {
 	Create(ctx context.Context, tok domain.RefreshToken) error
 	GetByHash(ctx context.Context, hash []byte) (domain.RefreshToken, error)
 	// GetForUpdate is SELECT … FOR UPDATE on token_hash, held until the
-	// transaction ends. Two concurrent Refresh calls must not both see an
-	// unused token. Unit tests serialize a fake transaction; they are not
-	// a PostgreSQL isolation proof.
+	// transaction ends. Refresh re-reads with this after LockBySession so
+	// two concurrent callers cannot both observe an unused token. Unit
+	// tests serialize a fake transaction; they are not a PostgreSQL
+	// isolation proof.
 	GetForUpdate(ctx context.Context, hash []byte) (domain.RefreshToken, error)
 	MarkUsed(ctx context.Context, id, replacedBy uuid.UUID, at time.Time) error
 	// LockBySession is the application lock point for the session's
 	// refresh tokens, taken before updating the session row. The
-	// PostgreSQL adapter must SELECT … FOR UPDATE ORDER BY id (3.27.2).
+	// PostgreSQL adapter must SELECT … FOR UPDATE ORDER BY id and
+	// repeat until every matching row is locked, including rows a
+	// concurrent Refresh inserted after this Tx's first snapshot.
+	// One SELECT is not enough under READ COMMITTED.
 	LockBySession(ctx context.Context, sessionID uuid.UUID) error
 	// LockAllForUser is the application lock point for the user's
-	// refresh tokens, taken before updating session rows. The
-	// PostgreSQL adapter must SELECT … FOR UPDATE ORDER BY id (3.27.2).
+	// refresh tokens, taken before updating session rows. Same
+	// SELECT … FOR UPDATE ORDER BY id until the locked set is complete.
 	LockAllForUser(ctx context.Context, userID uuid.UUID) error
 	RevokeBySession(ctx context.Context, sessionID uuid.UUID, at time.Time) error
 	RevokeAllForUser(ctx context.Context, userID uuid.UUID, at time.Time) error
