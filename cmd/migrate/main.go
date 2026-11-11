@@ -1,9 +1,11 @@
-// Command migrate bootstraps roles and applies Goose SQL migrations.
+// Command migrate bootstraps roles, applies Goose SQL migrations, and
+// creates the first ACTIVE ADMIN.
 //
-//	migrate bootstrap   create roles and the database (superuser)
-//	migrate up          apply pending migrations (paycore_owner)
-//	migrate down        roll back one migration (paycore_owner)
-//	migrate status      print applied versions
+//	migrate bootstrap         create roles and the database (superuser)
+//	migrate bootstrap-admin   first ACTIVE ADMIN (paycore_app)
+//	migrate up                apply pending migrations (paycore_owner)
+//	migrate down              roll back one migration (paycore_owner)
+//	migrate status            print applied versions
 //
 // Exit codes: 0 success, 1 runtime error, 2 invalid configuration.
 package main
@@ -20,28 +22,44 @@ import (
 )
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	err := run(os.Args[1:], os.Environ())
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "paycore-migrate:", err)
-		if errors.Is(err, config.ErrInvalid) || errors.Is(err, errUsage) {
-			os.Exit(2)
-		}
-		os.Exit(1)
 	}
+	os.Exit(exitStatus(err))
 }
 
-var errUsage = errors.New("usage: migrate bootstrap|up|down|status")
+func exitStatus(err error) int {
+	if err == nil {
+		return 0
+	}
+	if errors.Is(err, config.ErrInvalid) || errors.Is(err, errUsage) {
+		return 2
+	}
+	return 1
+}
 
-func run(args []string) error {
+var errUsage = errors.New("usage: migrate bootstrap|bootstrap-admin|up|down|status")
+
+func run(args, environ []string) error {
 	if len(args) != 1 {
 		return errUsage
-	}
-	cfg, err := config.Load(os.Environ())
-	if err != nil {
-		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	switch args[0] {
+	case "bootstrap-admin":
+		return runBootstrapAdmin(ctx, environ)
+	case "bootstrap", "up", "down", "status":
+	default:
+		return errUsage
+	}
+
+	cfg, err := config.Load(withoutBootstrapAdminVars(environ))
+	if err != nil {
+		return err
+	}
 	switch args[0] {
 	case "bootstrap":
 		if cfg.Postgres.AdminDSN == "" || cfg.Postgres.MigrateDSN == "" ||
