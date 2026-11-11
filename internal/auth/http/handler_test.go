@@ -159,8 +159,16 @@ func TestRegisterSuccess(t *testing.T) {
 
 func TestNewWiresUseCases(t *testing.T) {
 	h := New(nil, application.Service{}, nil, nil)
-	if h.register == nil || h.login == nil || h.refresh == nil || h.logout == nil {
+	if h.register == nil || h.login == nil || h.refresh == nil || h.logout == nil ||
+		h.logoutAll == nil || h.changePassword == nil || h.revokeSession == nil {
 		t.Fatal("New left a use case unset")
+	}
+	if h.currentUser != nil || h.listSessions != nil {
+		t.Fatal("nil sessions must not wire CurrentUser/ListSessions")
+	}
+	wired := New(nil, application.Service{}, nil, application.Service{})
+	if wired.currentUser == nil || wired.listSessions == nil {
+		t.Fatal("read Service must wire CurrentUser/ListSessions")
 	}
 }
 
@@ -511,7 +519,14 @@ func TestNoSecretsInResponses(t *testing.T) {
 func TestLogoutAndMeNotMounted(t *testing.T) {
 	s := httpserver.New(config.HTTP{MaxBodyBytes: 1024}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	Mount(s, newTestHandler())
-	for _, path := range []string{"/api/v1/auth/logout", "/api/v1/auth/me", "/api/v1/admin/users"} {
+	for _, path := range []string{
+		"/api/v1/auth/logout",
+		"/api/v1/auth/me",
+		"/api/v1/auth/logout-all",
+		"/api/v1/auth/password",
+		"/api/v1/auth/sessions",
+		"/api/v1/admin/users",
+	} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		rec := httptest.NewRecorder()
 		s.Handler().ServeHTTP(rec, req)
