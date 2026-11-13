@@ -683,6 +683,9 @@ func TestAdminHTTPPostgres(t *testing.T) {
 		if strip.Code != http.StatusNoContent {
 			t.Fatalf("strip = %d %s", strip.Code, strip.Body)
 		}
+		if countActiveAdmins(t, ctx, conn) != 2 {
+			t.Fatalf("ACTIVE ADMIN = %d, want 2", countActiveAdmins(t, ctx, conn))
+		}
 
 		var ready, done sync.WaitGroup
 		start := make(chan struct{})
@@ -705,36 +708,68 @@ func TestAdminHTTPPostgres(t *testing.T) {
 		close(start)
 		done.Wait()
 
+		ok, fail := 0, 0
 		for i, rec := range out {
-			if rec.Code != http.StatusNoContent && rec.Code != http.StatusBadRequest && rec.Code != http.StatusForbidden {
-				t.Fatalf("op %d = %d %s", i, rec.Code, rec.Body)
+			switch rec.Code {
+			case http.StatusNoContent:
+				ok++
+			case http.StatusBadRequest:
+				fail++
+				assertAuthError(t, rec, http.StatusBadRequest, domain.CodeInvalidRequest)
+			case http.StatusForbidden:
+				fail++
+			default:
+				t.Fatalf("race %d = %d %s", i, rec.Code, rec.Body)
 			}
 		}
-		if countActiveAdmins(t, ctx, conn) < 1 {
-			t.Fatal("disable/revoke race dropped last ACTIVE ADMIN")
+		if ok != 1 || fail != 1 {
+			t.Fatalf("disable/revoke race success=%d fail=%d", ok, fail)
 		}
 
-		var restorer string
-		var restorerID, other uuid.UUID
-		if env.userStatus(a.ID) == domain.StatusActive && containsRole(env.userRoles(a.ID), domain.RoleAdmin) {
-			restorer, restorerID, other = aTok, a.ID, b.ID
-		} else {
-			restorer, restorerID, other = bTok, b.ID, a.ID
+		sa, sb := env.userStatus(a.ID), env.userStatus(b.ID)
+		aAdmin := containsRole(env.userRoles(a.ID), domain.RoleAdmin)
+		bAdmin := containsRole(env.userRoles(b.ID), domain.RoleAdmin)
+		n := countActiveAdmins(t, ctx, conn)
+		if n != 1 {
+			t.Fatalf("ACTIVE ADMIN = %d, want 1", n)
 		}
-		restore := env.do(http.MethodPost, "/api/v1/admin/users/"+adminID.String()+"/roles", `{"role":"ADMIN"}`, "Bearer "+restorer, nextTestIP())
+
+		survivorTok := aTok
+		survivorID, otherID := a.ID, b.ID
+		switch {
+		case out[0].Code == http.StatusNoContent:
+			if sb != domain.StatusDisabled || sa != domain.StatusActive {
+				t.Fatalf("disable winner: a=%s b=%s", sa, sb)
+			}
+			if !aAdmin || !bAdmin {
+				t.Fatalf("disable must not strip ADMIN: a=%v b=%v", aAdmin, bAdmin)
+			}
+		case out[1].Code == http.StatusNoContent:
+			if sa != domain.StatusActive || sb != domain.StatusActive {
+				t.Fatalf("revoke winner mutated status a=%s b=%s", sa, sb)
+			}
+			if aAdmin || !bAdmin {
+				t.Fatalf("revoke winner: aAdmin=%v bAdmin=%v", aAdmin, bAdmin)
+			}
+			survivorTok, survivorID, otherID = bTok, b.ID, a.ID
+		default:
+			t.Fatal("neither disable nor revoke succeeded")
+		}
+
+		restore := env.do(http.MethodPost, "/api/v1/admin/users/"+adminID.String()+"/roles", `{"role":"ADMIN"}`, "Bearer "+survivorTok, nextTestIP())
 		if restore.Code != http.StatusNoContent {
 			t.Fatalf("restore = %d %s", restore.Code, restore.Body)
 		}
-		if env.userStatus(other) == domain.StatusDisabled {
-			en := env.do(http.MethodPost, "/api/v1/admin/users/"+other.String()+"/enable", adminHTTPReason, adminAuth, nextTestIP())
+		if env.userStatus(otherID) == domain.StatusDisabled {
+			en := env.do(http.MethodPost, "/api/v1/admin/users/"+otherID.String()+"/enable", adminHTTPReason, adminAuth, nextTestIP())
 			if en.Code != http.StatusNoContent {
 				t.Fatalf("enable other = %d %s", en.Code, en.Body)
 			}
 		}
-		if containsRole(env.userRoles(other), domain.RoleAdmin) {
-			env.mustRevokeRole(adminAuth, other, domain.RoleAdmin)
+		if containsRole(env.userRoles(otherID), domain.RoleAdmin) {
+			env.mustRevokeRole(adminAuth, otherID, domain.RoleAdmin)
 		}
-		env.mustRevokeRole(adminAuth, restorerID, domain.RoleAdmin)
+		env.mustRevokeRole(adminAuth, survivorID, domain.RoleAdmin)
 		if countActiveAdmins(t, ctx, conn) != 1 {
 			t.Fatalf("cleanup ACTIVE ADMIN = %d", countActiveAdmins(t, ctx, conn))
 		}
