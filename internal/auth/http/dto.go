@@ -1,10 +1,14 @@
 package authhttp
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/romangergovskiy/paycore/internal/auth/application"
 	"github.com/romangergovskiy/paycore/internal/auth/domain"
 )
 
@@ -27,6 +31,32 @@ type refreshRequest struct {
 type passwordRequest struct {
 	OldPassword string `json:"old_password"`
 	NewPassword string `json:"new_password"`
+}
+
+type reasonRequest struct {
+	Reason string `json:"reason"`
+}
+
+type roleRequest struct {
+	Role domain.Role `json:"role"`
+}
+
+type userCursorJSON struct {
+	CreatedAt string `json:"created_at"`
+	ID        string `json:"id"`
+}
+
+type adminUserDTO struct {
+	ID        uuid.UUID     `json:"id"`
+	Email     string        `json:"email"`
+	Status    domain.Status `json:"status"`
+	Roles     []domain.Role `json:"roles"`
+	CreatedAt time.Time     `json:"created_at"`
+}
+
+type adminUsersResponse struct {
+	Users      []adminUserDTO `json:"users"`
+	NextCursor string         `json:"next_cursor,omitempty"`
 }
 
 type userDTO struct {
@@ -105,4 +135,58 @@ func sessionDTOs(in []domain.Session, current uuid.UUID) []sessionDTO {
 		})
 	}
 	return out
+}
+
+func adminUserDTOs(in []domain.PublicUser) []adminUserDTO {
+	out := make([]adminUserDTO, 0, len(in))
+	for _, u := range in {
+		roles := u.Roles
+		if roles == nil {
+			roles = []domain.Role{}
+		}
+		out = append(out, adminUserDTO{
+			ID:        u.ID,
+			Email:     u.Email,
+			Status:    u.Status,
+			Roles:     roles,
+			CreatedAt: u.CreatedAt,
+		})
+	}
+	return out
+}
+
+func encodeUserCursor(c application.UserCursor) (string, error) {
+	payload, err := json.Marshal(userCursorJSON{
+		CreatedAt: c.CreatedAt.UTC().Format(time.RFC3339Nano),
+		ID:        c.ID.String(),
+	})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(payload), nil
+}
+
+func decodeUserCursor(raw string) (*application.UserCursor, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, domain.ErrInvalidRequest
+	}
+	dec := json.NewDecoder(strings.NewReader(string(payload)))
+	dec.DisallowUnknownFields()
+	var body userCursorJSON
+	if err := dec.Decode(&body); err != nil {
+		return nil, domain.ErrInvalidRequest
+	}
+	created, err := time.Parse(time.RFC3339Nano, body.CreatedAt)
+	if err != nil {
+		return nil, domain.ErrInvalidRequest
+	}
+	id, err := uuid.Parse(body.ID)
+	if err != nil || id == uuid.Nil {
+		return nil, domain.ErrInvalidRequest
+	}
+	return &application.UserCursor{CreatedAt: created.UTC(), ID: id}, nil
 }

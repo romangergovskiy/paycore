@@ -113,6 +113,15 @@ UPDATE auth.users
        updated_at = $9
  WHERE id = $1`
 
+const listUsersSQL = `
+SELECT id, email, COALESCE(first_name, ''), COALESCE(last_name, ''),
+       status, created_at, updated_at
+  FROM auth.users
+ WHERE ($1::text IS NULL OR status = $1)
+   AND ($2::timestamptz IS NULL OR (created_at, id) > ($2::timestamptz, $3::uuid))
+ ORDER BY created_at ASC, id ASC
+ LIMIT $4`
+
 const selectSessionSQL = `
 SELECT id, user_id, COALESCE(user_agent, ''),
        CASE WHEN ip IS NULL THEN '' ELSE host(ip) END,
@@ -307,6 +316,59 @@ func (s *AuthUsers) Update(ctx context.Context, u domain.User) error {
 		return wrapAuth(pgx.ErrNoRows, domain.ErrNotFound, apperror.KindNotFound)
 	}
 	return nil
+}
+
+// List is the admin keyset. It does not Begin and does not SELECT
+// password_hash. Limit+1 is fetched so the use case can set Next.
+func (s *AuthUsers) List(ctx context.Context, q application.ListUsersQuery) ([]domain.User, error) {
+	if q.Limit < application.MinListUsersLimit || q.Limit > application.MaxListUsersLimit {
+		return nil, domain.ErrInvalidRequest
+	}
+	var (
+		status   any
+		cursorAt any
+		cursorID any
+	)
+	if q.Status != nil {
+		status = string(*q.Status)
+	}
+	if q.Cursor != nil {
+		cursorAt = q.Cursor.CreatedAt
+		cursorID = q.Cursor.ID
+	}
+	rows, err := s.q.Query(ctx, listUsersSQL, status, cursorAt, cursorID, q.Limit+1)
+	if err != nil {
+		return nil, mapAuthSQLError("users list", err)
+	}
+	defer rows.Close()
+	out := make([]domain.User, 0)
+	for rows.Next() {
+		u, err := scanListedUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapAuthSQLError("users list", err)
+	}
+	return out, nil
+}
+
+func scanListedUser(row scanner) (domain.User, error) {
+	var (
+		u      domain.User
+		status string
+	)
+	err := row.Scan(
+		&u.ID, &u.Email, &u.FirstName, &u.LastName,
+		&status, &u.CreatedAt, &u.UpdatedAt,
+	)
+	if err != nil {
+		return domain.User{}, mapAuthSQLError("users list", err)
+	}
+	u.Status = domain.Status(status)
+	return u, nil
 }
 
 func (s *AuthSessions) Create(ctx context.Context, sess domain.Session) error {

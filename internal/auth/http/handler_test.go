@@ -160,15 +160,17 @@ func TestRegisterSuccess(t *testing.T) {
 func TestNewWiresUseCases(t *testing.T) {
 	h := New(nil, application.Service{}, nil, nil)
 	if h.register == nil || h.login == nil || h.refresh == nil || h.logout == nil ||
-		h.logoutAll == nil || h.changePassword == nil || h.revokeSession == nil {
+		h.logoutAll == nil || h.changePassword == nil || h.revokeSession == nil ||
+		h.grantRole == nil || h.revokeRole == nil || h.lockUser == nil ||
+		h.unlockUser == nil || h.disableUser == nil || h.enableUser == nil {
 		t.Fatal("New left a use case unset")
 	}
-	if h.currentUser != nil || h.listSessions != nil {
-		t.Fatal("nil sessions must not wire CurrentUser/ListSessions")
+	if h.currentUser != nil || h.listSessions != nil || h.listUsers != nil {
+		t.Fatal("nil sessions must not wire CurrentUser/ListSessions/ListUsers")
 	}
 	wired := New(nil, application.Service{}, nil, application.Service{})
-	if wired.currentUser == nil || wired.listSessions == nil {
-		t.Fatal("read Service must wire CurrentUser/ListSessions")
+	if wired.currentUser == nil || wired.listSessions == nil || wired.listUsers == nil {
+		t.Fatal("read Service must wire CurrentUser/ListSessions/ListUsers")
 	}
 }
 

@@ -23,6 +23,12 @@ type UserStore interface {
 	// → sessions. Signature unchanged.
 	GetForUpdate(ctx context.Context, id uuid.UUID) (domain.User, error)
 	Update(ctx context.Context, u domain.User) error
+	// List is the admin keyset. It does not Begin. The SELECT must not
+	// include password_hash. Callers pass Limit 1…100; the adapter
+	// returns at most Limit+1 rows ordered (created_at, id) ASC so the
+	// use case can set Next. Cursor values are bound as $created_at
+	// and $id, never as a decoded SQL string.
+	List(ctx context.Context, q ListUsersQuery) ([]domain.User, error)
 }
 
 // SessionStore persists auth.sessions. The implementation must not Begin.

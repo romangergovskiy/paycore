@@ -216,6 +216,50 @@ func (s *memUsers) Update(ctx context.Context, u domain.User) error {
 	return nil
 }
 
+func (s *memUsers) List(ctx context.Context, q ListUsersQuery) ([]domain.User, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if q.Limit < MinListUsersLimit || q.Limit > MaxListUsersLimit {
+		return nil, domain.ErrInvalidRequest
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]domain.User, 0, len(s.byID))
+	for _, u := range s.byID {
+		if q.Status != nil && u.Status != *q.Status {
+			continue
+		}
+		if q.Cursor != nil {
+			if u.CreatedAt.Before(q.Cursor.CreatedAt) {
+				continue
+			}
+			if u.CreatedAt.Equal(q.Cursor.CreatedAt) && bytes.Compare(u.ID[:], q.Cursor.ID[:]) <= 0 {
+				continue
+			}
+		}
+		copyUser := u
+		copyUser.PasswordHash = ""
+		copyUser.FailedLoginCount = 0
+		copyUser.LockedAt = nil
+		out = append(out, copyUser)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Before(out[j].CreatedAt) {
+			return true
+		}
+		if out[j].CreatedAt.Before(out[i].CreatedAt) {
+			return false
+		}
+		return bytes.Compare(out[i].ID[:], out[j].ID[:]) < 0
+	})
+	n := q.Limit + 1
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out, nil
+}
+
 type memSessions struct {
 	mu    sync.Mutex
 	byID  map[uuid.UUID]domain.Session
