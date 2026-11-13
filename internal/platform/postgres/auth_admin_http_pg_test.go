@@ -625,11 +625,14 @@ func TestAdminHTTPPostgres(t *testing.T) {
 				assertAuthError(t, rec, http.StatusBadRequest, domain.CodeInvalidRequest)
 			case http.StatusForbidden:
 				fail++
+			case http.StatusUnauthorized:
+				fail++
+				assertAuthError(t, rec, http.StatusUnauthorized, domain.CodeInvalidToken)
 			default:
 				t.Fatalf("race %d = %d %s", i, rec.Code, rec.Body)
 			}
 		}
-		if ok < 1 || fail < 1 {
+		if ok != 1 || fail != 1 {
 			t.Fatalf("lock race success=%d fail=%d", ok, fail)
 		}
 		n := countActiveAdmins(t, ctx, conn)
@@ -718,6 +721,9 @@ func TestAdminHTTPPostgres(t *testing.T) {
 				assertAuthError(t, rec, http.StatusBadRequest, domain.CodeInvalidRequest)
 			case http.StatusForbidden:
 				fail++
+			case http.StatusUnauthorized:
+				fail++
+				assertAuthError(t, rec, http.StatusUnauthorized, domain.CodeInvalidToken)
 			default:
 				t.Fatalf("race %d = %d %s", i, rec.Code, rec.Body)
 			}
