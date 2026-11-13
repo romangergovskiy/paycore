@@ -155,3 +155,25 @@ func TestLoadJWTSecret(t *testing.T) {
 		t.Fatalf("unknown AUTH var: %v", err)
 	}
 }
+
+func TestLoadRejectsBootstrapAdminVars(t *testing.T) {
+	password := "twelvechars!"
+	_, err := Load(withJWTSecret(
+		"PAYCORE_BOOTSTRAP_ADMIN_EMAIL=a@b.c",
+		"PAYCORE_BOOTSTRAP_ADMIN_PASSWORD="+password,
+	))
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+	for _, name := range []string{
+		"PAYCORE_BOOTSTRAP_ADMIN_EMAIL: unknown variable",
+		"PAYCORE_BOOTSTRAP_ADMIN_PASSWORD: unknown variable",
+	} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error does not mention %s:\n%v", name, err)
+		}
+	}
+	if strings.Contains(err.Error(), password) {
+		t.Fatal("error leaked bootstrap password")
+	}
+}

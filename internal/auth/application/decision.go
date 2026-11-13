@@ -46,6 +46,9 @@ const (
 //	RevokeSession success / already revoked  Commit
 //	RevokeSession foreign / missing          Rollback (NOT_FOUND)
 //	Login last ACTIVE ADMIN at LockAfter     Commit (attempt + fail count; not LOCKED)
+//	BootstrapFirstAdmin success / no-op      Commit
+//	BootstrapFirstAdmin EMAIL_TAKEN          Rollback (no user/role row)
+//	BootstrapFirstAdmin INVALID_REQUEST      Rollback
 //
 // Refresh locks the session's tokens (LockBySession, ORDER BY id, until
 // the set is stable) then re-reads the presented hash with GetForUpdate.

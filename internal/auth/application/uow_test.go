@@ -83,6 +83,9 @@ func TestUoWNil(t *testing.T) {
 	if err := EnableUserIn(context.Background(), nil, w.service(), cmd); !errors.Is(err, errNotWired) {
 		t.Fatalf("enable: %v", err)
 	}
+	if _, err := BootstrapFirstAdminIn(context.Background(), nil, w.service(), "a@b.c", "twelvechars!"); !errors.Is(err, errNotWired) {
+		t.Fatalf("bootstrap-admin: %v", err)
+	}
 }
 
 func TestUoWCanceledBeforeDo(t *testing.T) {
@@ -140,5 +143,20 @@ func TestLockUnlockDisableIn(t *testing.T) {
 	got, _ = w.users.Get(context.Background(), a2.ID)
 	if got.Status != domain.StatusActive {
 		t.Fatalf("enabled %+v", got)
+	}
+}
+
+func TestBootstrapFirstAdminIn(t *testing.T) {
+	w := newWorld()
+	uow := &memUoW{w: w}
+	got, err := BootstrapFirstAdminIn(context.Background(), uow, w.service(), "a@b.c", "twelvechars!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !uow.committed || got.Roles[0] != domain.RoleCustomer {
+		t.Fatalf("committed=%v user %+v", uow.committed, got)
+	}
+	if !containsRole(got.Roles, domain.RoleAdmin) {
+		t.Fatalf("roles %v", got.Roles)
 	}
 }

@@ -146,6 +146,9 @@ func (s *memUsers) Create(ctx context.Context, u domain.User) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if s.trace != nil {
+		s.trace("create")
+	}
 	if s.create != nil {
 		return s.create
 	}
@@ -482,13 +485,14 @@ func (s *memTokens) RevokeAllForUser(ctx context.Context, userID uuid.UUID, at t
 }
 
 type memRoles struct {
-	mu      sync.Mutex
-	byUser  map[uuid.UUID][]domain.UserRole
-	users   *memUsers
-	grant   error
-	lockErr error
-	calls   []string
-	trace   func(string)
+	mu        sync.Mutex
+	byUser    map[uuid.UUID][]domain.UserRole
+	users     *memUsers
+	grant     error
+	failGrant int
+	lockErr   error
+	calls     []string
+	trace     func(string)
 }
 
 func (s *memRoles) note(op string) {
@@ -521,6 +525,17 @@ func (s *memRoles) Grant(ctx context.Context, ur domain.UserRole) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, "grant")
+	if s.failGrant > 0 {
+		n := 0
+		for _, c := range s.calls {
+			if c == "grant" {
+				n++
+			}
+		}
+		if n >= s.failGrant {
+			return errors.New("grant failed")
+		}
+	}
 	if s.byUser == nil {
 		s.byUser = map[uuid.UUID][]domain.UserRole{}
 	}

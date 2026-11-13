@@ -74,9 +74,9 @@ type RoleStore interface {
 	// LockAdminRoleMutations serializes every use-case write that can
 	// change the ACTIVE ADMIN set in this transaction (pg_advisory_xact_lock,
 	// not a session lock): Grant/Revoke of ADMIN, Lock/Unlock/Disable/EnableUser,
-	// and login lockout of a user who has (or just gained) ADMIN. Count and
-	// the initiator re-check run after the lock is held. Order is always
-	// this lock, then user FOR UPDATE.
+	// login lockout of a user who has (or just gained) ADMIN, and
+	// BootstrapFirstAdmin. Count and the initiator re-check run after the
+	// lock is held. Order is always this lock, then count or user FOR UPDATE.
 	LockAdminRoleMutations(ctx context.Context) error
 }
 

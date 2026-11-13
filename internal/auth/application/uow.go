@@ -179,3 +179,17 @@ func EnableUserIn(ctx context.Context, uow UnitOfWork, s Service, cmd StatusComm
 		return s.withDeps(d).EnableUser(ctx, cmd)
 	})
 }
+
+func BootstrapFirstAdminIn(ctx context.Context, uow UnitOfWork, s Service, email, password string) (domain.PublicUser, error) {
+	var out domain.PublicUser
+	if uow == nil {
+		return out, errNotWired
+	}
+	err := uow.Do(ctx, func(ctx context.Context, d Deps) (Decision, error) {
+		var dec Decision
+		var err error
+		out, dec, err = s.withDeps(d).BootstrapFirstAdmin(ctx, email, password)
+		return dec, err
+	})
+	return out, err
+}
