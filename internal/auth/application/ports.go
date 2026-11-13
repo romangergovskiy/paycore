@@ -75,6 +75,11 @@ type RoleStore interface {
 	Grant(ctx context.Context, ur domain.UserRole) error
 	Revoke(ctx context.Context, userID uuid.UUID, role domain.Role) error
 	List(ctx context.Context, userID uuid.UUID) ([]domain.Role, error)
+	// ListByIDs returns roles for many users in one operation. Missing
+	// users and users with no roles are absent from the map. Role slices
+	// are ordered by role code. An empty or nil ID list must not query
+	// and returns an empty map.
+	ListByIDs(ctx context.Context, userIDs []uuid.UUID) (map[uuid.UUID][]domain.Role, error)
 	Has(ctx context.Context, userID uuid.UUID, role domain.Role) (bool, error)
 	CountActiveWithRole(ctx context.Context, role domain.Role) (int, error)
 	// LockAdminRoleMutations serializes every use-case write that can

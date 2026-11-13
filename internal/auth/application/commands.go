@@ -81,6 +81,9 @@ type UserCursor struct {
 
 // ListUsersQuery pages GET /admin/users. A nil Status is every status.
 // Limit is 1…100; HTTP applies the default 50 before calling.
+// Status is applied before the keyset. The page is not a snapshot:
+// a user committed after a previous request with (created_at, id)
+// greater than Cursor can appear on a later page.
 type ListUsersQuery struct {
 	Status *domain.Status
 	Limit  int

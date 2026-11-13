@@ -529,14 +529,15 @@ func (s *memTokens) RevokeAllForUser(ctx context.Context, userID uuid.UUID, at t
 }
 
 type memRoles struct {
-	mu        sync.Mutex
-	byUser    map[uuid.UUID][]domain.UserRole
-	users     *memUsers
-	grant     error
-	failGrant int
-	lockErr   error
-	calls     []string
-	trace     func(string)
+	mu           sync.Mutex
+	byUser       map[uuid.UUID][]domain.UserRole
+	users        *memUsers
+	grant        error
+	failGrant    int
+	lockErr      error
+	listByIDsErr error
+	calls        []string
+	trace        func(string)
 }
 
 func (s *memRoles) note(op string) {
@@ -615,9 +616,37 @@ func (s *memRoles) List(ctx context.Context, userID uuid.UUID) ([]domain.Role, e
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls = append(s.calls, "list")
 	out := make([]domain.Role, 0, len(s.byUser[userID]))
 	for _, ur := range s.byUser[userID] {
 		out = append(out, ur.Role)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+func (s *memRoles) ListByIDs(ctx context.Context, userIDs []uuid.UUID) (map[uuid.UUID][]domain.Role, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.note("list-by-ids")
+	if s.listByIDsErr != nil {
+		return nil, s.listByIDsErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[uuid.UUID][]domain.Role, len(userIDs))
+	for _, id := range userIDs {
+		urs := s.byUser[id]
+		if len(urs) == 0 {
+			continue
+		}
+		roles := make([]domain.Role, 0, len(urs))
+		for _, ur := range urs {
+			roles = append(roles, ur.Role)
+		}
+		sort.Slice(roles, func(i, j int) bool { return roles[i] < roles[j] })
+		out[id] = roles
 	}
 	return out, nil
 }

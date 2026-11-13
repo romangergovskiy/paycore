@@ -9,9 +9,14 @@ import (
 )
 
 // ListUsers is GET /admin/users. There is no UnitOfWork and no row lock.
-// Roles come from RoleStore for the page IDs, not JWT.claims. The HTTP
-// layer has already required ADMIN; this method does not re-check the
-// actor so it cannot invent a Principal from a query string.
+// Users.List is one keyset query; roles are one RoleStore.ListByIDs call
+// for the returned page IDs (not List per user). JWT.claims are not used.
+// The HTTP layer has already required ADMIN.
+//
+// The page is not a snapshot. READ COMMITTED keyset pagination can see
+// rows committed after a previous page: a user inserted with (created_at, id)
+// greater than the cursor may appear on a later page; one at or before the
+// cursor will not. This method does not freeze the user set.
 func (s Service) ListUsers(ctx context.Context, q ListUsersQuery) (UserPage, error) {
 	var zero UserPage
 	if err := ctx.Err(); err != nil {
@@ -28,15 +33,20 @@ func (s Service) ListUsers(ctx context.Context, q ListUsersQuery) (UserPage, err
 		return zero, err
 	}
 	page := userPage(rows, q.Limit)
+	ids := make([]uuid.UUID, len(page.Users))
 	for i := range page.Users {
-		roles, err := s.Roles.List(ctx, page.Users[i].ID)
-		if err != nil {
-			return zero, err
-		}
+		ids[i] = page.Users[i].ID
+	}
+	byUser, err := s.Roles.ListByIDs(ctx, ids)
+	if err != nil {
+		return zero, err
+	}
+	for i := range page.Users {
+		roles := byUser[page.Users[i].ID]
 		if roles == nil {
 			roles = []domain.Role{}
 		}
-		page.Users[i].Roles = append([]domain.Role(nil), roles...)
+		page.Users[i].Roles = append([]domain.Role{}, roles...)
 	}
 	return page, nil
 }

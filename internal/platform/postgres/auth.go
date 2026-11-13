@@ -113,6 +113,11 @@ UPDATE auth.users
        updated_at = $9
  WHERE id = $1`
 
+// listUsersSQL is the admin keyset. Sort and comparison are both
+// (created_at, id) ASC. There is no JOIN to user_roles: multiple roles
+// must not duplicate users or shift page boundaries. This is not a
+// snapshot; a later page can see rows committed after the previous
+// statement (READ COMMITTED). password_hash is never selected.
 const listUsersSQL = `
 SELECT id, email, COALESCE(first_name, ''), COALESCE(last_name, ''),
        status, created_at, updated_at
@@ -233,6 +238,15 @@ SELECT role_code
   FROM auth.user_roles
  WHERE user_id = $1
  ORDER BY role_code`
+
+// listRolesByIDsSQL loads roles for one admin page. PK (user_id, role_code)
+// covers ANY($1) and forbids duplicate roles. Empty $1 is never sent:
+// ListByIDs returns without querying.
+const listRolesByIDsSQL = `
+SELECT user_id, role_code
+  FROM auth.user_roles
+ WHERE user_id = ANY($1::uuid[])
+ ORDER BY user_id ASC, role_code ASC`
 
 const hasRoleSQL = `
 SELECT EXISTS (
@@ -519,6 +533,32 @@ func (s *AuthRoles) List(ctx context.Context, userID uuid.UUID) ([]domain.Role, 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, mapAuthSQLError("roles list", err)
+	}
+	return out, nil
+}
+
+func (s *AuthRoles) ListByIDs(ctx context.Context, userIDs []uuid.UUID) (map[uuid.UUID][]domain.Role, error) {
+	out := make(map[uuid.UUID][]domain.Role)
+	if len(userIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.q.Query(ctx, listRolesByIDsSQL, userIDs)
+	if err != nil {
+		return nil, mapAuthSQLError("roles list by ids", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id   uuid.UUID
+			code string
+		)
+		if err := rows.Scan(&id, &code); err != nil {
+			return nil, fmt.Errorf("auth roles list by ids: scan: %w", err)
+		}
+		out[id] = append(out[id], domain.Role(code))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapAuthSQLError("roles list by ids", err)
 	}
 	return out, nil
 }

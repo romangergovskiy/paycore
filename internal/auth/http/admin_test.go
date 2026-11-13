@@ -188,6 +188,23 @@ func TestAdminListKeysetAndSecrets(t *testing.T) {
 	if strings.Contains(empty.Body.String(), `"next_cursor"`) {
 		t.Fatalf("next_cursor on last page: %s", empty.Body)
 	}
+
+	h.listUsers = func(*http.Request, application.ListUsersQuery) (application.UserPage, error) {
+		return application.UserPage{Users: []domain.PublicUser{{
+			ID: first.ID, Email: first.Email, Status: domain.StatusActive,
+			Roles: []domain.Role{}, CreatedAt: t0,
+		}}}, nil
+	}
+	noRoles := serveAuth(t, h, http.MethodGet, "/api/v1/admin/users", "", adminHeader(tok))
+	if noRoles.Code != http.StatusOK {
+		t.Fatalf("no-roles = %d %s", noRoles.Code, noRoles.Body)
+	}
+	if !strings.Contains(noRoles.Body.String(), `"roles":[]`) && !strings.Contains(noRoles.Body.String(), `"roles": []`) {
+		t.Fatalf("empty roles must be []: %s", noRoles.Body)
+	}
+	if strings.Contains(noRoles.Body.String(), `"roles":null`) {
+		t.Fatalf("roles null: %s", noRoles.Body)
+	}
 }
 
 func TestAdminListRejectsBadPagination(t *testing.T) {
@@ -205,6 +222,8 @@ func TestAdminListRejectsBadPagination(t *testing.T) {
 		"/api/v1/admin/users?cursor=not-base64",
 		"/api/v1/admin/users?cursor=e30",
 		"/api/v1/admin/users?cursor=SELECT+1",
+		"/api/v1/admin/users?cursor=" + strings.Repeat("A", 257),
+		"/api/v1/admin/users?cursor=" + base64.RawURLEncoding.EncodeToString([]byte(`{"created_at":"2026-11-13T08:00:00.123456789Z","id":"00000000-0000-0000-0000-000000000000"}`)),
 	} {
 		rec := serveAuth(t, h, http.MethodGet, path, "", hdr)
 		e := decodeErr(t, rec)
@@ -426,6 +445,13 @@ func TestDecodeUserCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Run("empty string is absent cursor", func(t *testing.T) {
+		got, err := decodeUserCursor("")
+		if got != nil || err != nil {
+			t.Fatalf("got %v err %v", got, err)
+		}
+	})
+
 	t.Run("valid cursor accepted", func(t *testing.T) {
 		got, err := decodeUserCursor(valid)
 		if err != nil || got == nil {
@@ -451,10 +477,21 @@ func TestDecodeUserCursor(t *testing.T) {
 		name, raw string
 	}{
 		{"two consecutive JSON objects", base64.RawURLEncoding.EncodeToString(append(append([]byte{}, payload...), payload...))},
+		{"second JSON after whitespace", base64.RawURLEncoding.EncodeToString(append(append(append([]byte{}, payload...), []byte(" \n")...), payload...))},
 		{"JSON with trailing garbage", base64.RawURLEncoding.EncodeToString(append(payload, []byte("nope")...))},
 		{"cursor longer than 256 characters", strings.Repeat("A", 257)},
+		{"256-char garbage still decoded as invalid", strings.Repeat("A", 256)},
 		{"unknown fields", base64.RawURLEncoding.EncodeToString([]byte(`{"created_at":"2026-11-13T08:00:00.123456789Z","id":"11111111-1111-4111-8111-111111111111","extra":true}`))},
 		{"invalid Base64", "not-base64!!!"},
+		{"standard Base64 with padding", base64.StdEncoding.EncodeToString(payload)},
+		{"nil UUID", base64.RawURLEncoding.EncodeToString([]byte(`{"created_at":"2026-11-13T08:00:00.123456789Z","id":"00000000-0000-0000-0000-000000000000"}`))},
+		{"invalid UUID", base64.RawURLEncoding.EncodeToString([]byte(`{"created_at":"2026-11-13T08:00:00.123456789Z","id":"not-a-uuid"}`))},
+		{"missing created_at", base64.RawURLEncoding.EncodeToString([]byte(`{"id":"11111111-1111-4111-8111-111111111111"}`))},
+		{"missing id", base64.RawURLEncoding.EncodeToString([]byte(`{"created_at":"2026-11-13T08:00:00.123456789Z"}`))},
+		{"JSON array", base64.RawURLEncoding.EncodeToString([]byte(`[]`))},
+		{"JSON null", base64.RawURLEncoding.EncodeToString([]byte(`null`))},
+		{"empty object", base64.RawURLEncoding.EncodeToString([]byte(`{}`))},
+		{"unparseable created_at", base64.RawURLEncoding.EncodeToString([]byte(`{"created_at":"13/11/2026","id":"11111111-1111-4111-8111-111111111111"}`))},
 	}
 	for _, tc := range reject {
 		t.Run(tc.name, func(t *testing.T) {
