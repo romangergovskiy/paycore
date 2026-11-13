@@ -108,10 +108,11 @@ func (u User) Public() PublicUser {
 		FirstName: u.FirstName,
 		LastName:  u.LastName,
 		Status:    u.Status,
+		CreatedAt: u.CreatedAt,
 	}
 }
 
-// PublicUser is User without PasswordHash.
+// PublicUser is User without PasswordHash, failed_login_count, or locked_at.
 type PublicUser struct {
 	ID        uuid.UUID
 	Email     string
@@ -119,6 +120,7 @@ type PublicUser struct {
 	LastName  string
 	Status    Status
 	Roles     []Role
+	CreatedAt time.Time
 }
 
 type Session struct {

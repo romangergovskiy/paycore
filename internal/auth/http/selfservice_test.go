@@ -366,6 +366,12 @@ func TestComposeUsesRetryUoWOnlyForLogoutAndRefresh(t *testing.T) {
 	_ = h.revokeSession(req, application.RevokeSessionCommand{})
 	_, _ = h.login(req, application.LoginCommand{})
 	_, _ = h.register(req, application.RegisterCommand{})
+	_ = h.grantRole(req, domain.Principal{}, uuid.Nil, domain.RoleSupport)
+	_ = h.revokeRole(req, domain.Principal{}, uuid.Nil, domain.RoleSupport)
+	_ = h.lockUser(req, application.StatusCommand{})
+	_ = h.unlockUser(req, application.StatusCommand{})
+	_ = h.disableUser(req, application.StatusCommand{})
+	_ = h.enableUser(req, application.StatusCommand{})
 
 	var retryN, mainN int
 	for _, c := range calls {
@@ -379,8 +385,8 @@ func TestComposeUsesRetryUoWOnlyForLogoutAndRefresh(t *testing.T) {
 	if retryN != 2 {
 		t.Fatalf("retry UoW calls = %d (%v), want Logout+Refresh", retryN, calls)
 	}
-	if mainN != 5 {
-		t.Fatalf("main UoW calls = %d (%v), want register/login/logout-all/password/revoke", mainN, calls)
+	if mainN != 11 {
+		t.Fatalf("main UoW calls = %d (%v), want register/login/logout-all/password/revoke+admin writes", mainN, calls)
 	}
 }
 

@@ -23,6 +23,10 @@ type profileReader interface {
 	ListSessions(context.Context, domain.Principal) ([]domain.Session, error)
 }
 
+type adminUserLister interface {
+	ListUsers(context.Context, application.ListUsersQuery) (application.UserPage, error)
+}
+
 // Handler is the Identity/Auth HTTP transport. It does not contain
 // business rules: decode JSON, call application, map errors.
 type Handler struct {
@@ -35,6 +39,13 @@ type Handler struct {
 	revokeSession  func(*http.Request, application.RevokeSessionCommand) error
 	currentUser    func(*http.Request, domain.Principal) (domain.PublicUser, error)
 	listSessions   func(*http.Request, domain.Principal) ([]domain.Session, error)
+	listUsers      func(*http.Request, application.ListUsersQuery) (application.UserPage, error)
+	grantRole      func(*http.Request, domain.Principal, uuid.UUID, domain.Role) error
+	revokeRole     func(*http.Request, domain.Principal, uuid.UUID, domain.Role) error
+	lockUser       func(*http.Request, application.StatusCommand) error
+	unlockUser     func(*http.Request, application.StatusCommand) error
+	disableUser    func(*http.Request, application.StatusCommand) error
+	enableUser     func(*http.Request, application.StatusCommand) error
 	parser         httpserver.AccessParser
 	sessions       httpserver.SessionValidator
 }
@@ -48,8 +59,8 @@ func New(uow application.UnitOfWork, svc application.Service, parser httpserver.
 
 // Compose is New, except logoutRefresh is the UnitOfWork for Logout and
 // Refresh only. Production passes a one-shot 40P01/40001 retry wrapper
-// there; Register, Login, LogoutAll, ChangePassword, and RevokeSession
-// keep uow. logoutRefresh nil uses uow.
+// there; Register, Login, LogoutAll, ChangePassword, RevokeSession, and
+// admin writes keep uow. logoutRefresh nil uses uow.
 func Compose(uow, logoutRefresh application.UnitOfWork, svc application.Service, parser httpserver.AccessParser, sessions httpserver.SessionValidator) Handler {
 	if logoutRefresh == nil {
 		logoutRefresh = uow
@@ -76,6 +87,24 @@ func Compose(uow, logoutRefresh application.UnitOfWork, svc application.Service,
 		revokeSession: func(r *http.Request, cmd application.RevokeSessionCommand) error {
 			return application.RevokeSessionIn(r.Context(), uow, svc, cmd)
 		},
+		grantRole: func(r *http.Request, p domain.Principal, userID uuid.UUID, role domain.Role) error {
+			return application.GrantRoleIn(r.Context(), uow, svc, p, userID, role)
+		},
+		revokeRole: func(r *http.Request, p domain.Principal, userID uuid.UUID, role domain.Role) error {
+			return application.RevokeRoleIn(r.Context(), uow, svc, p, userID, role)
+		},
+		lockUser: func(r *http.Request, cmd application.StatusCommand) error {
+			return application.LockUserIn(r.Context(), uow, svc, cmd)
+		},
+		unlockUser: func(r *http.Request, cmd application.StatusCommand) error {
+			return application.UnlockUserIn(r.Context(), uow, svc, cmd)
+		},
+		disableUser: func(r *http.Request, cmd application.StatusCommand) error {
+			return application.DisableUserIn(r.Context(), uow, svc, cmd)
+		},
+		enableUser: func(r *http.Request, cmd application.StatusCommand) error {
+			return application.EnableUserIn(r.Context(), uow, svc, cmd)
+		},
 		parser:   parser,
 		sessions: sessions,
 	}
@@ -85,6 +114,11 @@ func Compose(uow, logoutRefresh application.UnitOfWork, svc application.Service,
 		}
 		h.listSessions = func(r *http.Request, p domain.Principal) ([]domain.Session, error) {
 			return reader.ListSessions(r.Context(), p)
+		}
+	}
+	if lister, ok := sessions.(adminUserLister); ok {
+		h.listUsers = func(r *http.Request, q application.ListUsersQuery) (application.UserPage, error) {
+			return lister.ListUsers(r.Context(), q)
 		}
 	}
 	return h
@@ -118,6 +152,7 @@ func Mount(s *httpserver.Server, h Handler) {
 	if h.revokeSession != nil {
 		s.Handle("POST /api/v1/auth/sessions/{id}/revoke", authn(http.HandlerFunc(h.postRevokeSession)))
 	}
+	h.mountAdmin(s, authn)
 }
 
 func (h Handler) postRegister(w http.ResponseWriter, r *http.Request) {

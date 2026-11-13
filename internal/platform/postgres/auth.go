@@ -113,6 +113,20 @@ UPDATE auth.users
        updated_at = $9
  WHERE id = $1`
 
+// listUsersSQL is the admin keyset. Sort and comparison are both
+// (created_at, id) ASC. There is no JOIN to user_roles: multiple roles
+// must not duplicate users or shift page boundaries. This is not a
+// snapshot; a later page can see rows committed after the previous
+// statement (READ COMMITTED). password_hash is never selected.
+const listUsersSQL = `
+SELECT id, email, COALESCE(first_name, ''), COALESCE(last_name, ''),
+       status, created_at, updated_at
+  FROM auth.users
+ WHERE ($1::text IS NULL OR status = $1)
+   AND ($2::timestamptz IS NULL OR (created_at, id) > ($2::timestamptz, $3::uuid))
+ ORDER BY created_at ASC, id ASC
+ LIMIT $4`
+
 const selectSessionSQL = `
 SELECT id, user_id, COALESCE(user_agent, ''),
        CASE WHEN ip IS NULL THEN '' ELSE host(ip) END,
@@ -225,6 +239,15 @@ SELECT role_code
  WHERE user_id = $1
  ORDER BY role_code`
 
+// listRolesByIDsSQL loads roles for one admin page. PK (user_id, role_code)
+// covers ANY($1) and forbids duplicate roles. Empty $1 is never sent:
+// ListByIDs returns without querying.
+const listRolesByIDsSQL = `
+SELECT user_id, role_code
+  FROM auth.user_roles
+ WHERE user_id = ANY($1::uuid[])
+ ORDER BY user_id ASC, role_code ASC`
+
 const hasRoleSQL = `
 SELECT EXISTS (
   SELECT 1 FROM auth.user_roles WHERE user_id = $1 AND role_code = $2
@@ -307,6 +330,59 @@ func (s *AuthUsers) Update(ctx context.Context, u domain.User) error {
 		return wrapAuth(pgx.ErrNoRows, domain.ErrNotFound, apperror.KindNotFound)
 	}
 	return nil
+}
+
+// List is the admin keyset. It does not Begin and does not SELECT
+// password_hash. Limit+1 is fetched so the use case can set Next.
+func (s *AuthUsers) List(ctx context.Context, q application.ListUsersQuery) ([]domain.User, error) {
+	if q.Limit < application.MinListUsersLimit || q.Limit > application.MaxListUsersLimit {
+		return nil, domain.ErrInvalidRequest
+	}
+	var (
+		status   any
+		cursorAt any
+		cursorID any
+	)
+	if q.Status != nil {
+		status = string(*q.Status)
+	}
+	if q.Cursor != nil {
+		cursorAt = q.Cursor.CreatedAt
+		cursorID = q.Cursor.ID
+	}
+	rows, err := s.q.Query(ctx, listUsersSQL, status, cursorAt, cursorID, q.Limit+1)
+	if err != nil {
+		return nil, mapAuthSQLError("users list", err)
+	}
+	defer rows.Close()
+	out := make([]domain.User, 0)
+	for rows.Next() {
+		u, err := scanListedUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapAuthSQLError("users list", err)
+	}
+	return out, nil
+}
+
+func scanListedUser(row scanner) (domain.User, error) {
+	var (
+		u      domain.User
+		status string
+	)
+	err := row.Scan(
+		&u.ID, &u.Email, &u.FirstName, &u.LastName,
+		&status, &u.CreatedAt, &u.UpdatedAt,
+	)
+	if err != nil {
+		return domain.User{}, mapAuthSQLError("users list", err)
+	}
+	u.Status = domain.Status(status)
+	return u, nil
 }
 
 func (s *AuthSessions) Create(ctx context.Context, sess domain.Session) error {
@@ -457,6 +533,32 @@ func (s *AuthRoles) List(ctx context.Context, userID uuid.UUID) ([]domain.Role, 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, mapAuthSQLError("roles list", err)
+	}
+	return out, nil
+}
+
+func (s *AuthRoles) ListByIDs(ctx context.Context, userIDs []uuid.UUID) (map[uuid.UUID][]domain.Role, error) {
+	out := make(map[uuid.UUID][]domain.Role)
+	if len(userIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.q.Query(ctx, listRolesByIDsSQL, userIDs)
+	if err != nil {
+		return nil, mapAuthSQLError("roles list by ids", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id   uuid.UUID
+			code string
+		)
+		if err := rows.Scan(&id, &code); err != nil {
+			return nil, fmt.Errorf("auth roles list by ids: scan: %w", err)
+		}
+		out[id] = append(out[id], domain.Role(code))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapAuthSQLError("roles list by ids", err)
 	}
 	return out, nil
 }

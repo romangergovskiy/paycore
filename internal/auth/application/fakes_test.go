@@ -216,6 +216,50 @@ func (s *memUsers) Update(ctx context.Context, u domain.User) error {
 	return nil
 }
 
+func (s *memUsers) List(ctx context.Context, q ListUsersQuery) ([]domain.User, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if q.Limit < MinListUsersLimit || q.Limit > MaxListUsersLimit {
+		return nil, domain.ErrInvalidRequest
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]domain.User, 0, len(s.byID))
+	for _, u := range s.byID {
+		if q.Status != nil && u.Status != *q.Status {
+			continue
+		}
+		if q.Cursor != nil {
+			if u.CreatedAt.Before(q.Cursor.CreatedAt) {
+				continue
+			}
+			if u.CreatedAt.Equal(q.Cursor.CreatedAt) && bytes.Compare(u.ID[:], q.Cursor.ID[:]) <= 0 {
+				continue
+			}
+		}
+		copyUser := u
+		copyUser.PasswordHash = ""
+		copyUser.FailedLoginCount = 0
+		copyUser.LockedAt = nil
+		out = append(out, copyUser)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Before(out[j].CreatedAt) {
+			return true
+		}
+		if out[j].CreatedAt.Before(out[i].CreatedAt) {
+			return false
+		}
+		return bytes.Compare(out[i].ID[:], out[j].ID[:]) < 0
+	})
+	n := q.Limit + 1
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out, nil
+}
+
 type memSessions struct {
 	mu    sync.Mutex
 	byID  map[uuid.UUID]domain.Session
@@ -485,14 +529,15 @@ func (s *memTokens) RevokeAllForUser(ctx context.Context, userID uuid.UUID, at t
 }
 
 type memRoles struct {
-	mu        sync.Mutex
-	byUser    map[uuid.UUID][]domain.UserRole
-	users     *memUsers
-	grant     error
-	failGrant int
-	lockErr   error
-	calls     []string
-	trace     func(string)
+	mu           sync.Mutex
+	byUser       map[uuid.UUID][]domain.UserRole
+	users        *memUsers
+	grant        error
+	failGrant    int
+	lockErr      error
+	listByIDsErr error
+	calls        []string
+	trace        func(string)
 }
 
 func (s *memRoles) note(op string) {
@@ -571,9 +616,37 @@ func (s *memRoles) List(ctx context.Context, userID uuid.UUID) ([]domain.Role, e
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls = append(s.calls, "list")
 	out := make([]domain.Role, 0, len(s.byUser[userID]))
 	for _, ur := range s.byUser[userID] {
 		out = append(out, ur.Role)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+func (s *memRoles) ListByIDs(ctx context.Context, userIDs []uuid.UUID) (map[uuid.UUID][]domain.Role, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.note("list-by-ids")
+	if s.listByIDsErr != nil {
+		return nil, s.listByIDsErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[uuid.UUID][]domain.Role, len(userIDs))
+	for _, id := range userIDs {
+		urs := s.byUser[id]
+		if len(urs) == 0 {
+			continue
+		}
+		roles := make([]domain.Role, 0, len(urs))
+		for _, ur := range urs {
+			roles = append(roles, ur.Role)
+		}
+		sort.Slice(roles, func(i, j int) bool { return roles[i] < roles[j] })
+		out[id] = roles
 	}
 	return out, nil
 }

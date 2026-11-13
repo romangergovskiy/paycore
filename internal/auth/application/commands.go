@@ -1,6 +1,8 @@
 package application
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 
 	"github.com/romangergovskiy/paycore/internal/auth/domain"
@@ -61,4 +63,36 @@ type ChangePasswordCommand struct {
 type RevokeSessionCommand struct {
 	Actor     domain.Principal
 	SessionID uuid.UUID
+}
+
+const (
+	DefaultListUsersLimit = 50
+	MinListUsersLimit     = 1
+	MaxListUsersLimit     = 100
+)
+
+// UserCursor is a keyset position (created_at, id). It is not a SQL
+// fragment. HTTP encodes it as opaque Base64; this package never sees
+// that string.
+type UserCursor struct {
+	CreatedAt time.Time
+	ID        uuid.UUID
+}
+
+// ListUsersQuery pages GET /admin/users. A nil Status is every status.
+// Limit is 1…100; HTTP applies the default 50 before calling.
+// Status is applied before the keyset. The page is not a snapshot:
+// a user committed after a previous request with (created_at, id)
+// greater than Cursor can appear on a later page.
+type ListUsersQuery struct {
+	Status *domain.Status
+	Limit  int
+	Cursor *UserCursor
+}
+
+// UserPage is one admin-list page. Next is set from the last returned
+// user when another row exists; it is nil on the last page.
+type UserPage struct {
+	Users []domain.PublicUser
+	Next  *UserCursor
 }
