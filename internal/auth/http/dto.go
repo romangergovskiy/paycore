@@ -3,6 +3,8 @@ package authhttp
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"time"
 
@@ -166,9 +168,14 @@ func encodeUserCursor(c application.UserCursor) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(payload), nil
 }
 
+const maxUserCursorChars = 256
+
 func decodeUserCursor(raw string) (*application.UserCursor, error) {
 	if raw == "" {
 		return nil, nil
+	}
+	if len(raw) > maxUserCursorChars {
+		return nil, domain.ErrInvalidRequest
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
@@ -178,6 +185,11 @@ func decodeUserCursor(raw string) (*application.UserCursor, error) {
 	dec.DisallowUnknownFields()
 	var body userCursorJSON
 	if err := dec.Decode(&body); err != nil {
+		return nil, domain.ErrInvalidRequest
+	}
+	var extra json.RawMessage
+	err = dec.Decode(&extra)
+	if err == nil || !errors.Is(err, io.EOF) {
 		return nil, domain.ErrInvalidRequest
 	}
 	created, err := time.Parse(time.RFC3339Nano, body.CreatedAt)

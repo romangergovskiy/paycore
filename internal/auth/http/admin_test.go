@@ -2,7 +2,9 @@ package authhttp
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -404,5 +406,65 @@ func TestAdminCursorRoundTrip(t *testing.T) {
 	}
 	if got.ID != cur.ID || !got.CreatedAt.Equal(cur.CreatedAt) {
 		t.Fatalf("got %+v want %+v", got, cur)
+	}
+}
+
+func TestDecodeUserCursor(t *testing.T) {
+	cur := application.UserCursor{
+		CreatedAt: time.Date(2026, 11, 13, 8, 0, 0, 123456789, time.UTC),
+		ID:        uuid.MustParse("11111111-1111-4111-8111-111111111111"),
+	}
+	payload, err := json.Marshal(userCursorJSON{
+		CreatedAt: cur.CreatedAt.UTC().Format(time.RFC3339Nano),
+		ID:        cur.ID.String(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid, err := encodeUserCursor(cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("valid cursor accepted", func(t *testing.T) {
+		got, err := decodeUserCursor(valid)
+		if err != nil || got == nil {
+			t.Fatalf("decode: %v %v", got, err)
+		}
+		if got.ID != cur.ID || !got.CreatedAt.Equal(cur.CreatedAt) {
+			t.Fatalf("got %+v want %+v", got, cur)
+		}
+	})
+
+	t.Run("whitespace after JSON accepted", func(t *testing.T) {
+		raw := base64.RawURLEncoding.EncodeToString(append(payload, []byte(" \n\t")...))
+		got, err := decodeUserCursor(raw)
+		if err != nil || got == nil {
+			t.Fatalf("decode: %v %v", got, err)
+		}
+		if got.ID != cur.ID || !got.CreatedAt.Equal(cur.CreatedAt) {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	reject := []struct {
+		name, raw string
+	}{
+		{"two consecutive JSON objects", base64.RawURLEncoding.EncodeToString(append(append([]byte{}, payload...), payload...))},
+		{"JSON with trailing garbage", base64.RawURLEncoding.EncodeToString(append(payload, []byte("nope")...))},
+		{"cursor longer than 256 characters", strings.Repeat("A", 257)},
+		{"unknown fields", base64.RawURLEncoding.EncodeToString([]byte(`{"created_at":"2026-11-13T08:00:00.123456789Z","id":"11111111-1111-4111-8111-111111111111","extra":true}`))},
+		{"invalid Base64", "not-base64!!!"},
+	}
+	for _, tc := range reject {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := decodeUserCursor(tc.raw)
+			if got != nil || !errors.Is(err, domain.ErrInvalidRequest) {
+				t.Fatalf("got %v err %v", got, err)
+			}
+			if err.Error() != domain.ErrInvalidRequest.Error() {
+				t.Fatalf("leaked decode error: %v", err)
+			}
+		})
 	}
 }
