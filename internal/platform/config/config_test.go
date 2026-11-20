@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"strings"
@@ -8,15 +9,26 @@ import (
 	"time"
 )
 
-// testJWTSecret is 32 ASCII bytes; it is not a production secret.
-const testJWTSecret = "0123456789abcdef0123456789abcdef"
+// testJWTSecret is 32 ASCII bytes. testCursorKey is the decoded AES-256 key;
+// testCursorSecretB64 is its standard Base64 env value. Not production secrets.
+const (
+	testJWTSecret = "0123456789abcdef0123456789abcdef"
+	testCursorKey = "paycore-accounts-cursor-secret!!"
+)
 
-func withJWTSecret(env ...string) []string {
-	return append(append([]string{}, env...), varAuthJWTSecret+"="+testJWTSecret)
+func testCursorSecretB64() string {
+	return base64.StdEncoding.EncodeToString([]byte(testCursorKey))
+}
+
+func withRequiredSecrets(env ...string) []string {
+	return append(append([]string{}, env...),
+		varAuthJWTSecret+"="+testJWTSecret,
+		varAccountsCursorSecret+"="+testCursorSecretB64(),
+	)
 }
 
 func TestLoadDefaults(t *testing.T) {
-	cfg, err := Load(withJWTSecret())
+	cfg, err := Load(withRequiredSecrets())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -41,6 +53,7 @@ func TestLoadDefaults(t *testing.T) {
 			StatementTimeout: 5 * time.Second,
 		},
 		Auth:            Auth{JWTSecret: testJWTSecret},
+		Accounts:        Accounts{CursorSecret: testCursorKey},
 		ShutdownTimeout: 20 * time.Second,
 	}
 	if cfg != want {
@@ -49,7 +62,7 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadOverrides(t *testing.T) {
-	cfg, err := Load(withJWTSecret(
+	cfg, err := Load(withRequiredSecrets(
 		"PAYCORE_ENV=production",
 		"PAYCORE_HTTP_ADDR=127.0.0.1:9000",
 		"PAYCORE_HTTP_REQUEST_TIMEOUT=2s",
@@ -74,7 +87,7 @@ func TestLoadOverrides(t *testing.T) {
 }
 
 func TestLoadReportsAllErrors(t *testing.T) {
-	_, err := Load(withJWTSecret(
+	_, err := Load(withRequiredSecrets(
 		"PAYCORE_ENV=staging",
 		"PAYCORE_HTTP_ADDR=8080",
 		"PAYCORE_HTTP_READ_TIMEOUT=-1s",
@@ -98,7 +111,7 @@ func TestLoadReportsAllErrors(t *testing.T) {
 }
 
 func TestLoadPostgresDSN(t *testing.T) {
-	cfg, err := Load(withJWTSecret(
+	cfg, err := Load(withRequiredSecrets(
 		"PAYCORE_POSTGRES_DSN=postgres://paycore_app:secret@127.0.0.1:5432/paycore?sslmode=disable",
 		"PAYCORE_POSTGRES_MAX_CONNS=4",
 		"PAYCORE_POSTGRES_MIN_CONNS=0",
@@ -110,55 +123,106 @@ func TestLoadPostgresDSN(t *testing.T) {
 		t.Errorf("postgres: %+v", cfg.Postgres)
 	}
 
-	_, err = Load(withJWTSecret("PAYCORE_POSTGRES_DSN=localhost:5432"))
+	_, err = Load(withRequiredSecrets("PAYCORE_POSTGRES_DSN=localhost:5432"))
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "PAYCORE_POSTGRES_DSN") {
 		t.Fatalf("err = %v, want invalid DSN", err)
 	}
 }
 
 func TestLoadWriteTimeoutMustExceedRequestTimeout(t *testing.T) {
-	_, err := Load(withJWTSecret("PAYCORE_HTTP_REQUEST_TIMEOUT=10s", "PAYCORE_HTTP_WRITE_TIMEOUT=10s"))
+	_, err := Load(withRequiredSecrets("PAYCORE_HTTP_REQUEST_TIMEOUT=10s", "PAYCORE_HTTP_WRITE_TIMEOUT=10s"))
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "PAYCORE_HTTP_WRITE_TIMEOUT") {
 		t.Fatalf("err = %v, want write timeout error", err)
 	}
 }
 
 func TestLoadJWTSecret(t *testing.T) {
-	_, err := Load(nil)
+	b64 := testCursorSecretB64()
+	_, err := Load([]string{varAccountsCursorSecret + "=" + b64})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAuthJWTSecret) {
-		t.Fatalf("missing secret: %v", err)
+		t.Fatalf("missing JWT secret: %v", err)
 	}
-	if strings.Contains(err.Error(), testJWTSecret) {
+	if strings.Contains(err.Error(), testJWTSecret) || strings.Contains(err.Error(), b64) || strings.Contains(err.Error(), testCursorKey) {
 		t.Error("error leaked a secret value")
 	}
 
-	_, err = Load([]string{varAuthJWTSecret + "="})
+	_, err = Load([]string{varAuthJWTSecret + "=", varAccountsCursorSecret + "=" + b64})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAuthJWTSecret) {
-		t.Fatalf("empty secret: %v", err)
+		t.Fatalf("empty JWT secret: %v", err)
 	}
 
-	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret[:31]})
+	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret[:31], varAccountsCursorSecret + "=" + b64})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAuthJWTSecret) {
-		t.Fatalf("31-byte secret: %v", err)
+		t.Fatalf("31-byte JWT secret: %v", err)
 	}
 
-	cfg, err := Load([]string{varAuthJWTSecret + "=" + testJWTSecret})
+	cfg, err := Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + b64})
 	if err != nil {
-		t.Fatalf("32-byte secret: %v", err)
+		t.Fatalf("32-byte secrets: %v", err)
 	}
 	if cfg.Auth.JWTSecret != testJWTSecret {
 		t.Errorf("JWTSecret not stored")
 	}
 
-	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, "PAYCORE_AUTH_ISSUER=other"})
+	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + b64, "PAYCORE_AUTH_ISSUER=other"})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "PAYCORE_AUTH_ISSUER: unknown variable") {
 		t.Fatalf("unknown AUTH var: %v", err)
 	}
 }
 
+func TestLoadCursorSecret(t *testing.T) {
+	b64 := testCursorSecretB64()
+	_, err := Load([]string{varAuthJWTSecret + "=" + testJWTSecret})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAccountsCursorSecret) {
+		t.Fatalf("missing cursor secret: %v", err)
+	}
+	if strings.Contains(err.Error(), testJWTSecret) || strings.Contains(err.Error(), b64) || strings.Contains(err.Error(), testCursorKey) {
+		t.Error("error leaked a secret value")
+	}
+
+	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "="})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAccountsCursorSecret) {
+		t.Fatalf("empty cursor secret: %v", err)
+	}
+
+	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + "not-base64!!!"})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAccountsCursorSecret) {
+		t.Fatalf("invalid Base64: %v", err)
+	}
+
+	short := base64.StdEncoding.EncodeToString([]byte(testCursorKey[:31]))
+	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + short})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAccountsCursorSecret) {
+		t.Fatalf("31-byte cursor key: %v", err)
+	}
+	if strings.Contains(err.Error(), short) || strings.Contains(err.Error(), testCursorKey) {
+		t.Error("error leaked a secret value")
+	}
+
+	long := base64.StdEncoding.EncodeToString([]byte(testCursorKey + "x"))
+	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + long})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAccountsCursorSecret) {
+		t.Fatalf("33-byte cursor key: %v", err)
+	}
+
+	cfg, err := Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + b64})
+	if err != nil {
+		t.Fatalf("32-byte cursor secret: %v", err)
+	}
+	if cfg.Accounts.CursorSecret != testCursorKey {
+		t.Errorf("CursorSecret not stored decoded")
+	}
+	if len(cfg.Accounts.CursorSecret) != cursorKeyBytes {
+		t.Errorf("decoded key len %d", len(cfg.Accounts.CursorSecret))
+	}
+	if cfg.Accounts.CursorSecret == cfg.Auth.JWTSecret {
+		t.Fatal("cursor secret must not be the JWT secret")
+	}
+}
+
 func TestLoadRejectsBootstrapAdminVars(t *testing.T) {
 	password := "twelvechars!"
-	_, err := Load(withJWTSecret(
+	_, err := Load(withRequiredSecrets(
 		"PAYCORE_BOOTSTRAP_ADMIN_EMAIL=a@b.c",
 		"PAYCORE_BOOTSTRAP_ADMIN_PASSWORD="+password,
 	))

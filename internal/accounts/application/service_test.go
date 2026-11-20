@@ -208,6 +208,23 @@ func TestGetList(t *testing.T) {
 	if _, err := svc.ListByOwner(ctx, nil, nil); !errors.Is(err, domain.ErrInvalidAccount) {
 		t.Fatalf("list no owner: %v", err)
 	}
+
+	own, err := svc.GetForOwner(ctx, a.Account.ID, u1)
+	if err != nil || own.ID != a.Account.ID {
+		t.Fatalf("GetForOwner own: %+v %v", own, err)
+	}
+	if _, err := svc.GetForOwner(ctx, a.Account.ID, u2); !errors.Is(err, domain.ErrAccountNotFound) {
+		t.Fatalf("GetForOwner foreign: %v", err)
+	}
+	if _, err := svc.GetForOwner(ctx, uuid.Nil, u1); !errors.Is(err, domain.ErrAccountNotFound) {
+		t.Fatalf("GetForOwner nil id: %v", err)
+	}
+	if _, err := svc.GetForOwner(ctx, a.Account.ID, uuid.Nil); !errors.Is(err, domain.ErrAccountNotFound) {
+		t.Fatalf("GetForOwner nil user: %v", err)
+	}
+	if _, err := (Service{}).GetForOwner(ctx, a.Account.ID, u1); !errors.Is(err, errNotWired) {
+		t.Fatalf("GetForOwner unwired: %v", err)
+	}
 }
 
 func TestOpenOpenerError(t *testing.T) {
@@ -395,6 +412,25 @@ func (m *memStore) Get(ctx context.Context, id uuid.UUID) (domain.Account, error
 	}
 	acc, ok := m.byID[id]
 	if !ok {
+		return domain.Account{}, domain.ErrAccountNotFound
+	}
+	return acc, nil
+}
+
+func (m *memStore) GetForOwner(ctx context.Context, id, userID uuid.UUID) (domain.Account, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.Account{}, err
+	}
+	if id == uuid.Nil || userID == uuid.Nil {
+		return domain.Account{}, domain.ErrAccountNotFound
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getErr != nil {
+		return domain.Account{}, m.getErr
+	}
+	acc, ok := m.byID[id]
+	if !ok || !domain.OwnerSet(acc.UserID) || *acc.UserID != userID || domain.OwnerSet(acc.MerchantID) {
 		return domain.Account{}, domain.ErrAccountNotFound
 	}
 	return acc, nil

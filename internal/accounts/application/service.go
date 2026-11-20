@@ -25,6 +25,7 @@ type Store interface {
 	Create(ctx context.Context, acc domain.Account) error
 	Get(ctx context.Context, id uuid.UUID) (domain.Account, error)
 	GetByNumber(ctx context.Context, number string) (domain.Account, error)
+	GetForOwner(ctx context.Context, id, userID uuid.UUID) (domain.Account, error)
 	ListByOwner(ctx context.Context, userID, merchantID *uuid.UUID) ([]domain.Account, error)
 	GetForUpdate(ctx context.Context, id uuid.UUID) (domain.Account, error)
 	ApplyStatus(ctx context.Context, acc domain.Account) error
@@ -37,8 +38,12 @@ type BalanceReader interface {
 	Get(ctx context.Context, accountID uuid.UUID) (available, reserved, version int64, err error)
 }
 
-// MaxStatementLimit is the maximum StatementQuery.Limit.
-const MaxStatementLimit = 100
+const (
+	// DefaultStatementLimit is the HTTP default when limit is omitted.
+	DefaultStatementLimit = 50
+	// MaxStatementLimit is the maximum StatementQuery.Limit.
+	MaxStatementLimit = 100
+)
 
 // StatementCursor is a keyset position (created_at, id). It is not a SQL
 // fragment and is not encoded by infrastructure.
@@ -169,6 +174,19 @@ func (s Service) Get(ctx context.Context, id uuid.UUID) (domain.Account, error) 
 	return s.Store.Get(ctx, id)
 }
 
+// GetForOwner loads the customer account that belongs to userID.
+// Ownership is applied in the store query (id AND user_id), not after fetch.
+// A missing or foreign account is ErrAccountNotFound (no existence leak).
+func (s Service) GetForOwner(ctx context.Context, id, userID uuid.UUID) (domain.Account, error) {
+	if s.Store == nil {
+		return domain.Account{}, errNotWired
+	}
+	if id == uuid.Nil || userID == uuid.Nil {
+		return domain.Account{}, domain.ErrAccountNotFound
+	}
+	return s.Store.GetForOwner(ctx, id, userID)
+}
+
 func (s Service) GetByNumber(ctx context.Context, number string) (domain.Account, error) {
 	if s.Store == nil {
 		return domain.Account{}, errNotWired
@@ -192,6 +210,23 @@ func (s Service) Balance(ctx context.Context, id uuid.UUID) (available, reserved
 	return s.Balances.Get(ctx, id)
 }
 
+// BalanceForOwner is Balance scoped to the customer owner. The account row
+// is loaded with id AND user_id in one store query; a foreign id is not found.
+func (s Service) BalanceForOwner(ctx context.Context, id, userID uuid.UUID) (acc domain.Account, available, reserved, version int64, err error) {
+	if s.Store == nil || s.Balances == nil {
+		return domain.Account{}, 0, 0, 0, errNotWired
+	}
+	acc, err = s.GetForOwner(ctx, id, userID)
+	if err != nil {
+		return domain.Account{}, 0, 0, 0, err
+	}
+	available, reserved, version, err = s.Balances.Get(ctx, acc.ID)
+	if err != nil {
+		return domain.Account{}, 0, 0, 0, err
+	}
+	return acc, available, reserved, version, nil
+}
+
 func (s Service) Statement(ctx context.Context, accountID uuid.UUID, query StatementQuery) (StatementPage, error) {
 	var zero StatementPage
 	if s.Store == nil || s.Statements == nil {
@@ -207,6 +242,27 @@ func (s Service) Statement(ctx context.Context, accountID uuid.UUID, query State
 		return zero, err
 	}
 	list, err := s.Statements.List(ctx, accountID, query)
+	if err != nil {
+		return zero, err
+	}
+	return statementPage(list, query.Limit), nil
+}
+
+// StatementForOwner is Statement scoped to the customer owner. The account
+// row is loaded with id AND user_id in one store query; a foreign id is not found.
+func (s Service) StatementForOwner(ctx context.Context, accountID, userID uuid.UUID, query StatementQuery) (StatementPage, error) {
+	var zero StatementPage
+	if s.Store == nil || s.Statements == nil {
+		return zero, errNotWired
+	}
+	if err := validateStatementQuery(query); err != nil {
+		return zero, err
+	}
+	acc, err := s.GetForOwner(ctx, accountID, userID)
+	if err != nil {
+		return zero, err
+	}
+	list, err := s.Statements.List(ctx, acc.ID, query)
 	if err != nil {
 		return zero, err
 	}

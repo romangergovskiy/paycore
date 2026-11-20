@@ -71,6 +71,12 @@ SELECT id, account_number, user_id, merchant_id, account_purpose,
   FROM accounts.accounts
  WHERE account_number = $1`
 
+const selectAccountForOwnerSQL = `
+SELECT id, account_number, user_id, merchant_id, account_purpose,
+       rtrim(currency::text), status, name, version, created_at, updated_at, closed_at
+  FROM accounts.accounts
+ WHERE id = $1 AND user_id = $2 AND merchant_id IS NULL`
+
 const selectAccountForUpdateSQL = selectAccountSQL + ` FOR NO KEY UPDATE`
 
 const applyStatusSQL = `
@@ -129,6 +135,20 @@ func (a *Accounts) GetByNumber(ctx context.Context, number string) (domain.Accou
 			return domain.Account{}, domain.ErrAccountNotFound
 		}
 		return domain.Account{}, mapAccountSQLError("get_by_number", err)
+	}
+	return acc, nil
+}
+
+func (a *Accounts) GetForOwner(ctx context.Context, id, userID uuid.UUID) (domain.Account, error) {
+	if id == uuid.Nil || userID == uuid.Nil {
+		return domain.Account{}, domain.ErrAccountNotFound
+	}
+	acc, err := scanAccount(a.q.QueryRow(ctx, selectAccountForOwnerSQL, id, userID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Account{}, domain.ErrAccountNotFound
+		}
+		return domain.Account{}, mapAccountSQLError("get_for_owner", err)
 	}
 	return acc, nil
 }

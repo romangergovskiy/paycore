@@ -12,6 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	accountsapp "github.com/romangergovskiy/paycore/internal/accounts/application"
+	accountshttp "github.com/romangergovskiy/paycore/internal/accounts/http"
 	"github.com/romangergovskiy/paycore/internal/auth/application"
 	authhttp "github.com/romangergovskiy/paycore/internal/auth/http"
 	"github.com/romangergovskiy/paycore/internal/platform/authcrypto"
@@ -90,6 +92,14 @@ func Run(ctx context.Context, environ []string, logOut io.Writer) error {
 		return err
 	}
 
+	var cursors *accountshttp.CursorCodec
+	if auth != nil {
+		cursors, err = accountshttp.NewCursorCodec([]byte(cfg.Accounts.CursorSecret))
+		if err != nil {
+			return err
+		}
+	}
+
 	ln, err := net.Listen("tcp", cfg.HTTP.Addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.HTTP.Addr, err)
@@ -100,6 +110,11 @@ func Run(ctx context.Context, environ []string, logOut io.Writer) error {
 	}
 	if auth != nil {
 		authhttp.Mount(srv, authhttp.Compose(auth.uow, postgres.LogoutRefreshRetry(auth.uow), auth.svc, auth.parser, auth.read))
+		accountshttp.Mount(srv, accountshttp.New(accountsapp.Service{
+			Store:      postgres.NewAccounts(pool),
+			Balances:   postgres.NewAccountBalances(pool),
+			Statements: postgres.NewAccountStatements(pool),
+		}, auth.parser, auth.read, cursors))
 		log.Info("auth runtime ready")
 	}
 

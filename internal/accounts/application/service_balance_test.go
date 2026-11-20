@@ -80,6 +80,22 @@ func TestBalance(t *testing.T) {
 	if _, _, _, err := (Service{}).Balance(ctx, opened.Account.ID); !errors.Is(err, errNotWired) {
 		t.Fatalf("unwired: %v", err)
 	}
+
+	svc.Balances = &stubBalances{available: 1500, reserved: 200, version: 3}
+	acc, avail, reserved, version, err := svc.BalanceForOwner(ctx, opened.Account.ID, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.ID != opened.Account.ID || avail != 1500 || reserved != 200 || version != 3 {
+		t.Fatalf("owned balance %+v %d %d %d", acc, avail, reserved, version)
+	}
+	other := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000002")
+	if _, _, _, _, err := svc.BalanceForOwner(ctx, opened.Account.ID, other); !errors.Is(err, domain.ErrAccountNotFound) {
+		t.Fatalf("foreign balance: %v", err)
+	}
+	if _, _, _, _, err := (Service{Store: st}).BalanceForOwner(ctx, opened.Account.ID, user); !errors.Is(err, errNotWired) {
+		t.Fatalf("balance owner unwired: %v", err)
+	}
 }
 
 type stubBalances struct {

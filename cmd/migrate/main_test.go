@@ -78,6 +78,7 @@ func TestWithoutBootstrapAdminVars(t *testing.T) {
 	password := "twelvechars!"
 	environ := []string{
 		"PAYCORE_AUTH_JWT_SECRET=0123456789abcdef0123456789abcdef",
+		"PAYCORE_ACCOUNTS_CURSOR_SECRET=cGF5Y29yZS1hY2NvdW50cy1jdXJzb3Itc2VjcmV0ISE=",
 		envBootstrapAdminEmail + "=a@b.c",
 		envBootstrapAdminPassword + "=" + password,
 	}
