@@ -236,7 +236,7 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 
 На этапе 3.2 роли создаёт `migrate bootstrap` (суперпользователь, `CREATE ROLE`). С этапа 3.4 bootstrap также делает `GRANT paycore_ledger TO paycore_owner WITH INHERIT FALSE` ([D-40](../architecture/decisions.md#d-40)). Goose-миграции выполняет `paycore_owner`. Приложение и интеграционные тесты подключаются только как `paycore_app`. `paycore_ledger` — `NOLOGIN`. Этап 3.3 создаёт таблицы `accounts` и `ledger` с грантами по таблице. Этап 3.4 создаёт шлюзовые функции в `00004` и передаёт их `paycore_ledger`.
 
-Миграция `00001_platform_schema.sql` выдаёт `paycore_app` права `INSERT, UPDATE` на `platform.schema_info` и ставит `ALTER DEFAULT PRIVILEGES … ON TABLES` в схеме `platform`. Это шире целевой модели: будущие гранты — **по таблице**, без blanket `GRANT` на все таблицы схемы. План — [ledger-schema-review.md §6](../architecture/ledger-schema-review.md#6-план-грантов-будущих-таблиц). Саму миграцию 3.2 этот документ не меняет.
+Миграция `00001_platform_schema.sql` выдаёт `paycore_app` права `INSERT, UPDATE` на `platform.schema_info` и ставит `ALTER DEFAULT PRIVILEGES … ON TABLES` в схеме `platform`. Это шире целевой модели. `00007` не копирует blanket: `idempotency_keys` / `outbox_events` / `inbox_messages` получают `REVOKE ALL` и гранты по таблице (`paycore_app`: `SELECT, INSERT, UPDATE, DELETE`; `paycore_readonly`: `SELECT`). План — [ledger-schema-review.md §6](../architecture/ledger-schema-review.md#6-план-грантов-будущих-таблиц). Саму миграцию 3.2 этот документ не меняет.
 
 ## 7. Партиционирование (после MVP)
 

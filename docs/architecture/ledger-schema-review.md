@@ -96,7 +96,7 @@
 
 ## 6. План грантов будущих таблиц
 
-Правило: **каждая таблица — свой `GRANT`, без `ALTER DEFAULT PRIVILEGES … ON TABLES`.** Схему `platform` в 3.2 не трогаем; при создании следующих объектов `DEFAULT PRIVILEGES` из `00001` всё ещё сработают на новые таблицы в `platform` — это надо явно перекрыть `GRANT`/`REVOKE` в той миграции, которая создаст `idempotency_keys` / outbox / inbox (не этот PR).
+Правило: **каждая таблица — свой `GRANT`, без `ALTER DEFAULT PRIVILEGES … ON TABLES`.** Схему `platform` в 3.2 не трогаем; `DEFAULT PRIVILEGES` из `00001` всё ещё срабатывают на новые таблицы в `platform`. Миграция `00007_platform_idempotency_outbox.sql` (этап A) после `CREATE TABLE` делает `REVOKE ALL` и выдаёт гранты **по таблице** (без нового `ALTER DEFAULT PRIVILEGES`).
 
 ### 6.1. Схема `platform` (целевое состояние)
 

@@ -2,7 +2,7 @@
 
 Демонстрационная платёжная инфраструктура с double-entry ledger: Go, PostgreSQL, модульный монолит. Деньги виртуальные, соответствие PCI DSS и банковским требованиям не заявляется.
 
-Статус: **этап 3.26 — HTTP Identity/Auth (register/login/refresh/logout) и PostgreSQL HTTP-тесты**. Bootstrap ADMIN и Payments/Transfers ещё нет.
+Статус: **этап A — HTTP-идемпотентность и transactional outbox/inbox**. Identity/Auth HTTP, bootstrap ADMIN и Admin API пользователей есть. Accounts HTTP, Payments, Transfers, `cmd/worker` и webhooks ещё нет.
 
 ## Документация
 
@@ -51,9 +51,12 @@ internal/platform/
   logging/                log/slog
   apperror/               ошибки приложения и JSON-формат ошибок API
   httpserver/             HTTP-сервер, middleware, health
-  postgres/               пул pgx, bootstrap, миграции, ledger, accounts Store и UoW, auth
+  postgres/               пул pgx, bootstrap, миграции, ledger, accounts Store и UoW, auth, идемпотентность, outbox, inbox, retry Tx
   authcrypto/             Argon2id, JWT HS256, opaque refresh, UTC clock
-migrations/               SQL Goose (platform, accounts, ledger, функции, auth)
+  idempotency/            HTTP-ключ (D-07), без pgx
+  outbox/                 контракт outbox (D-23), без pgx
+  inbox/                  контракт inbox, без pgx
+migrations/               SQL Goose (platform, accounts, ledger, функции, auth, idempotency/outbox/inbox)
 docs/                     проектная документация
 ```
 
