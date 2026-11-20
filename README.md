@@ -2,7 +2,7 @@
 
 Демонстрационная платёжная инфраструктура с double-entry ledger: Go, PostgreSQL, модульный монолит. Деньги виртуальные, соответствие PCI DSS и банковским требованиям не заявляется.
 
-Статус: **этап A — HTTP-идемпотентность и transactional outbox/inbox**. Identity/Auth HTTP, bootstrap ADMIN и Admin API пользователей есть. Accounts HTTP, Payments, Transfers, `cmd/worker` и webhooks ещё нет.
+Статус: **этап B (чтение счетов)**. Identity/Auth HTTP, bootstrap ADMIN, Admin API пользователей, HTTP-идемпотентность и outbox/inbox есть. Клиент читает свои счета (`GET /api/v1/accounts…`) под Bearer + роль CUSTOMER. `POST /api/v1/accounts` нет: формат `account_number` — открытый [Q-13](docs/architecture/open-questions.md#q-13). Payments, Transfers, `cmd/worker` и webhooks ещё нет.
 
 ## Документация
 
@@ -34,6 +34,14 @@ make migrate-status
 |---|---|
 | `GET /livez` | Процесс жив; зависимости не проверяет |
 | `GET /readyz` | Готов принимать трафик; `503` при остановке или если БД недоступна |
+| `POST /api/v1/auth/register\|login\|refresh\|logout` | Identity/Auth |
+| `GET /api/v1/auth/me`, `GET /api/v1/auth/sessions` | Self-service |
+| `GET /api/v1/accounts` | Список своих счетов (Bearer, CUSTOMER) |
+| `GET /api/v1/accounts/{id}` | Свой счёт |
+| `GET /api/v1/accounts/{id}/balance` | Баланс (int64 минорные единицы) |
+| `GET /api/v1/accounts/{id}/statement` | Выписка (keyset, opaque `cursor`) |
+
+Остальной Accounts HTTP (`POST /api/v1/accounts`, Block/Unblock/Close, Admin accounts) не в этом этапе. Открытие счёта через API блокируется [Q-13](docs/architecture/open-questions.md#q-13): формат `account_number` не решён, генерация номера не добавлена.
 
 Коды выхода: `0` — штатная остановка (SIGINT/SIGTERM), `1` — ошибка работы, `2` — неверная конфигурация.
 
@@ -44,7 +52,7 @@ cmd/api/                  HTTP API
 cmd/migrate/              bootstrap ролей и Goose
 internal/app/             сборка зависимостей и жизненный цикл
 pkg/money/                суммы в минорных единицах (int64 + валюта, без float)
-internal/accounts/        домен, use case и Unit of Work счетов (без pgx/HTTP)
+internal/accounts/        домен, use case, Unit of Work и customer HTTP счетов (domain/application без pgx/HTTP)
 internal/ledger/          доменный контракт Poster, Validate, Open/Lock (без pgx/HTTP)
 internal/platform/
   config/                 PAYCORE_* из окружения

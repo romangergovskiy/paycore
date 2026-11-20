@@ -127,6 +127,15 @@ func runServesWithoutDSN(t *testing.T, env string) {
 		t.Errorf("empty DSN must not mount auth: POST /logout = %d", logout.StatusCode)
 	}
 
+	accounts, err := http.Get("http://" + addr + "/api/v1/accounts")
+	if err != nil {
+		t.Fatalf("GET /api/v1/accounts: %v", err)
+	}
+	accounts.Body.Close()
+	if accounts.StatusCode != http.StatusNotFound {
+		t.Errorf("empty DSN must not mount accounts: GET /accounts = %d", accounts.StatusCode)
+	}
+
 	waitForLog(t, lines, "http request")
 
 	cancel()

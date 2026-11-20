@@ -220,6 +220,26 @@ func TestStatement(t *testing.T) {
 			t.Fatalf("unwired: %v", err)
 		}
 	})
+
+	t.Run("owner scoped", func(t *testing.T) {
+		got, err := svc.StatementForOwner(ctx, id, user, StatementQuery{Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Lines) != 4 {
+			t.Fatalf("owned statement %+v", got)
+		}
+		other := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-000000000002")
+		if _, err := svc.StatementForOwner(ctx, id, other, StatementQuery{Limit: 10}); !errors.Is(err, domain.ErrAccountNotFound) {
+			t.Fatalf("foreign statement: %v", err)
+		}
+		if _, err := svc.StatementForOwner(ctx, id, user, StatementQuery{Limit: 0}); !errors.Is(err, domain.ErrInvalidAccount) {
+			t.Fatalf("bad limit: %v", err)
+		}
+		if _, err := (Service{Store: st}).StatementForOwner(ctx, id, user, StatementQuery{Limit: 10}); !errors.Is(err, errNotWired) {
+			t.Fatalf("statement owner unwired: %v", err)
+		}
+	})
 }
 
 func walkStatement(t *testing.T, ctx context.Context, svc Service, id uuid.UUID, limit int) []StatementLine {

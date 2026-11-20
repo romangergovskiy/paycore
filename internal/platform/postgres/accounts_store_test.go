@@ -82,6 +82,53 @@ func TestAccountsStore(t *testing.T) {
 		}
 	})
 
+	t.Run("GetForOwner scopes by user_id in one query", func(t *testing.T) {
+		own := customerAcc(t, userA, "PC-ST-OWN")
+		if err := store.Create(ctx, own); err != nil {
+			t.Fatal(err)
+		}
+		foreign := customerAcc(t, userB, "PC-ST-FOR")
+		if err := store.Create(ctx, foreign); err != nil {
+			t.Fatal(err)
+		}
+		merchants, err := store.ListByOwner(ctx, nil, &merchA)
+		if err != nil || len(merchants) != 1 {
+			t.Fatalf("seed merchant: %v %#v", err, merchants)
+		}
+
+		got, err := store.GetForOwner(ctx, own.ID, userA)
+		if err != nil || got.ID != own.ID || got.AccountNumber != "PC-ST-OWN" {
+			t.Fatalf("own: %+v %v", got, err)
+		}
+		if !domain.OwnerSet(got.UserID) || *got.UserID != userA {
+			t.Fatalf("owner %+v", got)
+		}
+
+		if _, err := store.GetForOwner(ctx, own.ID, userB); !errors.Is(err, domain.ErrAccountNotFound) {
+			t.Fatalf("foreign owner: %v", err)
+		}
+		if _, err := store.GetForOwner(ctx, foreign.ID, userA); !errors.Is(err, domain.ErrAccountNotFound) {
+			t.Fatalf("other account: %v", err)
+		}
+		if _, err := store.GetForOwner(ctx, merchants[0].ID, userA); !errors.Is(err, domain.ErrAccountNotFound) {
+			t.Fatalf("merchant: %v", err)
+		}
+		if _, err := store.GetForOwner(ctx, uuid.MustParse("ffffffff-ffff-4fff-8fff-ffffffffffff"), userA); !errors.Is(err, domain.ErrAccountNotFound) {
+			t.Fatalf("missing: %v", err)
+		}
+		if _, err := store.GetForOwner(ctx, uuid.Nil, userA); !errors.Is(err, domain.ErrAccountNotFound) {
+			t.Fatalf("nil id: %v", err)
+		}
+		if _, err := store.GetForOwner(ctx, own.ID, uuid.Nil); !errors.Is(err, domain.ErrAccountNotFound) {
+			t.Fatalf("nil user: %v", err)
+		}
+
+		roGot, err := NewAccounts(ro).GetForOwner(ctx, own.ID, userA)
+		if err != nil || roGot.ID != own.ID {
+			t.Fatalf("readonly GetForOwner: %+v %v", roGot, err)
+		}
+	})
+
 	t.Run("Get missing", func(t *testing.T) {
 		_, err := store.Get(ctx, uuid.MustParse("ffffffff-ffff-4fff-8fff-ffffffffffff"))
 		if !errors.Is(err, domain.ErrAccountNotFound) {
