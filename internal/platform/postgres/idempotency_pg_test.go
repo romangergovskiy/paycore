@@ -194,6 +194,65 @@ func TestHTTPIdempotencyPostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("replay restores full response", func(t *testing.T) {
+		req := demoRequest(t, scope, endpoint, "replay-full", `{"n":1}`)
+		first, err := runDemo(ctx, app, req, demoOp{payload: "full"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.Response.ResourceType != "demo" || first.Response.ResourceID == nil {
+			t.Fatalf("first missing resource fields: %+v", first.Response)
+		}
+		second, err := runDemo(ctx, app, req, demoOp{payload: "full"})
+		if err != nil || !second.Replayed {
+			t.Fatalf("%+v %v", second, err)
+		}
+		if first.Response.Status != second.Response.Status ||
+			string(first.Response.Body) != string(second.Response.Body) ||
+			first.Response.ResourceType != second.Response.ResourceType ||
+			second.Response.ResourceID == nil ||
+			*first.Response.ResourceID != *second.Response.ResourceID {
+			t.Fatalf("replay mismatch first=%+v second=%+v", first.Response, second.Response)
+		}
+		if countDemo(t, ctx, app, scope, req.Key) != 1 {
+			t.Fatal("full replay created a second effect")
+		}
+	})
+
+	t.Run("replay without resource fields", func(t *testing.T) {
+		req := demoRequest(t, scope, endpoint, "replay-null-res", `{"n":1}`)
+		body := json.RawMessage(`{"ok":true}`)
+		var first idempotency.Result
+		err := RetryTx(ctx, app, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			first, err = ExecuteIdempotent(ctx, tx, req, func(context.Context) (idempotency.Response, error) {
+				return idempotency.Response{Status: 201, Body: body}, nil
+			})
+			return err
+		})
+		if err != nil || first.Replayed {
+			t.Fatalf("%+v %v", first, err)
+		}
+		var second idempotency.Result
+		err = RetryTx(ctx, app, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			second, err = ExecuteIdempotent(ctx, tx, req, func(context.Context) (idempotency.Response, error) {
+				t.Error("op ran on replay")
+				return idempotency.Response{}, errors.New("must not run")
+			})
+			return err
+		})
+		if err != nil || !second.Replayed {
+			t.Fatalf("%+v %v", second, err)
+		}
+		if second.Response.Status != 201 || string(second.Response.Body) != string(body) {
+			t.Fatalf("replay body/status %+v", second.Response)
+		}
+		if second.Response.ResourceType != "" || second.Response.ResourceID != nil {
+			t.Fatalf("NULL resource fields must stay absent: %+v", second.Response)
+		}
+	})
+
 	t.Run("lost HTTP after commit then replay", func(t *testing.T) {
 		req := demoRequest(t, scope, endpoint, "lost-http", `{"n":1}`)
 		first, err := runDemo(ctx, app, req, demoOp{payload: "ok"})

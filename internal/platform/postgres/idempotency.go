@@ -49,7 +49,7 @@ func ExecuteIdempotent(
 		req.ID, req.Scope, req.Endpoint, req.Key, req.Hash,
 	).Scan(&inserted)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return idempotency.Result{}, fmt.Errorf("idempotency begin: %w", err)
+		return idempotency.Result{}, markIdempotencyBegin(err)
 	}
 	if err == nil {
 		resp, opErr := op(ctx)
@@ -66,17 +66,19 @@ func ExecuteIdempotent(
 	}
 
 	var (
-		hash   []byte
-		status string
-		code   *int
-		body   []byte
+		hash         []byte
+		status       string
+		code         *int
+		body         []byte
+		resourceType *string
+		resourceID   *uuid.UUID
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT request_hash, status, response_code, response_body
+		SELECT request_hash, status, response_code, response_body, resource_type, resource_id
 		  FROM platform.idempotency_keys
 		 WHERE scope = $1 AND endpoint = $2 AND key = $3`,
 		req.Scope, req.Endpoint, req.Key,
-	).Scan(&hash, &status, &code, &body)
+	).Scan(&hash, &status, &code, &body, &resourceType, &resourceID)
 	if err != nil {
 		return idempotency.Result{}, fmt.Errorf("idempotency lookup: %w", err)
 	}
@@ -84,13 +86,23 @@ func ExecuteIdempotent(
 		return idempotency.Result{}, idempotency.ErrKeyReused
 	}
 	if status == idempotency.StatusCompleted {
-		resp := idempotency.Response{Body: compactJSON(body)}
+		resp := idempotency.Response{Body: compactJSON(body), ResourceID: resourceID}
 		if code != nil {
 			resp.Status = *code
+		}
+		if resourceType != nil {
+			resp.ResourceType = *resourceType
 		}
 		return idempotency.Result{Response: resp, Replayed: true}, nil
 	}
 	return idempotency.Result{}, idempotency.ErrInProgress
+}
+
+func markIdempotencyBegin(err error) error {
+	if sqlState(err) == "55P03" {
+		return fmt.Errorf("idempotency begin: %w: %w", errIdempotencyLock, err)
+	}
+	return fmt.Errorf("idempotency begin: %w", err)
 }
 
 func completeIdempotency(ctx context.Context, tx pgx.Tx, id uuid.UUID, resp idempotency.Response) error {

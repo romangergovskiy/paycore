@@ -60,6 +60,37 @@ func TestCanonicalJSONAndHash(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSONTrailing(t *testing.T) {
+	ok, err := CanonicalJSON([]byte(`{"a":1}`))
+	if err != nil || string(ok) != `{"a":1}` {
+		t.Fatalf("%s %v", ok, err)
+	}
+	spaced, err := CanonicalJSON([]byte(`{"a":1}   `))
+	if err != nil || string(spaced) != `{"a":1}` {
+		t.Fatalf("trailing whitespace: %s %v", spaced, err)
+	}
+	if _, err := CanonicalJSON([]byte(`{"a":1}{"b":2}`)); err == nil {
+		t.Fatal("two JSON values accepted")
+	}
+	if _, err := CanonicalJSON([]byte(`{"a":1} garbage`)); err == nil {
+		t.Fatal("garbage after value accepted")
+	}
+	if _, err := CanonicalJSON([]byte(`{`)); err == nil {
+		t.Fatal("invalid JSON accepted")
+	}
+	empty, err := CanonicalJSON([]byte(`   `))
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty body: %q %v", empty, err)
+	}
+	precise, err := CanonicalJSON([]byte(`{"amount":123456789012345}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(precise) != `{"amount":123456789012345}` {
+		t.Fatalf("high-precision amount = %s", precise)
+	}
+}
+
 func TestPersistable(t *testing.T) {
 	if !Persistable(201) || !Persistable(422) || !Persistable(409) {
 		t.Fatal("2xx/4xx must persist")

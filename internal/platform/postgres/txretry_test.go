@@ -53,3 +53,40 @@ func TestWrapRetryInProgress(t *testing.T) {
 		t.Fatalf("lost PgError: %v", err)
 	}
 }
+
+func TestMarkIdempotencyBegin(t *testing.T) {
+	lock := &pgconn.PgError{Code: "55P03", Message: "lock timeout"}
+	got := markIdempotencyBegin(lock)
+	if sqlState(got) != "55P03" {
+		t.Fatalf("lost SQLSTATE: %v", got)
+	}
+	if !errors.Is(got, errIdempotencyLock) {
+		t.Fatalf("missing L1 mark: %v", got)
+	}
+	other := &pgconn.PgError{Code: "23505", Message: "unique"}
+	got = markIdempotencyBegin(other)
+	if errors.Is(got, errIdempotencyLock) {
+		t.Fatal("non-55P03 marked as L1 lock")
+	}
+}
+
+func TestMapLockTimeout(t *testing.T) {
+	l1 := wrapRetry(errIdempotencyLock, &pgconn.PgError{Code: "55P03", Message: "lock timeout"})
+	got := mapLockTimeout(l1)
+	if !errors.Is(got, idempotency.ErrInProgress) {
+		t.Fatalf("L1 55P03: %v", got)
+	}
+	other := &pgconn.PgError{Code: "55P03", Message: "lock timeout"}
+	got = mapLockTimeout(other)
+	if errors.Is(got, idempotency.ErrInProgress) {
+		t.Fatal("non-L1 55P03 mapped to REQUEST_IN_PROGRESS")
+	}
+	var later *retryLaterError
+	if !errors.As(got, &later) || later.RetryAfter() != lockTimeoutRetryAfter {
+		t.Fatalf("want retry-later, got %v", got)
+	}
+	var pe *pgconn.PgError
+	if !errors.As(got, &pe) || pe.Code != "55P03" {
+		t.Fatalf("lost PgError: %v", got)
+	}
+}

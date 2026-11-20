@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -327,6 +328,34 @@ func TestOutboxPostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("expired lease owner cannot fail", func(t *testing.T) {
+		drainOutbox(t, ctx, app)
+		e := insertOne(t, ctx, app, mustNewID(t), "demo.expired-fail")
+		a := NewOutboxRelay(app, "fail-expired-a")
+		if _, err := a.Claim(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.Exec(ctx, `
+			UPDATE platform.outbox_events
+			   SET processing_until = now() - interval '1 second'
+			 WHERE id = $1`, e.ID); err != nil {
+			t.Fatal(err)
+		}
+		before := readOutboxRow(t, ctx, app, e.ID)
+		n, err := a.Fail(ctx, e.ID, "stale fail after expiry")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatal("expired lease owner Fail updated the row")
+		}
+		after := readOutboxRow(t, ctx, app, e.ID)
+		if after.status != before.status || after.attempts != before.attempts ||
+			!sameNullString(before.lastError, after.lastError) || !after.nextAttempt.Equal(before.nextAttempt) {
+			t.Fatalf("stale Fail changed row: before=%+v after=%+v", before, after)
+		}
+	})
+
 	t.Run("claim empty", func(t *testing.T) {
 		drainOutbox(t, ctx, app)
 		r := NewOutboxRelay(app, "empty")
@@ -424,6 +453,35 @@ func ids(ev []outbox.Event) []uuid.UUID {
 		out[i] = e.ID
 	}
 	return out
+}
+
+type outboxRow struct {
+	status      string
+	attempts    int
+	lastError   *string
+	nextAttempt time.Time
+}
+
+func readOutboxRow(t *testing.T, ctx context.Context, conn *pgx.Conn, id uuid.UUID) outboxRow {
+	t.Helper()
+	var row outboxRow
+	if err := conn.QueryRow(ctx, `
+		SELECT status, attempts, last_error, next_attempt_at
+		  FROM platform.outbox_events WHERE id = $1`, id).Scan(
+		&row.status, &row.attempts, &row.lastError, &row.nextAttempt); err != nil {
+		t.Fatal(err)
+	}
+	return row
+}
+
+func sameNullString(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 
 func drainOutbox(t *testing.T, ctx context.Context, conn *pgx.Conn) {

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/romangergovskiy/paycore/internal/platform/apperror"
 	"github.com/romangergovskiy/paycore/internal/platform/idempotency"
 )
 
@@ -19,14 +20,22 @@ const (
 	retryBaseDelay        = 10 * time.Millisecond
 )
 
+// errIdempotencyLock marks 55P03 that happened while capturing the
+// idempotency key (L1). Generic RetryTx must not treat every lock_timeout
+// as REQUEST_IN_PROGRESS (concurrency.md §6).
+var errIdempotencyLock = errors.New("idempotency key lock timeout")
+
+const lockTimeoutRetryAfter = time.Second
+
 // RetryTx runs fn in one PostgreSQL transaction and retries the whole
 // closure on SQLSTATE 40001, 40P01, and 55P03 (concurrency.md §6).
 // Other errors are not retried. Nested transactions are not used: db must
 // be a pool or connection, not a Tx. fn must not perform irreversible
 // effects outside PostgreSQL (those go through the outbox after COMMIT).
 //
-// After lock_timeout retries are exhausted, RetryTx returns
-// idempotency.ErrInProgress (L1 / 409 REQUEST_IN_PROGRESS).
+// After lock_timeout retries are exhausted:
+//   - L1 (idempotency key capture) → idempotency.ErrInProgress (409)
+//   - any other lock → 503 SERVICE_UNAVAILABLE with Retry-After 1s
 func RetryTx(ctx context.Context, db beginner, fn func(context.Context, pgx.Tx) error) error {
 	if fn == nil {
 		return errors.New("retry: callback is required")
@@ -47,7 +56,7 @@ func RetryTx(ctx context.Context, db beginner, fn func(context.Context, pgx.Tx) 
 			// retry whole Tx; 40P01 also wants a metric/alert (caller logs)
 		case "55P03":
 			if lockTries >= retryLockTimeoutExtra {
-				return wrapRetry(idempotency.ErrInProgress, last)
+				return mapLockTimeout(last)
 			}
 			lockTries++
 		default:
@@ -58,9 +67,32 @@ func RetryTx(ctx context.Context, db beginner, fn func(context.Context, pgx.Tx) 
 		}
 	}
 	if sqlState(last) == "55P03" {
-		return wrapRetry(idempotency.ErrInProgress, last)
+		return mapLockTimeout(last)
 	}
 	return last
+}
+
+func mapLockTimeout(err error) error {
+	if errors.Is(err, errIdempotencyLock) {
+		return wrapRetry(idempotency.ErrInProgress, err)
+	}
+	return &retryLaterError{
+		after: lockTimeoutRetryAfter,
+		err:   apperror.Wrap(err, apperror.KindUnavailable, apperror.CodeUnavailable, "Service busy. Retry later."),
+	}
+}
+
+// retryLaterError is exhausted non-L1 lock_timeout. Transport maps it to
+// 503 and Retry-After (concurrency.md §6).
+type retryLaterError struct {
+	after time.Duration
+	err   error
+}
+
+func (e *retryLaterError) Error() string { return e.err.Error() }
+func (e *retryLaterError) Unwrap() error { return e.err }
+func (e *retryLaterError) RetryAfter() time.Duration {
+	return e.after
 }
 
 func doTx(ctx context.Context, db beginner, fn func(context.Context, pgx.Tx) error) error {

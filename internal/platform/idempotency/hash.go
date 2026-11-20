@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
 )
@@ -35,6 +36,13 @@ func CanonicalJSON(body []byte) ([]byte, error) {
 	var v any
 	if err := dec.Decode(&v); err != nil {
 		return nil, fmt.Errorf("canonical json: %w", err)
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("canonical json: trailing data")
+		}
+		return nil, fmt.Errorf("canonical json: trailing data: %w", err)
 	}
 	return marshalCanonical(v)
 }

@@ -169,7 +169,8 @@ func (r *OutboxRelay) Ack(ctx context.Context, ids ...uuid.UUID) (int64, error) 
 }
 
 // Fail records last_error, clears the lease, applies backoff, and marks DEAD
-// when attempts have reached MaxAttempts. A stale owner updates 0 rows.
+// when attempts have reached MaxAttempts. The same live-lease conditions as
+// Ack apply: a stale or expired owner updates 0 rows.
 func (r *OutboxRelay) Fail(ctx context.Context, id uuid.UUID, errMsg string) (int64, error) {
 	max := r.MaxAttempts
 	if max <= 0 {
@@ -194,7 +195,9 @@ func (r *OutboxRelay) Fail(ctx context.Context, id uuid.UUID, errMsg string) (in
 			       status = CASE WHEN attempts >= $4 THEN 'DEAD' ELSE 'PENDING' END
 			 WHERE id = $1
 			   AND lease_owner = $2
-			   AND status = 'PENDING'`,
+			   AND status = 'PENDING'
+			   AND processing_until IS NOT NULL
+			   AND processing_until >= now()`,
 			id, r.Owner, errMsg, max)
 		if err != nil {
 			return err
