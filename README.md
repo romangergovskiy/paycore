@@ -15,7 +15,7 @@
 Нужен Go 1.24+. Для интеграционных тестов — Docker (PostgreSQL 16 в testcontainers).
 
 ```sh
-cp .env.example .env   # задать PAYCORE_AUTH_JWT_SECRET и PAYCORE_ACCOUNTS_CURSOR_SECRET (≥ 32 байт)
+cp .env.example .env   # JWT ≥32 байт; PAYCORE_ACCOUNTS_CURSOR_SECRET — standard Base64 ровно 32 байт (openssl rand -base64 32)
 make run               # http://localhost:8080/livez
 make check             # gofmt, go vet, staticcheck (если установлен), тесты с -race
 ```
@@ -39,7 +39,7 @@ make migrate-status
 | `GET /api/v1/accounts` | Список своих счетов (Bearer, CUSTOMER) |
 | `GET /api/v1/accounts/{id}` | Свой счёт |
 | `GET /api/v1/accounts/{id}/balance` | Баланс (int64 минорные единицы) |
-| `GET /api/v1/accounts/{id}/statement` | Выписка (keyset, HMAC-signed opaque `cursor`) |
+| `GET /api/v1/accounts/{id}/statement` | Выписка (keyset, AES-256-GCM opaque `cursor`) |
 
 Остальной Accounts HTTP (`POST /api/v1/accounts`, Block/Unblock/Close, Admin accounts) не в этом этапе. Открытие счёта через API блокируется [Q-13](docs/architecture/open-questions.md#q-13): формат `account_number` не решён, генерация номера не добавлена.
 

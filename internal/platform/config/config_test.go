@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"strings"
@@ -8,16 +9,21 @@ import (
 	"time"
 )
 
-// testJWTSecret and testCursorSecret are 32 ASCII bytes; they are not production secrets.
+// testJWTSecret is 32 ASCII bytes. testCursorKey is the decoded AES-256 key;
+// testCursorSecretB64 is its standard Base64 env value. Not production secrets.
 const (
-	testJWTSecret    = "0123456789abcdef0123456789abcdef"
-	testCursorSecret = "paycore-accounts-cursor-secret!!"
+	testJWTSecret = "0123456789abcdef0123456789abcdef"
+	testCursorKey = "paycore-accounts-cursor-secret!!"
 )
+
+func testCursorSecretB64() string {
+	return base64.StdEncoding.EncodeToString([]byte(testCursorKey))
+}
 
 func withRequiredSecrets(env ...string) []string {
 	return append(append([]string{}, env...),
 		varAuthJWTSecret+"="+testJWTSecret,
-		varAccountsCursorSecret+"="+testCursorSecret,
+		varAccountsCursorSecret+"="+testCursorSecretB64(),
 	)
 }
 
@@ -47,7 +53,7 @@ func TestLoadDefaults(t *testing.T) {
 			StatementTimeout: 5 * time.Second,
 		},
 		Auth:            Auth{JWTSecret: testJWTSecret},
-		Accounts:        Accounts{CursorSecret: testCursorSecret},
+		Accounts:        Accounts{CursorSecret: testCursorKey},
 		ShutdownTimeout: 20 * time.Second,
 	}
 	if cfg != want {
@@ -131,25 +137,26 @@ func TestLoadWriteTimeoutMustExceedRequestTimeout(t *testing.T) {
 }
 
 func TestLoadJWTSecret(t *testing.T) {
-	_, err := Load([]string{varAccountsCursorSecret + "=" + testCursorSecret})
+	b64 := testCursorSecretB64()
+	_, err := Load([]string{varAccountsCursorSecret + "=" + b64})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAuthJWTSecret) {
 		t.Fatalf("missing JWT secret: %v", err)
 	}
-	if strings.Contains(err.Error(), testJWTSecret) || strings.Contains(err.Error(), testCursorSecret) {
+	if strings.Contains(err.Error(), testJWTSecret) || strings.Contains(err.Error(), b64) || strings.Contains(err.Error(), testCursorKey) {
 		t.Error("error leaked a secret value")
 	}
 
-	_, err = Load([]string{varAuthJWTSecret + "=", varAccountsCursorSecret + "=" + testCursorSecret})
+	_, err = Load([]string{varAuthJWTSecret + "=", varAccountsCursorSecret + "=" + b64})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAuthJWTSecret) {
 		t.Fatalf("empty JWT secret: %v", err)
 	}
 
-	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret[:31], varAccountsCursorSecret + "=" + testCursorSecret})
+	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret[:31], varAccountsCursorSecret + "=" + b64})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAuthJWTSecret) {
 		t.Fatalf("31-byte JWT secret: %v", err)
 	}
 
-	cfg, err := Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + testCursorSecret})
+	cfg, err := Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + b64})
 	if err != nil {
 		t.Fatalf("32-byte secrets: %v", err)
 	}
@@ -157,18 +164,19 @@ func TestLoadJWTSecret(t *testing.T) {
 		t.Errorf("JWTSecret not stored")
 	}
 
-	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + testCursorSecret, "PAYCORE_AUTH_ISSUER=other"})
+	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + b64, "PAYCORE_AUTH_ISSUER=other"})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "PAYCORE_AUTH_ISSUER: unknown variable") {
 		t.Fatalf("unknown AUTH var: %v", err)
 	}
 }
 
 func TestLoadCursorSecret(t *testing.T) {
+	b64 := testCursorSecretB64()
 	_, err := Load([]string{varAuthJWTSecret + "=" + testJWTSecret})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAccountsCursorSecret) {
 		t.Fatalf("missing cursor secret: %v", err)
 	}
-	if strings.Contains(err.Error(), testJWTSecret) || strings.Contains(err.Error(), testCursorSecret) {
+	if strings.Contains(err.Error(), testJWTSecret) || strings.Contains(err.Error(), b64) || strings.Contains(err.Error(), testCursorKey) {
 		t.Error("error leaked a secret value")
 	}
 
@@ -177,17 +185,35 @@ func TestLoadCursorSecret(t *testing.T) {
 		t.Fatalf("empty cursor secret: %v", err)
 	}
 
-	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + testCursorSecret[:31]})
+	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + "not-base64!!!"})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAccountsCursorSecret) {
-		t.Fatalf("31-byte cursor secret: %v", err)
+		t.Fatalf("invalid Base64: %v", err)
 	}
 
-	cfg, err := Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + testCursorSecret})
+	short := base64.StdEncoding.EncodeToString([]byte(testCursorKey[:31]))
+	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + short})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAccountsCursorSecret) {
+		t.Fatalf("31-byte cursor key: %v", err)
+	}
+	if strings.Contains(err.Error(), short) || strings.Contains(err.Error(), testCursorKey) {
+		t.Error("error leaked a secret value")
+	}
+
+	long := base64.StdEncoding.EncodeToString([]byte(testCursorKey + "x"))
+	_, err = Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + long})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), varAccountsCursorSecret) {
+		t.Fatalf("33-byte cursor key: %v", err)
+	}
+
+	cfg, err := Load([]string{varAuthJWTSecret + "=" + testJWTSecret, varAccountsCursorSecret + "=" + b64})
 	if err != nil {
 		t.Fatalf("32-byte cursor secret: %v", err)
 	}
-	if cfg.Accounts.CursorSecret != testCursorSecret {
-		t.Errorf("CursorSecret not stored")
+	if cfg.Accounts.CursorSecret != testCursorKey {
+		t.Errorf("CursorSecret not stored decoded")
+	}
+	if len(cfg.Accounts.CursorSecret) != cursorKeyBytes {
+		t.Errorf("decoded key len %d", len(cfg.Accounts.CursorSecret))
 	}
 	if cfg.Accounts.CursorSecret == cfg.Auth.JWTSecret {
 		t.Fatal("cursor secret must not be the JWT secret")

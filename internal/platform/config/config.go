@@ -1,10 +1,12 @@
 // Package config loads the service configuration from PAYCORE_* environment
 // variables. Most variables are optional and have a default. PAYCORE_AUTH_JWT_SECRET
-// and PAYCORE_ACCOUNTS_CURSOR_SECRET are required (≥ 32 bytes). Invalid values
-// and unknown PAYCORE_* names are reported together and wrap ErrInvalid.
+// (≥ 32 bytes) and PAYCORE_ACCOUNTS_CURSOR_SECRET (standard Base64 of exactly
+// 32 bytes) are required. Invalid values and unknown PAYCORE_* names are
+// reported together and wrap ErrInvalid.
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -52,8 +54,8 @@ type Auth struct {
 	JWTSecret string
 }
 
-// Accounts holds Accounts HTTP transport settings. The statement cursor
-// HMAC key is not the JWT secret.
+// Accounts holds Accounts HTTP transport settings. CursorSecret is the
+// decoded AES-256 key (exactly 32 bytes), not the JWT secret.
 type Accounts struct {
 	CursorSecret string
 }
@@ -116,7 +118,10 @@ const (
 	varAccountsCursorSecret = prefix + "ACCOUNTS_CURSOR_SECRET"
 )
 
-const secretMinBytes = 32
+const (
+	secretMinBytes = 32
+	cursorKeyBytes = 32
+)
 
 var known = []string{
 	varEnv, varHTTPAddr, varHTTPReadHeader, varHTTPRead, varHTTPWrite, varHTTPIdle,
@@ -195,10 +200,7 @@ func Load(environ []string) (Config, error) {
 	if len(cfg.Auth.JWTSecret) < secretMinBytes {
 		p.fail(varAuthJWTSecret, fmt.Sprintf("must be at least %d bytes", secretMinBytes))
 	}
-	cfg.Accounts.CursorSecret = p.str(varAccountsCursorSecret, "")
-	if len(cfg.Accounts.CursorSecret) < secretMinBytes {
-		p.fail(varAccountsCursorSecret, fmt.Sprintf("must be at least %d bytes", secretMinBytes))
-	}
+	cfg.Accounts.CursorSecret = p.cursorKey(varAccountsCursorSecret)
 
 	var unknown []string
 	for k := range vars {
@@ -231,6 +233,20 @@ func (p *parser) str(name, def string) string {
 		return v
 	}
 	return def
+}
+
+func (p *parser) cursorKey(name string) string {
+	raw := strings.TrimSpace(p.str(name, ""))
+	if raw == "" {
+		p.fail(name, fmt.Sprintf("must be standard Base64 of exactly %d bytes", cursorKeyBytes))
+		return ""
+	}
+	key, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil || len(key) != cursorKeyBytes {
+		p.fail(name, fmt.Sprintf("must be standard Base64 of exactly %d bytes", cursorKeyBytes))
+		return ""
+	}
+	return string(key)
 }
 
 func (p *parser) duration(name string, def time.Duration) time.Duration {

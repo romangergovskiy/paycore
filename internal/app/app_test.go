@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,9 +21,13 @@ import (
 )
 
 const (
-	testJWTSecret    = "0123456789abcdef0123456789abcdef"
-	testCursorSecret = "paycore-accounts-cursor-secret!!"
+	testJWTSecret = "0123456789abcdef0123456789abcdef"
+	testCursorKey = "paycore-accounts-cursor-secret!!"
 )
+
+func testCursorSecretB64() string {
+	return base64.StdEncoding.EncodeToString([]byte(testCursorKey))
+}
 
 func TestRunInvalidConfig(t *testing.T) {
 	err := Run(context.Background(), []string{"PAYCORE_ENV=staging"}, io.Discard)
@@ -34,7 +39,7 @@ func TestRunInvalidConfig(t *testing.T) {
 func TestRunShortJWTSecret(t *testing.T) {
 	err := Run(context.Background(), []string{
 		"PAYCORE_AUTH_JWT_SECRET=0123456789abcdef0123456789abcde",
-		"PAYCORE_ACCOUNTS_CURSOR_SECRET=" + testCursorSecret,
+		"PAYCORE_ACCOUNTS_CURSOR_SECRET=" + testCursorSecretB64(),
 	}, io.Discard)
 	if !errors.Is(err, config.ErrInvalid) {
 		t.Fatalf("Run = %v, want config.ErrInvalid", err)
@@ -51,7 +56,7 @@ func TestRunMissingCursorSecret(t *testing.T) {
 	if !strings.Contains(err.Error(), "PAYCORE_ACCOUNTS_CURSOR_SECRET") {
 		t.Fatalf("Run = %v, want cursor secret", err)
 	}
-	if strings.Contains(err.Error(), testCursorSecret) {
+	if strings.Contains(err.Error(), testCursorKey) || strings.Contains(err.Error(), testCursorSecretB64()) {
 		t.Errorf("cursor secret leaked in error: %v", err)
 	}
 }
@@ -60,7 +65,7 @@ func TestRunProductionRequiresPostgresDSN(t *testing.T) {
 	err := Run(context.Background(), []string{
 		"PAYCORE_ENV=production",
 		"PAYCORE_AUTH_JWT_SECRET=" + testJWTSecret,
-		"PAYCORE_ACCOUNTS_CURSOR_SECRET=" + testCursorSecret,
+		"PAYCORE_ACCOUNTS_CURSOR_SECRET=" + testCursorSecretB64(),
 	}, io.Discard)
 	if !errors.Is(err, config.ErrInvalid) {
 		t.Fatalf("Run = %v, want config.ErrInvalid", err)
@@ -74,7 +79,7 @@ func TestRunListenError(t *testing.T) {
 	err := Run(context.Background(), []string{
 		"PAYCORE_HTTP_ADDR=127.0.0.1:-1",
 		"PAYCORE_AUTH_JWT_SECRET=" + testJWTSecret,
-		"PAYCORE_ACCOUNTS_CURSOR_SECRET=" + testCursorSecret,
+		"PAYCORE_ACCOUNTS_CURSOR_SECRET=" + testCursorSecretB64(),
 	}, io.Discard)
 	if err == nil || errors.Is(err, config.ErrInvalid) {
 		t.Fatalf("Run = %v, want listen error", err)
@@ -103,7 +108,7 @@ func runServesWithoutDSN(t *testing.T, env string) {
 			"PAYCORE_HTTP_ADDR=127.0.0.1:0",
 			"PAYCORE_SHUTDOWN_TIMEOUT=2s",
 			"PAYCORE_AUTH_JWT_SECRET=" + testJWTSecret,
-			"PAYCORE_ACCOUNTS_CURSOR_SECRET=" + testCursorSecret,
+			"PAYCORE_ACCOUNTS_CURSOR_SECRET=" + testCursorSecretB64(),
 		}, logW)
 		logW.Close()
 	}()
@@ -177,7 +182,7 @@ func runServesWithoutDSN(t *testing.T, env string) {
 		if strings.Contains(string(raw), testJWTSecret) {
 			t.Errorf("JWT secret leaked in logs: %s", raw)
 		}
-		if strings.Contains(string(raw), testCursorSecret) {
+		if strings.Contains(string(raw), testCursorKey) || strings.Contains(string(raw), testCursorSecretB64()) {
 			t.Errorf("cursor secret leaked in logs: %s", raw)
 		}
 		if rec["msg"] == "auth runtime ready" {

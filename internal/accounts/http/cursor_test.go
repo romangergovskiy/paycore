@@ -1,9 +1,11 @@
 package accountshttp
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -23,7 +25,7 @@ func testStatementCursor() application.StatementCursor {
 	}
 }
 
-func otherCursorSecret() []byte {
+func otherCursorKey() []byte {
 	return []byte("other-accounts-cursor-secret-32b")
 }
 
@@ -34,16 +36,75 @@ func TestCursorCodecValidRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if raw == "" || strings.Contains(raw, cur.ID.String()) || strings.Contains(raw, "{") {
-		t.Fatalf("token not opaque enough: %q", raw)
-	}
 	got, err := c.Decode(raw)
 	if err != nil || got == nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.ID != cur.ID || !got.CreatedAt.Equal(cur.CreatedAt) {
-		t.Fatalf("got %+v want %+v", got, cur)
+	if !got.CreatedAt.Equal(cur.CreatedAt) {
+		t.Fatalf("timestamp got %s want %s", got.CreatedAt, cur.CreatedAt)
 	}
+	if got.ID != cur.ID {
+		t.Fatalf("uuid got %s want %s", got.ID, cur.ID)
+	}
+}
+
+func TestCursorCodecConfidentiality(t *testing.T) {
+	c := testCursor(t)
+	cur := testStatementCursor()
+	raw, err := c.Encode(cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(bin, cur.ID[:]) {
+		t.Fatal("uuid plaintext after Base64 decode")
+	}
+	ts := make([]byte, cursorTimeSize)
+	binary.BigEndian.PutUint64(ts, uint64(cur.CreatedAt.UnixNano()))
+	if bytes.Contains(bin, ts) {
+		t.Fatal("timestamp plaintext after Base64 decode")
+	}
+}
+
+func TestCursorCodecFreshNonce(t *testing.T) {
+	c := testCursor(t)
+	cur := testStatementCursor()
+	a, err := c.Encode(cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := c.Encode(cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("same payload produced identical tokens")
+	}
+	ab, err := base64.RawURLEncoding.DecodeString(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bb, err := base64.RawURLEncoding.DecodeString(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(ab[1:1+cursorNonceSize], bb[1:1+cursorNonceSize]) {
+		t.Fatal("nonce reused")
+	}
+	if bytes.Equal(ab[1+cursorNonceSize:], bb[1+cursorNonceSize:]) {
+		t.Fatal("ciphertext reused")
+	}
+}
+
+func TestCursorCodecTamperedCiphertext(t *testing.T) {
+	assertTamper400(t, 1+cursorNonceSize)
+}
+
+func TestCursorCodecTamperedNonce(t *testing.T) {
+	assertTamper400(t, 1)
 }
 
 func TestCursorCodecEmptyIsFirstPage(t *testing.T) {
@@ -52,18 +113,6 @@ func TestCursorCodecEmptyIsFirstPage(t *testing.T) {
 	if err != nil || got != nil {
 		t.Fatalf("empty: %+v %v", got, err)
 	}
-}
-
-func TestCursorCodecTamperedTimestamp(t *testing.T) {
-	assertTamper400(t, 5)
-}
-
-func TestCursorCodecTamperedUUID(t *testing.T) {
-	assertTamper400(t, 12)
-}
-
-func TestCursorCodecTamperedSignature(t *testing.T) {
-	assertTamper400(t, cursorRawSize-1)
 }
 
 func TestCursorCodecCorruptBase64(t *testing.T) {
@@ -78,20 +127,24 @@ func TestCursorCodecCorruptBase64(t *testing.T) {
 
 func TestCursorCodecUnknownVersion(t *testing.T) {
 	c := testCursor(t)
-	cur := testStatementCursor()
-	payload := encodeCursorPayload(2, cur.CreatedAt, cur.ID)
-	mac := hmac.New(sha256.New, []byte(testCursorSecret))
-	_, _ = mac.Write(payload)
-	raw := append(payload, mac.Sum(nil)...)
-	tok := base64.RawURLEncoding.EncodeToString(raw)
+	raw, err := c.Encode(testStatementCursor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin[0] = 2
+	tok := base64.RawURLEncoding.EncodeToString(bin)
 	if _, err := c.Decode(tok); !errors.Is(err, domain.ErrInvalidAccount) {
 		t.Fatalf("v2: %v", err)
 	}
 }
 
-func TestCursorCodecWrongSecret(t *testing.T) {
+func TestCursorCodecWrongKey(t *testing.T) {
 	a := testCursor(t)
-	b, err := NewCursorCodec(otherCursorSecret())
+	b, err := NewCursorCodec(otherCursorKey())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +153,7 @@ func TestCursorCodecWrongSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := b.Decode(raw); !errors.Is(err, domain.ErrInvalidAccount) {
-		t.Fatalf("other secret: %v", err)
+		t.Fatalf("other key: %v", err)
 	}
 }
 
@@ -120,21 +173,48 @@ func TestCursorCodecRejectsUnsignedJSON(t *testing.T) {
 	}
 }
 
+func TestCursorCodecRejectsHMAC(t *testing.T) {
+	c := testCursor(t)
+	cur := testStatementCursor()
+	payload := make([]byte, 1+cursorTimeSize+cursorUUIDSize)
+	payload[0] = 1
+	binary.BigEndian.PutUint64(payload[1:1+cursorTimeSize], uint64(cur.CreatedAt.UnixNano()))
+	copy(payload[1+cursorTimeSize:], cur.ID[:])
+	mac := hmac.New(sha256.New, []byte(testCursorSecret))
+	_, _ = mac.Write(payload)
+	legacy := base64.RawURLEncoding.EncodeToString(append(payload, mac.Sum(nil)...))
+	if _, err := c.Decode(legacy); !errors.Is(err, domain.ErrInvalidAccount) {
+		t.Fatalf("legacy HMAC: %v", err)
+	}
+}
+
 func TestCursorCodecBoundInputSize(t *testing.T) {
 	c := testCursor(t)
 	huge := strings.Repeat("A", maxStatementCursorChars+1)
 	if _, err := c.Decode(huge); !errors.Is(err, domain.ErrInvalidAccount) {
 		t.Fatalf("oversized: %v", err)
 	}
+	short := base64.RawURLEncoding.EncodeToString([]byte{cursorVersion, 1, 2, 3})
+	if _, err := c.Decode(short); !errors.Is(err, domain.ErrInvalidAccount) {
+		t.Fatalf("too short: %v", err)
+	}
+	long := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, cursorRawSize+1))
+	if _, err := c.Decode(long); !errors.Is(err, domain.ErrInvalidAccount) {
+		t.Fatalf("too long: %v", err)
+	}
 }
 
-func TestNewCursorCodecRequiresSecret(t *testing.T) {
+func TestNewCursorCodecRequiresKey(t *testing.T) {
 	_, err := NewCursorCodec([]byte(testCursorSecret[:31]))
 	if err == nil {
-		t.Fatal("short secret accepted")
+		t.Fatal("short key accepted")
 	}
 	if strings.Contains(err.Error(), testCursorSecret) {
 		t.Fatalf("secret leaked: %v", err)
+	}
+	_, err = NewCursorCodec(append([]byte(testCursorSecret), 'x'))
+	if err == nil {
+		t.Fatal("long key accepted")
 	}
 }
 
