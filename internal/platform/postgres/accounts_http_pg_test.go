@@ -235,6 +235,7 @@ func TestAccountsHTTPPostgres(t *testing.T) {
 			base + "?limit=101",
 			base + "?limit=abc",
 			base + "?cursor=not-a-cursor",
+			base + "?cursor=eyJjcmVhdGVkX2F0IjoiMjAyNi0wMS0wMVQwMDowMDowMFoiLCJpZCI6ImNjY2NjY2NjLWNjY2MtNGNjYy04Y2NjLTAwMDAwMDAwMDAwMSJ9",
 		} {
 			rec := env.do(http.MethodGet, path, "", authz(a), nextTestIP())
 			assertAuthError(t, rec, http.StatusBadRequest, domain.CodeInvalidAccount)
@@ -321,11 +322,15 @@ func newAccountsHTTPEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *
 		MaxBodyBytes:   1 << 20,
 	}, log)
 	authhttp.Mount(srv, authhttp.New(uow, base, signer, read))
+	cursors, err := accountshttp.NewCursorCodec([]byte("paycore-accounts-cursor-secret!!"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	accountshttp.Mount(srv, accountshttp.New(accountsapp.Service{
 		Store:      NewAccounts(pool),
 		Balances:   NewAccountBalances(pool),
 		Statements: NewAccountStatements(pool),
-	}, signer, read))
+	}, signer, read, cursors))
 
 	inner := &authHTTPEnv{
 		t:      t,
@@ -337,6 +342,7 @@ func newAccountsHTTPEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *
 		issuer: base.Issuer,
 		banned: []string{
 			httpPGPassword, httpPGJWTSecret, appPassword, ownerPassword,
+			"paycore-accounts-cursor-secret!!",
 			"Authorization", "$argon2id$", "pgx",
 		},
 	}

@@ -92,6 +92,14 @@ func Run(ctx context.Context, environ []string, logOut io.Writer) error {
 		return err
 	}
 
+	var cursors *accountshttp.CursorCodec
+	if auth != nil {
+		cursors, err = accountshttp.NewCursorCodec([]byte(cfg.Accounts.CursorSecret))
+		if err != nil {
+			return err
+		}
+	}
+
 	ln, err := net.Listen("tcp", cfg.HTTP.Addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.HTTP.Addr, err)
@@ -106,7 +114,7 @@ func Run(ctx context.Context, environ []string, logOut io.Writer) error {
 			Store:      postgres.NewAccounts(pool),
 			Balances:   postgres.NewAccountBalances(pool),
 			Statements: postgres.NewAccountStatements(pool),
-		}, auth.parser, auth.read))
+		}, auth.parser, auth.read, cursors))
 		log.Info("auth runtime ready")
 	}
 

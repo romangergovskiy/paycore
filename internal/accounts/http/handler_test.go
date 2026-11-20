@@ -2,6 +2,7 @@ package accountshttp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -24,7 +25,10 @@ import (
 	"github.com/romangergovskiy/paycore/pkg/money"
 )
 
-const testJWTSecret = "0123456789abcdef0123456789abcdef"
+const (
+	testJWTSecret    = "0123456789abcdef0123456789abcdef"
+	testCursorSecret = "paycore-accounts-cursor-secret!!"
+)
 
 type fakeSessions struct {
 	mu   sync.Mutex
@@ -69,6 +73,15 @@ func testPrincipal(roles ...authdomain.Role) authdomain.Principal {
 		SessionID: uuid.MustParse("22222222-2222-2222-2222-222222222222"),
 		Roles:     roles,
 	}
+}
+
+func testCursor(t *testing.T) *CursorCodec {
+	t.Helper()
+	c, err := NewCursorCodec([]byte(testCursorSecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 func testSigner(t *testing.T) *authcrypto.HS256 {
@@ -152,6 +165,7 @@ func newTestHandler(t *testing.T, p authdomain.Principal) (Handler, string) {
 		},
 		parser:   testSigner(t),
 		sessions: sessions,
+		cursors:  testCursor(t),
 	}
 	return h, signToken(t, testSigner(t), p)
 }
@@ -487,11 +501,116 @@ func TestForeignAccountIsNotFound(t *testing.T) {
 	}
 }
 
+func TestStatementHTTPSignedCursorPagination(t *testing.T) {
+	p := testPrincipal()
+	h, tok := newTestHandler(t, p)
+	acc := testAccount(p.UserID)
+	id1 := uuid.MustParse("cccccccc-cccc-4ccc-8ccc-000000000001")
+	id2 := uuid.MustParse("cccccccc-cccc-4ccc-8ccc-000000000002")
+	t1 := acc.CreatedAt
+	t2 := acc.CreatedAt.Add(time.Second)
+	var got []*application.StatementCursor
+	h.statement = func(_ *http.Request, _, _ uuid.UUID, q application.StatementQuery) (application.StatementPage, error) {
+		cp := q.Cursor
+		if cp != nil {
+			v := *cp
+			got = append(got, &v)
+		} else {
+			got = append(got, nil)
+		}
+		if q.Cursor == nil {
+			return application.StatementPage{
+				Lines: []application.StatementLine{{
+					ID: id1, Kind: ledger.KindAvailable, Side: ledger.Credit, Amount: 1, Currency: "RUB",
+					CreatedAt: t1, PostedAt: t1,
+				}},
+				NextCursor: &application.StatementCursor{CreatedAt: t1, ID: id1},
+			}, nil
+		}
+		return application.StatementPage{
+			Lines: []application.StatementLine{{
+				ID: id2, Kind: ledger.KindAvailable, Side: ledger.Credit, Amount: 2, Currency: "RUB",
+				CreatedAt: t2, PostedAt: t2,
+			}},
+		}, nil
+	}
+
+	base := "/api/v1/accounts/" + acc.ID.String() + "/statement?limit=1"
+	first := serveAccounts(t, h, http.MethodGet, base, bearer(tok))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first = %d %s", first.Code, first.Body)
+	}
+	var page struct {
+		Lines      []statementLineDTO `json:"lines"`
+		NextCursor string             `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Lines) != 1 || page.NextCursor == "" {
+		t.Fatalf("first page %+v", page)
+	}
+	if strings.Contains(page.NextCursor, id1.String()) {
+		t.Fatalf("cursor leaked uuid: %s", page.NextCursor)
+	}
+
+	second := serveAccounts(t, h, http.MethodGet, base+"&cursor="+page.NextCursor, bearer(tok))
+	if second.Code != http.StatusOK {
+		t.Fatalf("second = %d %s", second.Code, second.Body)
+	}
+	page = struct {
+		Lines      []statementLineDTO `json:"lines"`
+		NextCursor string             `json:"next_cursor"`
+	}{}
+	if err := json.Unmarshal(second.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Lines) != 1 || page.Lines[0].Amount != 2 || page.NextCursor != "" {
+		t.Fatalf("second page %+v", page)
+	}
+	if len(got) != 2 || got[0] != nil || got[1] == nil || got[1].ID != id1 {
+		t.Fatalf("cursors seen %+v", got)
+	}
+	if got[1].ID == id2 {
+		t.Fatal("duplicate/skip")
+	}
+}
+
+func TestStatementHTTPTamperedCursor(t *testing.T) {
+	p := testPrincipal()
+	h, tok := newTestHandler(t, p)
+	acc := testAccount(p.UserID)
+	raw, err := h.cursors.Encode(application.StatementCursor{
+		CreatedAt: acc.CreatedAt, ID: acc.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin[len(bin)-1] ^= 0x01
+	tampered := base64.RawURLEncoding.EncodeToString(bin)
+	rec := serveAccounts(t, h, http.MethodGet, "/api/v1/accounts/"+acc.ID.String()+"/statement?cursor="+tampered, bearer(tok))
+	e := decodeErr(t, rec)
+	if rec.Code != http.StatusBadRequest || e.Error.Code != domain.CodeInvalidAccount {
+		t.Fatalf("tampered = %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestBadCursorAndLimit(t *testing.T) {
 	p := testPrincipal()
 	h, tok := newTestHandler(t, p)
 	acc := testAccount(p.UserID)
 	base := "/api/v1/accounts/" + acc.ID.String() + "/statement"
+	legacy, err := json.Marshal(map[string]string{
+		"created_at": acc.CreatedAt.UTC().Format(time.RFC3339Nano),
+		"id":         acc.ID.String(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, path := range []string{
 		base + "?limit=0",
 		base + "?limit=101",
@@ -499,6 +618,8 @@ func TestBadCursorAndLimit(t *testing.T) {
 		base + "?limit=-1",
 		base + "?cursor=not-a-cursor",
 		base + "?cursor=not-base64",
+		base + "?cursor=" + base64.RawURLEncoding.EncodeToString(legacy),
+		base + "?cursor=" + strings.Repeat("A", 129),
 	} {
 		rec := serveAccounts(t, h, http.MethodGet, path, bearer(tok))
 		if rec.Code != http.StatusBadRequest {
@@ -523,8 +644,8 @@ func TestPostAccountsNotMounted(t *testing.T) {
 }
 
 func TestNewWiresUseCases(t *testing.T) {
-	h := New(application.Service{}, testSigner(t), newFakeSessions())
-	if h.list == nil || h.get == nil || h.balance == nil || h.statement == nil {
+	h := New(application.Service{}, testSigner(t), newFakeSessions(), testCursor(t))
+	if h.list == nil || h.get == nil || h.balance == nil || h.statement == nil || h.cursors == nil {
 		t.Fatal("New left a use case unset")
 	}
 }
@@ -541,20 +662,17 @@ func TestMountWithoutParser(t *testing.T) {
 	}
 }
 
-func TestStatementCursorRoundTrip(t *testing.T) {
-	cur := application.StatementCursor{
-		CreatedAt: time.Date(2026, 11, 20, 12, 0, 0, 123, time.UTC),
-		ID:        uuid.MustParse("cccccccc-cccc-4ccc-8ccc-000000000001"),
-	}
-	raw, err := encodeStatementCursor(cur)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := decodeStatementCursor(raw)
-	if err != nil || got == nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.ID != cur.ID || !got.CreatedAt.Equal(cur.CreatedAt) {
-		t.Fatalf("got %+v want %+v", got, cur)
+func TestMountWithoutCursorCodec(t *testing.T) {
+	p := testPrincipal()
+	h, _ := newTestHandler(t, p)
+	h.cursors = nil
+	s := httpserver.New(config.HTTP{Addr: "127.0.0.1:0", MaxBodyBytes: 1 << 20},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	Mount(s, h)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unmounted without codec = %d", rec.Code)
 	}
 }

@@ -22,11 +22,12 @@ type Handler struct {
 	statement func(*http.Request, uuid.UUID, uuid.UUID, application.StatementQuery) (application.StatementPage, error)
 	parser    httpserver.AccessParser
 	sessions  httpserver.SessionValidator
+	cursors   *CursorCodec
 }
 
-// New wires customer account reads to application. parser and sessions are
-// required; BearerAuth uses ValidateSession (store roles), not JWT.roles.
-func New(svc application.Service, parser httpserver.AccessParser, sessions httpserver.SessionValidator) Handler {
+// New wires customer account reads to application. parser, sessions, and
+// cursors are required; BearerAuth uses ValidateSession (store roles), not JWT.roles.
+func New(svc application.Service, parser httpserver.AccessParser, sessions httpserver.SessionValidator, cursors *CursorCodec) Handler {
 	return Handler{
 		list: func(r *http.Request, userID uuid.UUID) ([]domain.Account, error) {
 			return svc.ListByOwner(r.Context(), &userID, nil)
@@ -42,13 +43,14 @@ func New(svc application.Service, parser httpserver.AccessParser, sessions https
 		},
 		parser:   parser,
 		sessions: sessions,
+		cursors:  cursors,
 	}
 }
 
 // Mount registers customer GET /api/v1/accounts routes. CUSTOMER is required.
 // POST /accounts is not mounted (Q-13: account_number format is unset).
 func Mount(s *httpserver.Server, h Handler) {
-	if h.parser == nil || h.sessions == nil {
+	if h.parser == nil || h.sessions == nil || h.cursors == nil {
 		return
 	}
 	authn := httpserver.BearerAuth(h.parser, h.sessions)
@@ -126,7 +128,7 @@ func (h Handler) getStatement(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	q, err := parseStatementQuery(r)
+	q, err := h.parseStatementQuery(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -138,7 +140,7 @@ func (h Handler) getStatement(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := statementResponse{Lines: statementLineDTOs(page.Lines)}
 	if page.NextCursor != nil {
-		cur, err := encodeStatementCursor(*page.NextCursor)
+		cur, err := h.cursors.Encode(*page.NextCursor)
 		if err != nil {
 			writeError(w, r, err)
 			return
@@ -165,7 +167,7 @@ func parsePathUUID(r *http.Request) (uuid.UUID, error) {
 	return id, nil
 }
 
-func parseStatementQuery(r *http.Request) (application.StatementQuery, error) {
+func (h Handler) parseStatementQuery(r *http.Request) (application.StatementQuery, error) {
 	q := application.StatementQuery{Limit: application.DefaultStatementLimit}
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -174,7 +176,7 @@ func parseStatementQuery(r *http.Request) (application.StatementQuery, error) {
 		}
 		q.Limit = n
 	}
-	cur, err := decodeStatementCursor(r.URL.Query().Get("cursor"))
+	cur, err := h.cursors.Decode(r.URL.Query().Get("cursor"))
 	if err != nil {
 		return application.StatementQuery{}, err
 	}

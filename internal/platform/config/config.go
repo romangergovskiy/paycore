@@ -1,7 +1,7 @@
 // Package config loads the service configuration from PAYCORE_* environment
 // variables. Most variables are optional and have a default. PAYCORE_AUTH_JWT_SECRET
-// is required (≥ 32 bytes). Invalid values and unknown PAYCORE_* names are
-// reported together and wrap ErrInvalid.
+// and PAYCORE_ACCOUNTS_CURSOR_SECRET are required (≥ 32 bytes). Invalid values
+// and unknown PAYCORE_* names are reported together and wrap ErrInvalid.
 package config
 
 import (
@@ -42,6 +42,7 @@ type Config struct {
 	Log             Log
 	Postgres        Postgres
 	Auth            Auth
+	Accounts        Accounts
 	ShutdownTimeout time.Duration
 }
 
@@ -49,6 +50,12 @@ type Config struct {
 // D-41 constants in authcrypto/domain, not environment variables.
 type Auth struct {
 	JWTSecret string
+}
+
+// Accounts holds Accounts HTTP transport settings. The statement cursor
+// HMAC key is not the JWT secret.
+type Accounts struct {
+	CursorSecret string
 }
 
 // Postgres holds pool and DSN settings. The API uses DSN (paycore_app).
@@ -84,38 +91,39 @@ type Log struct {
 }
 
 const (
-	varEnv              = prefix + "ENV"
-	varHTTPAddr         = prefix + "HTTP_ADDR"
-	varHTTPReadHeader   = prefix + "HTTP_READ_HEADER_TIMEOUT"
-	varHTTPRead         = prefix + "HTTP_READ_TIMEOUT"
-	varHTTPWrite        = prefix + "HTTP_WRITE_TIMEOUT"
-	varHTTPIdle         = prefix + "HTTP_IDLE_TIMEOUT"
-	varHTTPRequest      = prefix + "HTTP_REQUEST_TIMEOUT"
-	varHTTPMaxBodyBytes = prefix + "HTTP_MAX_BODY_BYTES"
-	varShutdownTimeout  = prefix + "SHUTDOWN_TIMEOUT"
-	varLogLevel         = prefix + "LOG_LEVEL"
-	varLogFormat        = prefix + "LOG_FORMAT"
-	varPostgresDSN      = prefix + "POSTGRES_DSN"
-	varPostgresMigrate  = prefix + "POSTGRES_MIGRATE_DSN"
-	varPostgresAdmin    = prefix + "POSTGRES_ADMIN_DSN"
-	varPostgresReadonly = prefix + "POSTGRES_READONLY_DSN"
-	varPostgresMaxConns = prefix + "POSTGRES_MAX_CONNS"
-	varPostgresMinConns = prefix + "POSTGRES_MIN_CONNS"
-	varPostgresLifetime = prefix + "POSTGRES_MAX_CONN_LIFETIME"
-	varPostgresIdle     = prefix + "POSTGRES_MAX_CONN_IDLE_TIME"
-	varPostgresLock     = prefix + "POSTGRES_LOCK_TIMEOUT"
-	varPostgresStmt     = prefix + "POSTGRES_STATEMENT_TIMEOUT"
-	varAuthJWTSecret    = prefix + "AUTH_JWT_SECRET"
+	varEnv                  = prefix + "ENV"
+	varHTTPAddr             = prefix + "HTTP_ADDR"
+	varHTTPReadHeader       = prefix + "HTTP_READ_HEADER_TIMEOUT"
+	varHTTPRead             = prefix + "HTTP_READ_TIMEOUT"
+	varHTTPWrite            = prefix + "HTTP_WRITE_TIMEOUT"
+	varHTTPIdle             = prefix + "HTTP_IDLE_TIMEOUT"
+	varHTTPRequest          = prefix + "HTTP_REQUEST_TIMEOUT"
+	varHTTPMaxBodyBytes     = prefix + "HTTP_MAX_BODY_BYTES"
+	varShutdownTimeout      = prefix + "SHUTDOWN_TIMEOUT"
+	varLogLevel             = prefix + "LOG_LEVEL"
+	varLogFormat            = prefix + "LOG_FORMAT"
+	varPostgresDSN          = prefix + "POSTGRES_DSN"
+	varPostgresMigrate      = prefix + "POSTGRES_MIGRATE_DSN"
+	varPostgresAdmin        = prefix + "POSTGRES_ADMIN_DSN"
+	varPostgresReadonly     = prefix + "POSTGRES_READONLY_DSN"
+	varPostgresMaxConns     = prefix + "POSTGRES_MAX_CONNS"
+	varPostgresMinConns     = prefix + "POSTGRES_MIN_CONNS"
+	varPostgresLifetime     = prefix + "POSTGRES_MAX_CONN_LIFETIME"
+	varPostgresIdle         = prefix + "POSTGRES_MAX_CONN_IDLE_TIME"
+	varPostgresLock         = prefix + "POSTGRES_LOCK_TIMEOUT"
+	varPostgresStmt         = prefix + "POSTGRES_STATEMENT_TIMEOUT"
+	varAuthJWTSecret        = prefix + "AUTH_JWT_SECRET"
+	varAccountsCursorSecret = prefix + "ACCOUNTS_CURSOR_SECRET"
 )
 
-const jwtSecretMinBytes = 32
+const secretMinBytes = 32
 
 var known = []string{
 	varEnv, varHTTPAddr, varHTTPReadHeader, varHTTPRead, varHTTPWrite, varHTTPIdle,
 	varHTTPRequest, varHTTPMaxBodyBytes, varShutdownTimeout, varLogLevel, varLogFormat,
 	varPostgresDSN, varPostgresMigrate, varPostgresAdmin, varPostgresReadonly,
 	varPostgresMaxConns, varPostgresMinConns, varPostgresLifetime, varPostgresIdle,
-	varPostgresLock, varPostgresStmt, varAuthJWTSecret,
+	varPostgresLock, varPostgresStmt, varAuthJWTSecret, varAccountsCursorSecret,
 }
 
 // Load builds a Config from environ, given in the os.Environ "KEY=value" form.
@@ -184,8 +192,12 @@ func Load(environ []string) (Config, error) {
 	}
 
 	cfg.Auth.JWTSecret = p.str(varAuthJWTSecret, "")
-	if len(cfg.Auth.JWTSecret) < jwtSecretMinBytes {
-		p.fail(varAuthJWTSecret, fmt.Sprintf("must be at least %d bytes", jwtSecretMinBytes))
+	if len(cfg.Auth.JWTSecret) < secretMinBytes {
+		p.fail(varAuthJWTSecret, fmt.Sprintf("must be at least %d bytes", secretMinBytes))
+	}
+	cfg.Accounts.CursorSecret = p.str(varAccountsCursorSecret, "")
+	if len(cfg.Accounts.CursorSecret) < secretMinBytes {
+		p.fail(varAccountsCursorSecret, fmt.Sprintf("must be at least %d bytes", secretMinBytes))
 	}
 
 	var unknown []string

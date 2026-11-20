@@ -1,11 +1,6 @@
 package accountshttp
 
 import (
-	"encoding/base64"
-	"encoding/json"
-	"errors"
-	"io"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -51,11 +46,6 @@ type statementResponse struct {
 	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
-type statementCursorJSON struct {
-	CreatedAt string `json:"created_at"`
-	ID        string `json:"id"`
-}
-
 func accountDTOFrom(acc domain.Account) accountDTO {
 	return accountDTO{
 		ID:            acc.ID,
@@ -90,50 +80,4 @@ func statementLineDTOs(in []application.StatementLine) []statementLineDTO {
 		})
 	}
 	return out
-}
-
-func encodeStatementCursor(c application.StatementCursor) (string, error) {
-	payload, err := json.Marshal(statementCursorJSON{
-		CreatedAt: c.CreatedAt.UTC().Format(time.RFC3339Nano),
-		ID:        c.ID.String(),
-	})
-	if err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(payload), nil
-}
-
-const maxStatementCursorChars = 256
-
-func decodeStatementCursor(raw string) (*application.StatementCursor, error) {
-	if raw == "" {
-		return nil, nil
-	}
-	if len(raw) > maxStatementCursorChars {
-		return nil, domain.ErrInvalidAccount
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(raw)
-	if err != nil {
-		return nil, domain.ErrInvalidAccount
-	}
-	dec := json.NewDecoder(strings.NewReader(string(payload)))
-	dec.DisallowUnknownFields()
-	var body statementCursorJSON
-	if err := dec.Decode(&body); err != nil {
-		return nil, domain.ErrInvalidAccount
-	}
-	var extra json.RawMessage
-	err = dec.Decode(&extra)
-	if err == nil || !errors.Is(err, io.EOF) {
-		return nil, domain.ErrInvalidAccount
-	}
-	created, err := time.Parse(time.RFC3339Nano, body.CreatedAt)
-	if err != nil {
-		return nil, domain.ErrInvalidAccount
-	}
-	id, err := uuid.Parse(body.ID)
-	if err != nil || id == uuid.Nil {
-		return nil, domain.ErrInvalidAccount
-	}
-	return &application.StatementCursor{CreatedAt: created.UTC(), ID: id}, nil
 }
