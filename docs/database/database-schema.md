@@ -1,6 +1,6 @@
 # Схема базы данных PostgreSQL
 
-Статус: **принято для MVP** (этап 2). SQL-фрагменты иллюстративны. В коде миграции `00002_accounts.sql` и `00003_ledger.sql` создают таблицы `accounts` и `ledger` (этап 3.3); `00004_ledger_functions.sql` создаёт шлюзовые функции (этап 3.4, [D-40](../architecture/decisions.md#d-40)); `00005_auth.sql` расширяет `auth` (этап 3.20). У финансовых миграций нет Goose Down ([D-38](../architecture/decisions.md#d-38)). Ревью схемы — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
+Статус: **принято для MVP** (этап 2). SQL-фрагменты иллюстративны. В коде миграции `00002_accounts.sql` и `00003_ledger.sql` создают таблицы `accounts` и `ledger` (этап 3.3); `00004_ledger_functions.sql` создаёт шлюзовые функции (этап 3.4, [D-40](../architecture/decisions.md#d-40)); `00005_auth.sql` расширяет `auth` (этап 3.20); `00007_platform_idempotency_outbox.sql` создаёт `platform.idempotency_keys`, `outbox_events`, `inbox_messages` (этап A). У финансовых миграций нет Goose Down ([D-38](../architecture/decisions.md#d-38)). Ревью схемы — [../architecture/ledger-schema-review.md](../architecture/ledger-schema-review.md).
 
 Связанные документы: [er-diagram.md](er-diagram.md), [data-integrity.md](data-integrity.md) (CHECK, FK, индексы, права), [concurrency.md](concurrency.md), [../architecture/ledger-model.md](../architecture/ledger-model.md), [../architecture/decisions.md](../architecture/decisions.md).
 
@@ -267,6 +267,8 @@ EXCLUDE USING gist (
 Начавший действовать тариф неизменяем. Изменение — новая версия и аудит (ТЗ §2.7, §2.12).
 
 ## 10. Схема `platform`
+
+Реализация этапа A: `migrations/00007_platform_idempotency_outbox.sql`. `webhook_deliveries` в этом этапе нет.
 
 ### `idempotency_keys` ([concurrency.md §4](concurrency.md#4-идемпотентность-http))
 

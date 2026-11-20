@@ -446,6 +446,9 @@ func TestAuthDDL(t *testing.T) {
 		defer conn.Close(ctx)
 		insertAuthUser(t, ctx, conn, mustNewID(t).String())
 		if err := Down(ctx, c2.owner); err != nil {
+			t.Fatalf("00007 down: %v", err)
+		}
+		if err := Down(ctx, c2.owner); err != nil {
 			t.Fatalf("00006 down with empty history: %v", err)
 		}
 		v, verr := CurrentVersion(ctx, c2.owner)
@@ -472,6 +475,9 @@ func TestAuthDDL(t *testing.T) {
 		}
 		if err := Up(ctx, c2.owner); err != nil {
 			t.Fatalf("up: %v", err)
+		}
+		if err := Down(ctx, c2.owner); err != nil {
+			t.Fatalf("00007 down: %v", err)
 		}
 		if err := Down(ctx, c2.owner); err != nil {
 			t.Fatalf("00006 down: %v", err)
@@ -532,6 +538,13 @@ func TestAuthDDL(t *testing.T) {
 			) VALUES ($1, $2, $2, 'ACTIVE', 'LOCKED', 'policy')`, mustNewID(t), uid); err != nil {
 			t.Fatal(err)
 		}
+		if err := Down(ctx, c2.owner); err != nil {
+			t.Fatalf("00007 down: %v", err)
+		}
+		v, verr := CurrentVersion(ctx, c2.owner)
+		if verr != nil || v != 6 {
+			t.Fatalf("version after 00007 down = %d, %v", v, verr)
+		}
 		err := Down(ctx, c2.owner)
 		if err == nil {
 			t.Fatal("00006 down succeeded with history rows")
@@ -539,7 +552,7 @@ func TestAuthDDL(t *testing.T) {
 		if !strings.Contains(strings.ToLower(err.Error()), "refused") {
 			t.Fatalf("down error = %v", err)
 		}
-		v, verr := CurrentVersion(ctx, c2.owner)
+		v, verr = CurrentVersion(ctx, c2.owner)
 		if verr != nil || v != 6 {
 			t.Fatalf("version after refused 00006 down = %d, %v", v, verr)
 		}
