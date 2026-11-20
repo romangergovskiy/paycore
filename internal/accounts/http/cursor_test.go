@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +17,14 @@ import (
 
 	"github.com/romangergovskiy/paycore/internal/accounts/application"
 	"github.com/romangergovskiy/paycore/internal/accounts/domain"
+	"github.com/romangergovskiy/paycore/internal/platform/apperror"
 )
+
+type errReader struct{ err error }
+
+func (r errReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
 
 func testStatementCursor() application.StatementCursor {
 	return application.StatementCursor{
@@ -201,6 +209,35 @@ func TestCursorCodecBoundInputSize(t *testing.T) {
 	long := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, cursorRawSize+1))
 	if _, err := c.Decode(long); !errors.Is(err, domain.ErrInvalidAccount) {
 		t.Fatalf("too long: %v", err)
+	}
+}
+
+func TestCursorCodecNonceFailureIsInternal(t *testing.T) {
+	c := testCursor(t)
+	c.nonceRand = errReader{err: io.ErrUnexpectedEOF}
+	_, err := c.Encode(testStatementCursor())
+	if err == nil {
+		t.Fatal("expected nonce error")
+	}
+	if errors.Is(err, domain.ErrInvalidAccount) {
+		t.Fatal("nonce failure mapped to ErrInvalidAccount")
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("unwrap: %v", err)
+	}
+	mapped := mapError(err)
+	var e *apperror.Error
+	if !errors.As(mapped, &e) {
+		t.Fatalf("mapError type %T", mapped)
+	}
+	if e.Kind != apperror.KindInternal || e.Code != apperror.CodeInternal {
+		t.Fatalf("kind=%v code=%s", e.Kind, e.Code)
+	}
+	if e.PublicMessage() != "Internal server error." {
+		t.Fatalf("public = %q", e.PublicMessage())
+	}
+	if strings.Contains(e.PublicMessage(), "nonce") || strings.Contains(e.PublicMessage(), "EOF") {
+		t.Fatalf("leaked details: %q", e.PublicMessage())
 	}
 }
 

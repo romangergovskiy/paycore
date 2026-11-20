@@ -576,6 +576,34 @@ func TestStatementHTTPSignedCursorPagination(t *testing.T) {
 	}
 }
 
+func TestStatementNonceFailureHTTP500(t *testing.T) {
+	p := testPrincipal()
+	h, tok := newTestHandler(t, p)
+	acc := testAccount(p.UserID)
+	h.cursors.nonceRand = errReader{err: io.ErrUnexpectedEOF}
+	h.statement = func(_ *http.Request, _, _ uuid.UUID, _ application.StatementQuery) (application.StatementPage, error) {
+		return application.StatementPage{
+			Lines: []application.StatementLine{{
+				ID: acc.ID, Kind: ledger.KindAvailable, Side: ledger.Credit, Amount: 1, Currency: "RUB",
+				CreatedAt: acc.CreatedAt, PostedAt: acc.CreatedAt,
+			}},
+			NextCursor: &application.StatementCursor{CreatedAt: acc.CreatedAt, ID: acc.ID},
+		}, nil
+	}
+	rec := serveAccounts(t, h, http.MethodGet, "/api/v1/accounts/"+acc.ID.String()+"/statement", bearer(tok))
+	raw := rec.Body.String()
+	e := decodeErr(t, rec)
+	if rec.Code != http.StatusInternalServerError || e.Error.Code != "INTERNAL_ERROR" {
+		t.Fatalf("nonce fail = %d %s", rec.Code, raw)
+	}
+	if e.Error.Message != "Internal server error." {
+		t.Fatalf("public message = %q", e.Error.Message)
+	}
+	if strings.Contains(raw, "nonce") || strings.Contains(raw, "EOF") || strings.Contains(raw, io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("leaked details: %s", raw)
+	}
+}
+
 func TestStatementHTTPTamperedCursor(t *testing.T) {
 	p := testPrincipal()
 	h, tok := newTestHandler(t, p)

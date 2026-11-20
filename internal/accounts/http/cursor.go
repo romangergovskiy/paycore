@@ -32,7 +32,8 @@ const (
 // CursorCodec encrypts statement keyset cursors with AES-256-GCM for HTTP.
 // Application StatementCursor is unchanged.
 type CursorCodec struct {
-	gcm cipher.AEAD
+	gcm       cipher.AEAD
+	nonceRand io.Reader // tests only; nil means crypto/rand.Reader
 }
 
 // NewCursorCodec builds an AES-256-GCM codec. key must be exactly 32 bytes.
@@ -65,8 +66,8 @@ func (c *CursorCodec) Encode(cur application.StatementCursor) (string, error) {
 	}
 	plain := encodeCursorPlaintext(cur.CreatedAt.UTC(), cur.ID)
 	nonce := make([]byte, cursorNonceSize)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", domain.ErrInvalidAccount
+	if _, err := io.ReadFull(c.nonceSource(), nonce); err != nil {
+		return "", fmt.Errorf("accounts: cursor nonce: %w", err)
 	}
 	aad := []byte{cursorVersion}
 	sealed := c.gcm.Seal(nil, nonce, plain, aad)
@@ -114,6 +115,13 @@ func (c *CursorCodec) Decode(raw string) (*application.StatementCursor, error) {
 		return nil, domain.ErrInvalidAccount
 	}
 	return &application.StatementCursor{CreatedAt: created, ID: id}, nil
+}
+
+func (c *CursorCodec) nonceSource() io.Reader {
+	if c != nil && c.nonceRand != nil {
+		return c.nonceRand
+	}
+	return rand.Reader
 }
 
 func encodeCursorPlaintext(created time.Time, id uuid.UUID) []byte {
