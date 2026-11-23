@@ -16,8 +16,9 @@ fin_re='^(AGENTS\.md|\.cursor/|docs/ai/|\.github/|migrations/|internal/ledger/|i
 # Ordinary docs only. Not AGENTS.md, not docs/ai/, not financial-invariant docs.
 docs_re='^(README\.md|docs/architecture/README\.md)$'
 
-# Ordinary tests allowlist. Any other *_test.go is financial (fail-safe).
-tests_re='^(internal/platform/apperror/|internal/platform/config/|internal/platform/postgres/dsn_test\.go$)'
+# Ordinary tests allowlist: test files only, not production .go in those dirs.
+# Any other path is financial (fail-safe).
+tests_re='^(internal/platform/apperror/.*_test\.go$|internal/platform/config/.*_test\.go$|internal/platform/postgres/dsn_test\.go$)'
 
 while IFS= read -r f; do
   [ -z "$f" ] && continue

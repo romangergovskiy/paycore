@@ -9,7 +9,7 @@ Three classes. **Ambiguous = financial.**
 | Class | What | Merge |
 |---|---|---|
 | **Docs + safe config** | Ordinary docs only (`README.md`, `docs/architecture/README.md`). Not `AGENTS.md`, not `docs/ai/`, not `.cursor/`, not workflows. | Conditions for a **future** auto-merge: required `check` green + independent review (or user waiver for a trivial docs fix). **Not enabled:** GitHub `allow_auto_merge` stays **false** because the platform cannot restrict auto-merge by path. |
-| **Tests / non-critical tech** | Allowlist only: `internal/platform/apperror/`, `internal/platform/config/`, `internal/platform/postgres/dsn_test.go`. Any other test path is financial. | Future auto-merge only if: `check` green; independent review with no blocking findings; `retry_count` ≤ 3; not a new product stage blocked by Q-xx. **Not enabled.** |
+| **Tests / non-critical tech** | Allowlist of **test files only**: `internal/platform/apperror/*_test.go`, `internal/platform/config/*_test.go`, `internal/platform/postgres/dsn_test.go`. Production `.go` in those dirs is financial. Any other test path is financial. | Future auto-merge only if: `check` green; independent review with no blocking findings; `retry_count` ≤ 3; not a new product stage blocked by Q-xx. **Not enabled.** |
 | **Financial / ledger** | Ledger, ledger **tests**, CI, migrations, security/auth, payments/transfers/refunds/limits, financial-invariant docs, `.cursor/`, `AGENTS.md`, `docs/ai/`, `.github/` (agent/CI behavior), balances, fees, holds, payouts, simulator top-up, grants, `SECURITY DEFINER` | **Never auto-merge.** Human confirmation required. Extra review in [REVIEW_RULES.md](REVIEW_RULES.md). |
 
 Path hints (non-exhaustive; the labeler is fail-safe): `internal/ledger/` (including `*_test.go`), `internal/platform/postgres/{ledger,post_journal,account,accounts,idempotency,outbox,inbox}*`, `internal/platform/{idempotency,outbox,inbox}/`, `internal/app/`, `migrations/**`, `internal/auth/`, `internal/accounts/`, `pkg/money/`, future `internal/simulator/` `internal/transfers/` `internal/payments/` `internal/refunds/` `internal/payouts/`, [../architecture/financial-invariants-testing.md](../architecture/financial-invariants-testing.md), [../database/concurrency.md](../database/concurrency.md), `.github/workflows/ci.yml`, `.cursor/environment.json`, `AGENTS.md`, `docs/ai/**`.
@@ -51,7 +51,7 @@ Branches `feat/` `fix/` `docs/` only. No `cursor/` prefix, no Cursor trailers. E
 | May proceed without flipping `user_allowed_next` | Must stop until the user sets the flag / answers Q-xx |
 |---|---|
 | Docs/STATE/automation-infra already specified (this classifier, STATE refresh, review rules) | Remaining Stage B **product** work (`audit.audit_logs`, Block/Unblock/Close HTTP, Open HTTP) |
-| Ordinary non-financial tests on the classifier allowlist (e.g. `internal/platform/apperror/`); not remaining-B or money tests | Stage **C** and any monetary HTTP |
+| Ordinary non-financial **test files** on the classifier allowlist (e.g. `internal/platform/apperror/*_test.go`); not remaining-B or money tests | Stage **C** and any monetary HTTP |
 | | Inventing Q-xx answers; closing Q-12 / Q-13 / Q-30; new product behaviour not in D-xx |
 
 Open HTTP stays blocked by Q-13 and Q-30. Docs/STATE/automation-infra is not a product stage.

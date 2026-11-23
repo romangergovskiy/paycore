@@ -16,7 +16,7 @@ Do not fill this file from chat. **Before every task**, reconcile this file agai
 | `next_task` | Remaining Stage B after user approval: min `audit.audit_logs` + Block/Unblock/Close HTTP. **Open waits on Q-13.** **Do not start Stage C.** Do not start remaining B from this automation-infra PR. |
 | `user_allowed_next` | `false` |
 | `status` | `review` (waiting for independent review of [#50](https://github.com/romangergovskiy/paycore/pull/50); do not merge; do not start Stage B/C) |
-| `lock` | `branch=docs/automation-hardening`, `pr=50`, `retry_count=1`, `started_at=2026-11-23`. Resume this PR for review fixes; do not open a second PR for the same slice. |
+| `lock` | `branch=docs/automation-hardening`, `pr=50`, `retry_count=2`, `started_at=2026-11-23`. Resume this PR for review fixes; do not open a second PR for the same slice. |
 | `last_check_date` | `2026-11-23` |
 | `ci_on_main` | success — https://github.com/romangergovskiy/paycore/actions/runs/45120378724 (`headSha` = `85e5fe07d93482980e66d4d65a0471efb42904e3`) |
 | `github_protection` | Ruleset `protect-main` id `27877702` active; required context `check`; `required_approving_review_count=0`; `require_code_owner_review=false`; `bypass_actors=[]`; `allow_auto_merge=false`; `delete_branch_on_merge=true`. Classic branch-protection API 404. |
