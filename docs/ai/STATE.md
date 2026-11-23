@@ -10,7 +10,7 @@ Do not fill this file from chat. Re-query `git fetch origin main` and `gh` befor
 | `last_confirmed_main_at` | `2026-11-23T05:51:26Z` (merge of [PR #47](https://github.com/romangergovskiy/paycore/pull/47)) |
 | `current_stage` | `B-remainder` |
 | `last_completed_stage` | Stage A ([PR #45](https://github.com/romangergovskiy/paycore/pull/45) MERGED `2026-11-20T06:19:29Z`) + Stage B-GET ([PR #46](https://github.com/romangergovskiy/paycore/pull/46) MERGED `2026-11-20T07:35:16Z`). Docs memory files ([PR #47](https://github.com/romangergovskiy/paycore/pull/47) MERGED `2026-11-23T05:51:26Z`, merge commit `85e5fe07d93482980e66d4d65a0471efb42904e3`) — not a product stage. |
-| `open_prs` | none (`gh pr list --state open` at last check) |
+| `open_prs` | none (`gh pr list --state open` at last check; PR #47 is MERGED, not open) |
 | `unfinished_work` | Stage B remainder: `POST /accounts` (Open), Block/Unblock/Close HTTP, Admin accounts HTTP, `audit.audit_logs`. Then Stage C `SIM_TOPUP` (**not started**; not allowed). |
 | `blockers` | [Q-13](../architecture/open-questions.md#q-13) (account number format) and [Q-30](../architecture/open-questions.md#q-30) (RUB confirmation) block **Open HTTP**. Do not close them here. [Q-12](../architecture/open-questions.md#q-12) blocks Stage C seed amounts. |
 | `next_task` | Remaining Stage B after user approval: min `audit.audit_logs` + Block/Unblock/Close HTTP. **Open waits on Q-13.** **Do not start Stage C.** |
