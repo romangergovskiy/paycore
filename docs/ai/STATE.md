@@ -10,13 +10,13 @@ Do not fill this file from chat. **Before every task**, reconcile this file agai
 | `last_confirmed_main_at` | `2026-11-23T05:51:26Z` (merge of [PR #47](https://github.com/romangergovskiy/paycore/pull/47)) |
 | `current_stage` | `B-remainder` |
 | `last_completed_stage` | Stage A ([PR #45](https://github.com/romangergovskiy/paycore/pull/45) MERGED `2026-11-20T06:19:29Z`) + Stage B-GET ([PR #46](https://github.com/romangergovskiy/paycore/pull/46) MERGED `2026-11-20T07:35:16Z`). Docs memory files ([PR #47](https://github.com/romangergovskiy/paycore/pull/47) MERGED `2026-11-23T05:51:26Z`, merge commit `85e5fe07d93482980e66d4d65a0471efb42904e3`) — not a product stage. |
-| `open_prs` | [#48](https://github.com/romangergovskiy/paycore/pull/48) `docs/ai-state-after-47` OPEN (STATE-only; stale `open_prs: none` vs live GitHub). [#49](https://github.com/romangergovskiy/paycore/pull/49) `docs/ai-automation-loop` OPEN (`docs-class`). This branch `docs/automation-hardening` is intended to supersede both (user closes #48/#49; agents must not close them). |
+| `open_prs` | [#50](https://github.com/romangergovskiy/paycore/pull/50) `docs/automation-hardening` OPEN, label `financial` (supersedes #48/#49; user closes those). [#48](https://github.com/romangergovskiy/paycore/pull/48) `docs/ai-state-after-47` still OPEN. [#49](https://github.com/romangergovskiy/paycore/pull/49) `docs/ai-automation-loop` still OPEN (`docs-class`). |
 | `unfinished_work` | Stage B remainder: `POST /accounts` (Open), Block/Unblock/Close HTTP, Admin accounts HTTP, `audit.audit_logs`. Then Stage C `SIM_TOPUP` (**not started**; not allowed). |
 | `blockers` | [Q-13](../architecture/open-questions.md#q-13) (account number format) and [Q-30](../architecture/open-questions.md#q-30) (RUB confirmation) block **Open HTTP**. Do not close them here. [Q-12](../architecture/open-questions.md#q-12) blocks Stage C seed amounts. |
 | `next_task` | Remaining Stage B after user approval: min `audit.audit_logs` + Block/Unblock/Close HTTP. **Open waits on Q-13.** **Do not start Stage C.** Do not start remaining B from this automation-infra PR. |
 | `user_allowed_next` | `false` |
-| `status` | `in_progress` (automation-hardening docs/classifier; not a product stage) |
-| `lock` | `branch=docs/automation-hardening`, `retry_count=0`, `started_at=2026-11-23`. Resume this branch; do not open a second hardening PR. |
+| `status` | `review` (waiting for independent review of [#50](https://github.com/romangergovskiy/paycore/pull/50); do not merge; do not start Stage B/C) |
+| `lock` | `branch=docs/automation-hardening`, `pr=50`, `retry_count=0`, `started_at=2026-11-23`. Resume this PR for review fixes; do not open a second PR for the same slice. |
 | `last_check_date` | `2026-11-23` |
 | `ci_on_main` | success — https://github.com/romangergovskiy/paycore/actions/runs/45120378724 (`headSha` = `85e5fe07d93482980e66d4d65a0471efb42904e3`) |
 | `github_protection` | Ruleset `protect-main` id `27877702` active; required context `check`; `required_approving_review_count=0`; `require_code_owner_review=false`; `bypass_actors=[]`; `allow_auto_merge=false`; `delete_branch_on_merge=true`. Classic branch-protection API 404. |
