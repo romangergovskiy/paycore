@@ -18,6 +18,8 @@ MVP работает с виртуальными деньгами: источн�
 | [ledger-schema-review.md](ledger-schema-review.md) | Ревью окончательной SQL-схемы Ledger после этапа 3.2: вердикт, расхождения с кодом, план грантов по таблице |
 | [identity-auth.md](identity-auth.md) | Identity/Auth: границы, сущности, токены, Argon2id, RBAC, SQL, application и HTTP-контракты, лимиты, угрозы, тесты |
 | [auth-http-integration-plan.md](auth-http-integration-plan.md) | План этапа 3.26: HTTP Identity/Auth (3.26.1–3.26.6 в коде) |
+| [../ai/STATE.md](../ai/STATE.md) | Состояние для агентов (SHA `main`, этап, PR) — не ADR |
+| [../../AGENTS.md](../../AGENTS.md) | Правила coding agents; дорожная карта A–N — [../ai/ROADMAP.md](../ai/ROADMAP.md) |
 
 Модель данных — в [../database/README.md](../database/README.md).
 

@@ -9,6 +9,7 @@
 - [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md) — техническое задание.
 - [docs/architecture/](docs/architecture/README.md) — решения, финансовая модель, потоки денег, план тестирования.
 - [docs/database/](docs/database/README.md) — схема, целостность, конкурентный доступ.
+- [AGENTS.md](AGENTS.md) — инструкции для coding agents; факты GitHub — [docs/ai/STATE.md](docs/ai/STATE.md); этапы A–N — [docs/ai/ROADMAP.md](docs/ai/ROADMAP.md).
 
 ## Запуск
 
