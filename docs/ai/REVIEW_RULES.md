@@ -12,7 +12,7 @@ GitHub Checks **name / required context: `check`** (the job id). Do not require 
 
 That job does **not** judge architecture, L1…L8, or financial invariants. Do not write “reviewed by CI”. After push, cite the check URL for **this** head SHA.
 
-Labeler [`.github/workflows/pr-class-labels.yml`](../../.github/workflows/pr-class-labels.yml) does not skip `check`. Ambiguous diffs and ledger tests are `financial`, not `tests-class`.
+Labeler [`.github/workflows/pr-class-labels.yml`](../../.github/workflows/pr-class-labels.yml) does not skip `check`. `tests-class` is an allowlist. Ambiguous diffs, ledger tests, postgres journal/accounts tests, idempotency/outbox tests, and `internal/app/` tests are `financial`.
 
 ## Who reviews
 

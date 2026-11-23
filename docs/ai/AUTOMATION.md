@@ -57,9 +57,9 @@ Do not use Cursor “PR Routing & Approval” auto-approve. Do not treat impleme
 
 Script [`.github/scripts/classify-pr-paths.sh`](../../.github/scripts/classify-pr-paths.sh), workflow [`.github/workflows/pr-class-labels.yml`](../../.github/workflows/pr-class-labels.yml) (runs on PR opened / synchronize / reopened / ready_for_review **after this file is on `main`**).
 
-- **Ambiguous → financial.**
-- Ledger, ledger tests, CI, migrations, security/auth, payments/transfers/refunds/limits, financial-invariant docs, `.cursor/`, `AGENTS.md`, `docs/ai/`, `.github/` (workflows, CODEOWNERS, classifier) → **not** `docs-class` / `tests-class`.
-- Tests covering financial invariants (including `internal/ledger/**_test.go`) ≠ `tests-class`.
+- **Ambiguous → financial.** Empty path list → `financial`.
+- `docs-class` and `tests-class` are **allowlists**. `tests-class` is only `internal/platform/apperror/`, `internal/platform/config/`, and `internal/platform/postgres/dsn_test.go`. Any other `*_test.go` (postgres `post_journal` / `accounts_*` / balances, idempotency/outbox, `internal/app/`, ledger, auth) is **`financial`**, not `tests-class`.
+- Ledger, CI, migrations, security/auth, money paths, financial-invariant docs, `.cursor/`, `AGENTS.md`, `docs/ai/`, `.github/` → **not** `docs-class` / `tests-class`.
 - Labels are advisory. They do not merge and do not skip `check`.
 
 Tests: `go test ./internal/ci/prclass` (also part of `make check`).

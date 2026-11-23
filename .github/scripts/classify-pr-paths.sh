@@ -9,16 +9,15 @@ docs_only=1
 tests_only=1
 n=0
 
-# Never auto docs-class / tests-class. Includes ledger tests, CI, migrations,
-# security/auth, money HTTP, financial-invariant docs, agent memory, Cursor
-# config, and workflows/scripts that change agent or CI behavior.
-fin_re='^(AGENTS\.md|\.cursor/|docs/ai/|\.github/|migrations/|internal/ledger/|internal/platform/postgres/ledger|internal/simulator/|internal/transfers/|internal/payments/|internal/refunds/|internal/payouts/|internal/limits/|internal/auth/|internal/identity/|internal/platform/authcrypto/|internal/platform/httpserver/auth|internal/platform/postgres/auth|internal/accounts/|internal/ci/|pkg/money/|docs/architecture/ledger|docs/architecture/money-flows|docs/architecture/chart-of-accounts|docs/architecture/financial-invariants|docs/architecture/ledger-schema|docs/architecture/identity-auth|docs/database/concurrency\.md|docs/database/data-integrity)'
+# Never auto docs-class / tests-class. Money, auth, CI/agent behavior, migrations,
+# postgres journal/accounts/idempotency/outbox, app wiring, agent memory.
+fin_re='^(AGENTS\.md|\.cursor/|docs/ai/|\.github/|migrations/|internal/ledger/|internal/platform/postgres/ledger|internal/platform/postgres/post_journal|internal/platform/postgres/account|internal/simulator/|internal/transfers/|internal/payments/|internal/refunds/|internal/payouts/|internal/limits/|internal/auth/|internal/identity/|internal/platform/authcrypto/|internal/platform/httpserver/|internal/platform/postgres/auth|internal/platform/idempotency/|internal/platform/outbox/|internal/platform/inbox/|internal/platform/postgres/idempotency|internal/platform/postgres/outbox|internal/platform/postgres/inbox|internal/accounts/|internal/app/|internal/ci/|cmd/migrate/|pkg/money/|docs/architecture/ledger|docs/architecture/money-flows|docs/architecture/chart-of-accounts|docs/architecture/financial-invariants|docs/architecture/ledger-schema|docs/architecture/identity-auth|docs/database/concurrency\.md|docs/database/data-integrity)'
 
 # Ordinary docs only. Not AGENTS.md, not docs/ai/, not financial-invariant docs.
 docs_re='^(README\.md|docs/architecture/README\.md)$'
 
-# Ordinary tests. Ledger / auth / money tests match fin_re first and stay financial.
-tests_re='(_test\.go$|/testdata/)'
+# Ordinary tests allowlist. Any other *_test.go is financial (fail-safe).
+tests_re='^(internal/platform/apperror/|internal/platform/config/|internal/platform/postgres/dsn_test\.go$)'
 
 while IFS= read -r f; do
   [ -z "$f" ] && continue
