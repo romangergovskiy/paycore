@@ -1,0 +1,59 @@
+# Advisory P-01 class labels. Does not skip tests and does not merge.
+name: pr-class-labels
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Label financial / docs-class / tests-class
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          git fetch origin "${GITHUB_BASE_REF}" --depth=1
+          financial=0
+          docs_only=1
+          tests_only=1
+          n=0
+          fin_re='^(internal/ledger/|internal/platform/postgres/ledger|migrations/00003|migrations/00004|internal/simulator/|internal/transfers/|internal/payments/|internal/refunds/|internal/payouts/|docs/architecture/ledger|docs/architecture/money-flows\.md|docs/architecture/chart-of-accounts\.md|docs/architecture/financial-invariants|docs/database/concurrency\.md)'
+          docs_re='^(AGENTS\.md|README\.md|docs/ai/|docs/architecture/README\.md|\.cursor/|\.github/workflows/pr-class-labels\.yml)'
+          tests_re='(_test\.go$|/testdata/|\.github/workflows/ci\.yml$)'
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            n=$((n + 1))
+            if echo "$f" | grep -Eq "$fin_re"; then
+              financial=1
+            fi
+            if ! echo "$f" | grep -Eq "$docs_re"; then
+              docs_only=0
+            fi
+            if ! echo "$f" | grep -Eq "$tests_re"; then
+              tests_only=0
+            fi
+          done < <(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD")
+          if [ "$n" -eq 0 ]; then
+            echo "no files"
+            exit 0
+          fi
+          # Ambiguous (not docs-only and not tests-only) counts as financial.
+          if [ "$financial" -eq 1 ] || { [ "$docs_only" -eq 0 ] && [ "$tests_only" -eq 0 ]; }; then
+            class=financial
+          elif [ "$docs_only" -eq 1 ]; then
+            class=docs-class
+          else
+            class=tests-class
+          fi
+          echo "class=$class"
+          gh pr edit "$PR_NUMBER" --remove-label financial --remove-label docs-class --remove-label tests-class || true
+          gh pr edit "$PR_NUMBER" --add-label "$class"

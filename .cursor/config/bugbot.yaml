@@ -1,0 +1,5 @@
+# Autofix off for this repo (including financial PRs). Dashboard cannot be
+# raised above this for autofix.mode. See docs/ai/DECISIONS.md P-01.
+version: 1
+autofix:
+  mode: disabled
