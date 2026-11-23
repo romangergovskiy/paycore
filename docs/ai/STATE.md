@@ -18,7 +18,7 @@ Do not fill this file from chat. Re-query `git fetch origin main` and `gh` befor
 | `status` | `idle` |
 | `lock` | `null` |
 | `last_check_date` | `2026-11-23` |
-| `ci_on_main` | **not claimed green.** Push-to-`main` run for `85e5fe07d93482980e66d4d65a0471efb42904e3` was `in_progress` at last check: https://github.com/romangergovskiy/paycore/actions/runs/45120378724. PR #47 `pull_request` check on head `519b363e3b7fce872b78936495e16e48e9bd88a9` concluded success: https://github.com/romangergovskiy/paycore/actions/runs/45119977884 — that is **not** CI on the merge SHA. |
+| `ci_on_main` | success — https://github.com/romangergovskiy/paycore/actions/runs/45120378724 (`headSha` = `85e5fe07d93482980e66d4d65a0471efb42904e3`) |
 
 ## What is on `main` (code facts)
 
