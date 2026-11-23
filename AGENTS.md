@@ -2,35 +2,40 @@
 
 Read this file first, then [docs/ai/STATE.md](docs/ai/STATE.md). GitHub + these files are memory. Do not rely on chat history. The Cursor Context store is **not** visible to a Cloud Agent that only clones this repository.
 
-## Read order
+Operating model: **event-driven**. PR opened → independent review. CI `check` failed → implementer fix ≤3. PR merged → STATE update from GitHub, then **stop**. **No infinite cron. No auto next roadmap stage.**
 
-1. [docs/ai/STATE.md](docs/ai/STATE.md) — confirmed `main` SHA, stage, open PRs, lock, next task.
-2. Confirm GitHub: `git fetch origin main` and `gh pr list --state open`. If they disagree with STATE, refresh STATE from GitHub **before** implementing. Do not implement from a stale SHA.
-3. If `status` is `in_progress` and `lock` is fresh (see [docs/ai/AUTOMATION.md](docs/ai/AUTOMATION.md)), **do not start a second implementer**. Resume that lock’s branch/PR or stop.
+## Before every task (mandatory)
+
+1. Read [docs/ai/STATE.md](docs/ai/STATE.md).
+2. Reconcile it against **live GitHub** (`git fetch origin main`, `git rev-parse origin/main`, `gh pr list --state open`, checks on that SHA). **GitHub is the source of truth.** Local STATE is not enough to start work. If they disagree, refresh STATE from GitHub first. Do not implement from a stale SHA.
+3. If `status` is `in_progress` or `review` and `lock` is fresh (see [docs/ai/AUTOMATION.md](docs/ai/AUTOMATION.md)), **do not start a second implementer**. Resume that lock’s branch/PR or stop.
 4. [docs/ai/ROADMAP.md](docs/ai/ROADMAP.md) — stages A–N and what is allowed next.
-5. [docs/ai/AUTOMATION.md](docs/ai/AUTOMATION.md) — loop, recovery, caps, merge policy (design only until the user enables it).
-6. [docs/ai/REVIEW_RULES.md](docs/ai/REVIEW_RULES.md) — independent review. CI is not an AI review.
-7. Product ADRs and schema: [docs/ai/ARCHITECTURE.md](docs/ai/ARCHITECTURE.md) → existing `docs/architecture/` and `docs/database/`. Do not invent ADRs.
+5. [docs/ai/AUTOMATION.md](docs/ai/AUTOMATION.md) — loop, recovery, caps, merge classes.
+6. [docs/ai/REVIEW_RULES.md](docs/ai/REVIEW_RULES.md) — independent review. CI is not an AI review. Do not self-review.
+7. Product ADRs: [docs/ai/ARCHITECTURE.md](docs/ai/ARCHITECTURE.md) → `docs/architecture/` and `docs/database/`. Do not invent ADRs or Q-xx answers.
 
 ## Hard guardrails
 
 - No real payment systems, production secrets, or live customer data.
-- Do not change ledger write path, balances, fees, transfers, payments, financial migrations, or role grants unless that is the **approved** task. Those PRs need extra review and **user confirmation to merge** ([docs/ai/DECISIONS.md](docs/ai/DECISIONS.md) P-01).
-- Do not auto-merge in this repository until the user enables the merge policy. Default today: **no agent merges**.
-- Do not start Stage C, monetary HTTP, or a new product stage unless STATE `user_allowed_next` is true **and** ROADMAP lists that slice as allowed. Do not close [Q-13](docs/architecture/open-questions.md#q-13) or [Q-30](docs/architecture/open-questions.md#q-30).
-- Do not silently change architecture. New behaviour needs an existing D-xx or a user-approved Q-xx. Do not invent D-xx.
+- **Financial class never auto-merges** ([docs/ai/DECISIONS.md](docs/ai/DECISIONS.md) P-01). Ledger, balances, fees, limits, holds, payments, transfers, refunds, financial migrations, grants, `SECURITY DEFINER`, auth/security, CI/agent-behavior files, `AGENTS.md`, `docs/ai/`, `.cursor/`, anything money-adjacent. **Ambiguous = financial.** Human confirmation to merge. Agents must not merge those PRs.
+- GitHub **auto-merge stays OFF** (cannot restrict by path). Do not enable it. Do not merge from an agent unless the user explicitly asked to merge **that** PR and it is not financial.
+- Do not silently flip `user_allowed_next`. P-07: product stages (remaining Stage B, Stage C, monetary HTTP, Open HTTP) need the flag **and** ROADMAP. Docs/STATE/automation-infra is not a product stage.
+- Do not start Stage C, monetary HTTP, or remaining Stage B product work unless `user_allowed_next` is true **and** ROADMAP lists that slice as allowed. Open HTTP stays blocked by [Q-13](docs/architecture/open-questions.md#q-13) / [Q-30](docs/architecture/open-questions.md#q-30). Do not invent Q-xx answers. Do not close Q-12 / Q-13 / Q-30.
+- Do not silently change architecture. New behaviour needs an existing D-xx or a user-approved Q-xx.
 - Do not rewrite Auth, Accounts application, or the ledger gateway “while here”.
-- Do not disable tests, skip `go test -race`, or shrink CI to make a PR green. Do not invent test results. Quote the command and, after push, the GitHub check URL.
-- Do not run an infinite cron that keeps picking the next stage. Cloud Agents stop; that is expected. Resume from STATE + GitHub.
-- One implementer per task. Reviewer must not be the same agent/run as the implementer.
+- Do not disable tests, skip `go test -race`, or shrink CI. Quote the GitHub check URL for **this** head SHA. The required check context is **`check`** (job name in `.github/workflows/ci.yml`), not `ci / check`.
+- One implementer per task. Reviewer must be a **different** agent/run (or Bugbot/human). No self-review. No self-approve.
+- Fix cycles: at most **3** on the same PR, then stop (`blocked`).
+- After a confirmed merge: update STATE from GitHub, then **stop**. Do not start the next roadmap stage.
+- Cloud Agents stop; that is expected. Resume from STATE + GitHub.
 
-A slice is **not done** until: GitHub PR `state=MERGED`, `origin/main` SHA verified, CI on **that** SHA green, and STATE updated. A green PR is `merge_ready` only.
+A slice is **not done** until: GitHub PR `state=MERGED`, `origin/main` SHA verified, CI on **that** SHA green (`check`), and STATE updated. A green PR is `merge_ready` only.
 
 ## Git
 
-- Branch from current `origin/main`. Names: `feat/…`, `fix/…`, `docs/…`. **No** `cursor/` prefix, no Cursor trailers, no “Generated by” lines.
-- Commit messages in English. Author as the repo’s normal user, not a bot identity, unless the user says otherwise.
-- Do not dirty `~/paycore` if that path is the human checkout. Use a new worktree from `origin/main`. Do not reuse `stage-a-idempotency-outbox` or `stage-b-accounts-http` worktrees.
+- Branch from current `origin/main`. Names: `feat/…`, `fix/…`, `docs/…`. **No** `cursor/` prefix, no Cursor trailers.
+- Commit messages in English. Author as the repo’s normal user.
+- Do not dirty `~/paycore` if that is the human checkout. New worktree from `origin/main`. Do not reuse `stage-a-idempotency-outbox` or `stage-b-accounts-http`.
 
 ## Checks
 
@@ -38,9 +43,7 @@ A slice is **not done** until: GitHub PR `state=MERGED`, `origin/main` SHA verif
 make check   # gofmt, go vet, staticcheck, go test -race
 ```
 
-Integration tests need Docker (testcontainers, PostgreSQL 16). `make lint` skips staticcheck if it is not installed; CI installs `staticcheck@2025.1.1` and does **not** skip. Install it before claiming lint is clean.
-
-Do not claim CI is green unless you have a GitHub check URL for this head SHA.
+Integration tests need Docker (testcontainers, PostgreSQL 16). If `docker info` fails on a Cloud VM, start Docker (`sudo service docker start`) and retry. Do **not** skip PG tests to go green. CI installs `staticcheck@2025.1.1` and does not skip.
 
 ## Pointers (do not duplicate)
 
@@ -54,14 +57,14 @@ Do not claim CI is green unless you have a GitHub check URL for this head SHA.
 | Product ADRs (D-xx) | [docs/architecture/decisions.md](docs/architecture/decisions.md) |
 | Open questions | [docs/architecture/open-questions.md](docs/architecture/open-questions.md) |
 | Spec | [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md) |
-| Locks / Tx / idempotency | [docs/database/concurrency.md](docs/database/concurrency.md) |
+| Locks / Tx | [docs/database/concurrency.md](docs/database/concurrency.md) |
 | Schema | [docs/database/database-schema.md](docs/database/database-schema.md) |
 | Invariant tests | [docs/architecture/financial-invariants-testing.md](docs/architecture/financial-invariants-testing.md) |
 
 ## Cursor Cloud specific instructions
 
 - Confirm `origin/main` before branching. Ignore a stale laptop checkout.
-- On Cursor-hosted VMs, start Docker before PG tests: `sudo service docker start` (see `.cursor/environment.json`). Self-hosted workers do not read that file.
-- Generate local secrets in the VM (`openssl rand`). Never copy production `PAYCORE_*` values. `.env.example` lists required names.
-- If usage/spend limits stop the run, leave STATE accurate (`blocked` or keep the lock with the last PR) and stop. Do not loop.
-- If the UI offers a `cursor/…` branch, rename to `feat/` / `docs/` / `fix/` before push, or stop and tell the user.
+- On Cursor-hosted VMs: `.cursor/environment.json` `start` runs `sudo service docker start`. Self-hosted workers **do not** read that file — start Docker on the machine.
+- Generate local secrets in the VM (`openssl rand`). Never copy production `PAYCORE_*`.
+- If usage/spend limits stop the run, leave STATE recoverable and stop. Do not loop. Do not raise spend limits.
+- If the UI offers a `cursor/…` branch, rename to `feat/` / `docs/` / `fix/` before push, or stop.

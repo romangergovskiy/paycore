@@ -1,0 +1,11 @@
+# Prepared ownership. GitHub does not enforce this until a human turns on
+# "Require review from Code Owners" on ruleset protect-main (id 27877702).
+# Do not treat this file as a live merge block.
+#
+# GitHub cannot require reviews from the `financial` label. This user-owned
+# repository also cannot use the team `required_reviewers` ruleset rule.
+# The honest mechanism is path-based and applies to ALL pull requests (`*`).
+#
+# See docs/ai/AUTOMATION.md (GitHub protection) and docs/ai/DECISIONS.md P-12.
+
+* @romangergovskiy

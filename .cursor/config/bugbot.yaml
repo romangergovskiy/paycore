@@ -1,0 +1,8 @@
+# Autofix off for this repo (including financial PRs).
+# Bugbot reads this file from the PR *base* branch after it lands on main.
+# This file does not enable Bugbot. The dashboard enable toggle is a user click.
+# autofix.mode can lower dashboard Autofix; it cannot turn Autofix on.
+# See https://cursor.com/docs/bugbot
+version: 1
+autofix:
+  mode: disabled
