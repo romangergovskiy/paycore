@@ -1,4 +1,4 @@
 {
   "install": "go version && go install honnef.co/go/tools/cmd/staticcheck@2025.1.1",
-  "start": "sudo service docker start || true"
+  "start": "sudo service docker start || true; docker info >/dev/null 2>&1 || echo 'paycore: Docker daemon not ready; PostgreSQL testcontainers need it — do not skip go test -race'"
 }
